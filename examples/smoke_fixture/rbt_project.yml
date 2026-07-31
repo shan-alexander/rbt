@@ -2,6 +2,11 @@ name: smoke_fixture
 version: "0.0.1"
 models_dir: models
 target_path: lake/gold
+# materialize:                        # optional — omit for lake-as-truth default
+#   ref_strategy: parquet             # default: re-read written files for {{ ref() }}
+#   # ref_strategy: memtable          # opt-in: MemTable when rows < memtable_max_rows
+#   # memtable_max_rows: 50000        # default cutoff when strategy is memtable
+# See docs/REF_STRATEGY.md for bench tradeoffs.
 layers:
   staging:
     path: models/staging

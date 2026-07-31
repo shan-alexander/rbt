@@ -3,12 +3,15 @@
 pub mod bronze;
 
 use crate::core::dag::{ModelDag, OutputFormat};
-use crate::materializer::MultiFormatWriter;
+use crate::core::project::{MaterializeConfig, RbtProjectConfig, RefBackend};
+use crate::materializer::{sibling_iceberg_dir, MultiFormatWriter};
 use crate::testing::{assertions_from_model_tests, RecordBatchValidator};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
 use iceberg::Catalog;
 use iceberg_datafusion::IcebergCatalogProvider;
 use std::collections::HashSet;
@@ -98,6 +101,9 @@ impl TransformationEngine {
 
     /// Executes a full pipeline DAG tier by tier.
     ///
+    /// Loads `materialize:` policy from `rbt_project.yml` when present (defaults to
+    /// lake-as-truth Parquet re-read for `ref()`).
+    ///
     /// Before any model SQL runs, bronze sources declared in staging frontmatter are
     /// registered via [`register_bronze_sources_for_dag`].
     pub async fn execute_dag(
@@ -105,6 +111,22 @@ impl TransformationEngine {
         dag: &ModelDag,
         project_dir: impl AsRef<Path>,
         output_dir: impl AsRef<Path>,
+    ) -> Result<DagExecutionSummary> {
+        let project_dir = project_dir.as_ref();
+        let materialize = RbtProjectConfig::load(project_dir)
+            .map(|c| c.materialize)
+            .unwrap_or_default();
+        self.execute_dag_with_materialize(dag, project_dir, output_dir, &materialize)
+            .await
+    }
+
+    /// Like [`execute_dag`] but with an explicit [`MaterializeConfig`] (tests / library).
+    pub async fn execute_dag_with_materialize(
+        &self,
+        dag: &ModelDag,
+        project_dir: impl AsRef<Path>,
+        output_dir: impl AsRef<Path>,
+        materialize: &MaterializeConfig,
     ) -> Result<DagExecutionSummary> {
         let project_dir = project_dir.as_ref();
         let output_base = output_dir.as_ref();
@@ -187,7 +209,7 @@ impl TransformationEngine {
                                         result.errors.join("; ")
                                     );
                                     if tests.should_fail_on_error() {
-                                        anyhow::bail!(msg);
+                                        bail!(msg);
                                     }
                                     tracing::warn!("{}", msg);
                                 } else {
@@ -211,7 +233,7 @@ impl TransformationEngine {
                             assertions_from_model_tests(None, Some(uk.as_slice()), None);
                         let result = RecordBatchValidator::validate_batches(&batches, &assertions);
                         if result.failed_assertions > 0 {
-                            anyhow::bail!(
+                            bail!(
                                 "model '{}' grain/unique_key violated: {}",
                                 model.name,
                                 result.errors.join("; ")
@@ -220,13 +242,31 @@ impl TransformationEngine {
                     }
                 }
 
+                // Expose model for downstream {{ ref() }} per project materialize policy.
                 if !batches.is_empty() {
-                    let schema = batches[0].schema();
-                    let mem_table = MemTable::try_new(schema, vec![batches.clone()])?;
-                    // Allow re-runs in tests
-                    let _ = self.ctx.deregister_table(model.name.as_str());
-                    self.ctx
-                        .register_table(model.name.as_str(), Arc::new(mem_table))?;
+                    let backend = materialize.choose_ref_backend(row_count);
+                    register_model_for_ref(
+                        &self.ctx,
+                        &model.name,
+                        &model.output_format,
+                        &dest_path,
+                        &batches,
+                        backend,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "register model '{}' for ref() (backend={:?}, rows={})",
+                            model.name, backend, row_count
+                        )
+                    })?;
+                    tracing::debug!(
+                        model = %model.name,
+                        rows = row_count,
+                        ?backend,
+                        strategy = ?materialize.ref_strategy,
+                        "registered model for ref()"
+                    );
                 }
 
                 models_executed += 1;
@@ -240,6 +280,94 @@ impl TransformationEngine {
             bronze_sources_registered,
         })
     }
+}
+
+/// Path used to re-read a model from the lake after materialize.
+fn lake_read_path(format: &OutputFormat, dest_path: &Path) -> PathBuf {
+    match format {
+        OutputFormat::Iceberg => dest_path.join("data/part-00000.parquet"),
+        OutputFormat::ParquetAndIceberg => {
+            // Flat parquet is the primary dual-write artifact for ref().
+            if dest_path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                dest_path.to_path_buf()
+            } else {
+                dest_path.with_extension("parquet")
+            }
+        }
+        _ => dest_path.to_path_buf(),
+    }
+}
+
+/// Register a completed model so later SQL `ref('name')` resolves.
+async fn register_model_for_ref(
+    ctx: &SessionContext,
+    name: &str,
+    format: &OutputFormat,
+    dest_path: &Path,
+    batches: &[RecordBatch],
+    backend: RefBackend,
+) -> Result<()> {
+    let _ = ctx.deregister_table(name);
+
+    match backend {
+        RefBackend::MemTable => {
+            let schema = batches[0].schema();
+            let mem_table = MemTable::try_new(schema, vec![batches.to_vec()])
+                .map_err(|e| anyhow::anyhow!("MemTable::try_new: {e}"))?;
+            ctx.register_table(name, Arc::new(mem_table))
+                .map_err(|e| anyhow::anyhow!("register_table MemTable: {e}"))?;
+        }
+        RefBackend::LakeFile => match format {
+            OutputFormat::Parquet
+            | OutputFormat::ZeroCopyClone
+            | OutputFormat::Iceberg
+            | OutputFormat::ParquetAndIceberg => {
+                let mut path = lake_read_path(format, dest_path);
+                if !path.exists() && matches!(format, OutputFormat::ParquetAndIceberg) {
+                    let alt = sibling_iceberg_dir(dest_path).join("data/part-00000.parquet");
+                    if alt.exists() {
+                        path = alt;
+                    }
+                }
+                if !path.exists() {
+                    bail!(
+                        "lake file missing for ref('{}'): expected {}",
+                        name,
+                        path.display()
+                    );
+                }
+                ctx.register_parquet(
+                    name,
+                    path.to_str().unwrap_or_default(),
+                    ParquetReadOptions::default(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("register_parquet {}: {e}", path.display()))?;
+            }
+            OutputFormat::Jsonl => {
+                let p = dest_path.to_str().unwrap_or_default();
+                let opts = JsonReadOptions::default()
+                    .file_extension(".jsonl")
+                    .newline_delimited(true);
+                if let Err(e) = ctx.register_json(name, p, opts).await {
+                    tracing::debug!("jsonl register failed ({e}); retry default");
+                    ctx.register_json(name, p, JsonReadOptions::default())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("register_json: {e}"))?;
+                }
+            }
+            OutputFormat::Csv => {
+                ctx.register_csv(
+                    name,
+                    dest_path.to_str().unwrap_or_default(),
+                    CsvReadOptions::default(),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("register_csv: {e}"))?;
+            }
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -337,6 +465,119 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
             .path()
             .join("lake/silver/stg_stock_trades.parquet")
             .exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ref_via_parquet_reread_default() -> Result<()> {
+        use crate::core::project::{MaterializeConfig, RefStrategy};
+
+        let temp = tempfile::tempdir()?;
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_a",
+            "SELECT 1 AS id, 10 AS v UNION ALL SELECT 2, 20",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(temp.path().join("stg_a.parquet").to_string_lossy().into()),
+            "",
+        )?;
+        dag.add_model_with_format(
+            "tf_b",
+            "SELECT id, v * 2 AS v2 FROM {{ ref('stg_a') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(temp.path().join("tf_b.parquet").to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let mat = MaterializeConfig {
+            ref_strategy: RefStrategy::Parquet,
+            memtable_max_rows: 50_000,
+        };
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat)
+            .await?;
+        assert_eq!(summary.models_executed, 2);
+        assert_eq!(summary.total_rows_produced, 4);
+        assert!(temp.path().join("tf_b.parquet").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ref_via_memtable_when_configured() -> Result<()> {
+        use crate::core::project::{MaterializeConfig, RefStrategy};
+
+        let temp = tempfile::tempdir()?;
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_a",
+            "SELECT 1 AS id UNION ALL SELECT 2",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(temp.path().join("stg_a.parquet").to_string_lossy().into()),
+            "",
+        )?;
+        dag.add_model_with_format(
+            "tf_b",
+            "SELECT count(*) AS c FROM {{ ref('stg_a') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(temp.path().join("tf_b.parquet").to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let mat = MaterializeConfig {
+            ref_strategy: RefStrategy::Memtable,
+            memtable_max_rows: 50_000,
+        };
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat)
+            .await?;
+        assert_eq!(summary.models_executed, 2);
+        assert!(temp.path().join("tf_b.parquet").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_memtable_falls_back_to_lake_above_cutoff() -> Result<()> {
+        use crate::core::project::{MaterializeConfig, RefStrategy};
+
+        // Cutoff 1 → 2-row model must use lake re-read.
+        let temp = tempfile::tempdir()?;
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_a",
+            "SELECT 1 AS id UNION ALL SELECT 2",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(temp.path().join("stg_a.parquet").to_string_lossy().into()),
+            "",
+        )?;
+        dag.add_model_with_format(
+            "tf_b",
+            "SELECT * FROM {{ ref('stg_a') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(temp.path().join("tf_b.parquet").to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let mat = MaterializeConfig {
+            ref_strategy: RefStrategy::Memtable,
+            memtable_max_rows: 1,
+        };
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat)
+            .await?;
+        assert_eq!(summary.models_executed, 2);
+        assert_eq!(summary.total_rows_produced, 4);
         Ok(())
     }
 }

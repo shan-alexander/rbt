@@ -9,6 +9,11 @@
 # is not required here (and not faked).
 #
 # Runtime v0 keys (models_dir + layers.*) are loaded by rbt today.
+#
+# materialize.ref_strategy (optional):
+#   parquet (default) — lake-as-truth re-read for {{ ref() }}  [recommended]
+#   memtable          — keep MemTable when rows < memtable_max_rows (default 50000)
+# See docs/REF_STRATEGY.md (includes Criterion wall-time vs RSS tradeoffs).
 # =============================================================================
 
 name: market_bars
@@ -21,6 +26,10 @@ env: dev
 
 models_dir: models
 target_path: lake/gold
+
+# materialize:
+#   ref_strategy: parquet
+#   memtable_max_rows: 50000
 
 layers:
   staging:

@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.6] — 2026-07-31
+
+### Added
+- Configurable `ref()` registration via optional `materialize:` in `rbt_project.yml`
+  - **Default:** lake-as-truth Parquet/file re-read (no config required)
+  - **Opt-in:** `ref_strategy: memtable` with `memtable_max_rows` (default **50_000**)
+- Docs: [docs/REF_STRATEGY.md](docs/REF_STRATEGY.md) with Criterion tradeoffs
+- `TransformationEngine::execute_dag_with_materialize` for library/tests
+
+### Changed
+- Downstream `{{ ref() }}` no longer always retains a full-result MemTable
+
+### Fixed
+- Unique/grain key encoding for Parquet-sourced `Utf8View` / large strings (false duplicate failures after lake re-read)
+
 ## [0.0.3] — 2026-07-31
 
 ### Fixed

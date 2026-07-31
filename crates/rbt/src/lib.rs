@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.0.3"
+//! rbt-datalake = "0.3.6"
 //! ```
 //!
 //! ## Quick start (library)
@@ -30,7 +30,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.0.3")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.3.6")]
 
 pub mod core;
 pub mod engine;
@@ -44,9 +44,10 @@ pub mod testing;
 pub use core::{
     model_has_test_contract, parse_select_spec, resolve_scan_path, scan_path_exists,
     BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DependencyRef,
-    DiagnosticSeverity, Materialization, ModelDag, ModelLayer, ModelNode, ModelTests, OutputFormat,
-    RbtProjectConfig, RbtTemplateEngine, SelectMode, SelectToken, SourceFormat, SqlModelParser,
-    StagingFrontmatter,
+    DiagnosticSeverity, Materialization, MaterializeConfig, ModelDag, ModelLayer, ModelNode,
+    ModelTests, OutputFormat, RbtProjectConfig, RbtTemplateEngine, RefBackend, RefStrategy,
+    SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
+    DEFAULT_MEMTABLE_MAX_ROWS,
 };
 
 pub use engine::{

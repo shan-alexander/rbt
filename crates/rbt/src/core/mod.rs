@@ -12,5 +12,7 @@ pub use frontmatter::{
     ColumnMeta, DiagnosticSeverity, ModelTests, SourceFormat, StagingFrontmatter,
 };
 pub use parser::{DependencyRef, RbtTemplateEngine, SqlModelParser};
-pub use project::RbtProjectConfig;
+pub use project::{
+    MaterializeConfig, RbtProjectConfig, RefBackend, RefStrategy, DEFAULT_MEMTABLE_MAX_ROWS,
+};
 pub use select::{model_has_test_contract, parse_select_spec, SelectMode, SelectToken};

@@ -237,12 +237,22 @@ fn array_value_to_key(array: &ArrayRef, row: usize) -> String {
     if array.is_null(row) {
         return "\u{0}".to_string();
     }
-    // Prefer Utf8; otherwise debug-print via downcast helpers is heavy — use format of scalar
+    // Common primitives (fast paths)
     if let Some(s) = array.as_any().downcast_ref::<StringArray>() {
         return s.value(row).to_string();
     }
-    // Fallback: use Arrow's display via array.to_data() is awkward; stringify via JSON-like
-    use arrow::array::AsArray;
+    if let Some(s) = array
+        .as_any()
+        .downcast_ref::<arrow::array::StringViewArray>()
+    {
+        return s.value(row).to_string();
+    }
+    if let Some(s) = array
+        .as_any()
+        .downcast_ref::<arrow::array::LargeStringArray>()
+    {
+        return s.value(row).to_string();
+    }
     if let Some(a) = array.as_any().downcast_ref::<arrow::array::Int64Array>() {
         return a.value(row).to_string();
     }
@@ -258,8 +268,13 @@ fn array_value_to_key(array: &ArrayRef, row: usize) -> String {
     if let Some(a) = array.as_any().downcast_ref::<arrow::array::BooleanArray>() {
         return a.value(row).to_string();
     }
-    // Timestamp / other: use formatted debug of the array slice is overkill — use to_string on array
-    let _ = AsArray::as_string_opt::<i32>(array.as_ref());
+    // Dictionary / timestamps / views / nested: Arrow display formatter
+    // (Parquet re-read often yields Utf8View or dictionary-encoded strings.)
+    use arrow::util::display::{ArrayFormatter, FormatOptions};
+    let opts = FormatOptions::default().with_display_error(true);
+    if let Ok(fmt) = ArrayFormatter::try_new(array.as_ref(), &opts) {
+        return fmt.value(row).to_string();
+    }
     format!("row{row}")
 }
 

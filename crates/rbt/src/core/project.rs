@@ -7,6 +7,71 @@ use walkdir::WalkDir;
 
 use super::dag::{Materialization, ModelDag, ModelLayer, OutputFormat};
 
+/// Default MemTable row cutoff when `ref_strategy: memtable` and max rows omitted.
+pub const DEFAULT_MEMTABLE_MAX_ROWS: usize = 50_000;
+
+/// How completed models are exposed to downstream `{{ ref() }}` in the same run.
+///
+/// Default is lake-as-truth **parquet / file re-read** (no long-lived MemTable).
+/// Opt into MemTable via `materialize.ref_strategy: memtable` in `rbt_project.yml`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefStrategy {
+    /// Always re-read the written lake file for `ref()` (default).
+    #[default]
+    #[serde(alias = "parquet_reread", alias = "lake", alias = "file")]
+    Parquet,
+    /// Keep an in-memory `MemTable` when `row_count < memtable_max_rows`; else re-read file.
+    #[serde(alias = "mem_table", alias = "memory", alias = "arc")]
+    Memtable,
+}
+
+/// Chosen backend after applying strategy + row cutoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefBackend {
+    /// DataFusion `MemTable` holding Arrow batches (Arc-shared).
+    MemTable,
+    /// Re-read model output from the lake path (`register_parquet` / json / csv).
+    LakeFile,
+}
+
+/// Optional materialization / `ref()` registration policy (`materialize:` in yml).
+///
+/// All fields are optional; omitting the whole block keeps lake-as-truth Parquet re-read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializeConfig {
+    /// `parquet` (default) | `memtable`
+    #[serde(default)]
+    pub ref_strategy: RefStrategy,
+    /// Used only when `ref_strategy: memtable`. Defaults to [`DEFAULT_MEMTABLE_MAX_ROWS`].
+    #[serde(default = "default_memtable_max_rows")]
+    pub memtable_max_rows: usize,
+}
+
+fn default_memtable_max_rows() -> usize {
+    DEFAULT_MEMTABLE_MAX_ROWS
+}
+
+impl Default for MaterializeConfig {
+    fn default() -> Self {
+        Self {
+            ref_strategy: RefStrategy::Parquet,
+            memtable_max_rows: DEFAULT_MEMTABLE_MAX_ROWS,
+        }
+    }
+}
+
+impl MaterializeConfig {
+    /// Decide MemTable vs lake file for a model that produced `row_count` rows.
+    pub fn choose_ref_backend(&self, row_count: usize) -> RefBackend {
+        match self.ref_strategy {
+            RefStrategy::Parquet => RefBackend::LakeFile,
+            RefStrategy::Memtable if row_count < self.memtable_max_rows => RefBackend::MemTable,
+            RefStrategy::Memtable => RefBackend::LakeFile,
+        }
+    }
+}
+
 /// Layer-specific target storage & path configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayerConfig {
@@ -24,6 +89,9 @@ pub struct RbtProjectConfig {
     pub target_path: PathBuf,
     #[serde(default)]
     pub layers: HashMap<String, LayerConfig>,
+    /// Optional; defaults to lake-as-truth Parquet re-read for `ref()`.
+    #[serde(default)]
+    pub materialize: MaterializeConfig,
 }
 
 impl Default for RbtProjectConfig {
@@ -60,6 +128,7 @@ impl Default for RbtProjectConfig {
             models_dir: PathBuf::from("models"),
             target_path: PathBuf::from("lake/gold"),
             layers,
+            materialize: MaterializeConfig::default(),
         }
     }
 }
@@ -263,6 +332,80 @@ mod tests {
             project_dir.join("lake/gold/fact_1d_bars.parquet")
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn materialize_defaults_to_parquet_reread() {
+        let cfg = MaterializeConfig::default();
+        assert_eq!(cfg.ref_strategy, RefStrategy::Parquet);
+        assert_eq!(cfg.memtable_max_rows, DEFAULT_MEMTABLE_MAX_ROWS);
+        assert_eq!(cfg.choose_ref_backend(0), RefBackend::LakeFile);
+        assert_eq!(cfg.choose_ref_backend(1_000_000), RefBackend::LakeFile);
+    }
+
+    #[test]
+    fn materialize_memtable_respects_cutoff() {
+        let cfg = MaterializeConfig {
+            ref_strategy: RefStrategy::Memtable,
+            memtable_max_rows: 50_000,
+        };
+        assert_eq!(cfg.choose_ref_backend(49_999), RefBackend::MemTable);
+        assert_eq!(cfg.choose_ref_backend(50_000), RefBackend::LakeFile);
+        assert_eq!(cfg.choose_ref_backend(50_001), RefBackend::LakeFile);
+    }
+
+    #[test]
+    fn parse_materialize_block_from_yaml() -> Result<()> {
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+materialize:
+  ref_strategy: memtable
+  memtable_max_rows: 10000
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        assert_eq!(cfg.materialize.ref_strategy, RefStrategy::Memtable);
+        assert_eq!(cfg.materialize.memtable_max_rows, 10_000);
+        assert_eq!(
+            cfg.materialize.choose_ref_backend(9_999),
+            RefBackend::MemTable
+        );
+        assert_eq!(
+            cfg.materialize.choose_ref_backend(10_000),
+            RefBackend::LakeFile
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_project_without_materialize_uses_defaults() -> Result<()> {
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        assert_eq!(cfg.materialize, MaterializeConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_memtable_without_max_rows_defaults_cutoff() -> Result<()> {
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+materialize:
+  ref_strategy: memtable
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        assert_eq!(cfg.materialize.ref_strategy, RefStrategy::Memtable);
+        assert_eq!(cfg.materialize.memtable_max_rows, DEFAULT_MEMTABLE_MAX_ROWS);
         Ok(())
     }
 }

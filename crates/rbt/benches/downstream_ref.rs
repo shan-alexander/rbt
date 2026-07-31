@@ -19,9 +19,7 @@
 use arrow::array::{Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use datafusion::prelude::ParquetReadOptions;
@@ -62,9 +60,7 @@ fn make_batches(n_rows: usize, batch_rows: usize) -> Vec<RecordBatch> {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(Int64Array::from_iter_values(
-                    (start..end).map(|i| i as i64),
-                )),
+                Arc::new(Int64Array::from_iter_values((start..end).map(|i| i as i64))),
                 Arc::new(StringArray::from(
                     (start..end)
                         .map(|i| format!("S{:03}", i % 200))
@@ -251,26 +247,15 @@ fn bench_downstream_queries(c: &mut Criterion) {
         for fix in &fixtures {
             g.throughput(Throughput::Elements(fix.n as u64));
             for strat in [Strategy::MemTable, Strategy::Parquet] {
-                g.bench_with_input(
-                    BenchmarkId::new(strat.label(), fix.n),
-                    fix,
-                    |b, fix| {
-                        b.iter(|| {
-                            runtime.block_on(async {
-                                let ctx = SessionContext::new();
-                                register_table(
-                                    &ctx,
-                                    "m",
-                                    strat,
-                                    &fix.batches,
-                                    &fix.path,
-                                )
-                                .await;
-                                black_box(())
-                            })
-                        });
-                    },
-                );
+                g.bench_with_input(BenchmarkId::new(strat.label(), fix.n), fix, |b, fix| {
+                    b.iter(|| {
+                        runtime.block_on(async {
+                            let ctx = SessionContext::new();
+                            register_table(&ctx, "m", strat, &fix.batches, &fix.path).await;
+                            black_box(())
+                        })
+                    });
+                });
             }
         }
         g.finish();
@@ -279,10 +264,7 @@ fn bench_downstream_queries(c: &mut Criterion) {
     // --- query shapes (register once per iteration then query — full ref cost) ---
     let queries: &[(&str, &str)] = &[
         ("count_star", "SELECT count(*) AS c FROM m"),
-        (
-            "filter_project",
-            "SELECT id, px FROM m WHERE id % 97 = 0",
-        ),
+        ("filter_project", "SELECT id, px FROM m WHERE id % 97 = 0"),
         ("sum_px", "SELECT sum(px) AS s FROM m"),
     ];
 
@@ -323,8 +305,7 @@ fn bench_e2e_lake_file(c: &mut Criterion) {
     let candidates = [
         workspace_root().join("examples/full_e2e_rbt_example/lake/silver/stg_ohlcv_1d.parquet"),
         workspace_root().join("examples/full_e2e_rbt_example/lake/gold/fact_1d_bars.parquet"),
-        workspace_root()
-            .join("examples/full_e2e_rbt_example/lake/silver/stg_ohlcv_1m.parquet"),
+        workspace_root().join("examples/full_e2e_rbt_example/lake/silver/stg_ohlcv_1m.parquet"),
     ];
 
     let path = candidates.into_iter().find(|p| p.is_file());
@@ -360,19 +341,16 @@ fn bench_e2e_lake_file(c: &mut Criterion) {
     g.throughput(Throughput::Elements(n as u64));
 
     for strat in [Strategy::MemTable, Strategy::Parquet] {
-        g.bench_function(
-            BenchmarkId::new("count_star", strat.label()),
-            |b| {
-                b.iter(|| {
-                    runtime.block_on(async {
-                        let ctx = SessionContext::new();
-                        register_table(&ctx, "m", strat, &batches, &path).await;
-                        let rows = run_query(&ctx, "SELECT count(*) FROM m").await;
-                        black_box(rows)
-                    })
-                });
-            },
-        );
+        g.bench_function(BenchmarkId::new("count_star", strat.label()), |b| {
+            b.iter(|| {
+                runtime.block_on(async {
+                    let ctx = SessionContext::new();
+                    register_table(&ctx, "m", strat, &batches, &path).await;
+                    let rows = run_query(&ctx, "SELECT count(*) FROM m").await;
+                    black_box(rows)
+                })
+            });
+        });
         g.bench_function(
             BenchmarkId::new("sum_or_count_filter", strat.label()),
             |b| {

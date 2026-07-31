@@ -24,7 +24,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.0.3"
+rbt-datalake = "0.3.6"
 ```
 
 ```rust
@@ -114,6 +114,19 @@ my_project/
 ```
 
 Staging frontmatter: `scan_path`, `source_format`, `grain`, `tests`, `columns.*.description` / `context`.
+
+### `ref()` after materialize (optional)
+
+By default rbt **re-reads the lake file** for downstream `{{ ref() }}` (lake-as-truth; lower peak RSS).  
+Opt into MemTable for small models in `rbt_project.yml`:
+
+```yaml
+materialize:
+  ref_strategy: memtable       # default is parquet (omit this block entirely for default)
+  memtable_max_rows: 50000     # MemTable only when rows < cutoff; default 50000
+```
+
+Bench tradeoffs: [docs/REF_STRATEGY.md](docs/REF_STRATEGY.md).
 
 ## Package layout
 

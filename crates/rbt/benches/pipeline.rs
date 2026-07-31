@@ -203,9 +203,7 @@ fn bench_run_e2e_select(c: &mut Criterion) {
                 clean_outputs(&e2e);
                 runtime.block_on(async {
                     let config = RbtProjectConfig::load(&e2e).unwrap();
-                    let full = config
-                        .build_dag(&e2e, Some(OutputFormat::Parquet))
-                        .unwrap();
+                    let full = config.build_dag(&e2e, Some(OutputFormat::Parquet)).unwrap();
                     let dag = full
                         .apply_select(Some(sel), SelectMode::Execute)
                         .expect("select");
@@ -249,9 +247,7 @@ fn bench_run_e2e_full(c: &mut Criterion) {
             clean_outputs(&e2e);
             runtime.block_on(async {
                 let config = RbtProjectConfig::load(&e2e).unwrap();
-                let dag = config
-                    .build_dag(&e2e, Some(OutputFormat::Parquet))
-                    .unwrap();
+                let dag = config.build_dag(&e2e, Some(OutputFormat::Parquet)).unwrap();
                 let engine = TransformationEngine::new();
                 let summary = engine
                     .execute_dag(&dag, &e2e, e2e.join("target/bench_out"))
