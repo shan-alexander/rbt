@@ -62,6 +62,31 @@ impl Default for MaterializeConfig {
     }
 }
 
+/// Default max size for a single opaque protobuf bronze file (1 GiB).
+pub const DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Optional scan / bronze ingest limits (`scan:` in yml).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanConfig {
+    /// Max bytes for one `source_format: protobuf` file. Default: 1 GiB.
+    ///
+    /// Override to raise/lower the safety cap for opaque `payload` columns.
+    #[serde(default = "default_protobuf_max_payload_bytes")]
+    pub protobuf_max_payload_bytes: u64,
+}
+
+fn default_protobuf_max_payload_bytes() -> u64 {
+    DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+        }
+    }
+}
+
 impl MaterializeConfig {
     /// Decide MemTable vs lake file for a model that produced `row_count` rows.
     pub fn choose_ref_backend(&self, row_count: usize) -> RefBackend {
@@ -93,9 +118,12 @@ pub struct RbtProjectConfig {
     /// Optional; defaults to lake-as-truth Parquet re-read for `ref()`.
     #[serde(default)]
     pub materialize: MaterializeConfig,
+    /// Optional bronze scan limits (e.g. protobuf payload cap).
+    #[serde(default)]
+    pub scan: ScanConfig,
     /// Named absolute (or relative) roots for multi-root lakes.
     ///
-    /// Referenced in paths as `$name` or `${name}` (e.g. `$nonprod_lake/lz/kinnaruns`).
+    /// Referenced in paths as `$name` or `${name}` (e.g. `$nonprod_lake/lz/runs`).
     #[serde(default)]
     pub roots: HashMap<String, String>,
 }
@@ -135,6 +163,7 @@ impl Default for RbtProjectConfig {
             target_path: PathBuf::from("lake/gold"),
             layers,
             materialize: MaterializeConfig::default(),
+            scan: ScanConfig::default(),
             roots: HashMap::new(),
         }
     }
@@ -192,10 +221,17 @@ impl RbtProjectConfig {
         model_name: &str,
         layer: ModelLayer,
         ext: &str,
-    ) -> PathBuf {
-        self.resolve_layer_target_dir(project_dir, layer)
-            .unwrap_or_else(|_| project_dir.join("lake/gold"))
-            .join(format!("{}.{}", model_name, ext))
+    ) -> Result<PathBuf> {
+        let dir = self
+            .resolve_layer_target_dir(project_dir, layer)
+            .with_context(|| {
+                format!(
+                    "E_RBT_MODEL_TARGET: cannot resolve output directory for model '{model_name}' \
+                 (layer={layer:?}). Check `layers.*.target_path`, top-level `target_path`, and \
+                 `roots:` in rbt_project.yml."
+                )
+            })?;
+        Ok(dir.join(format!("{model_name}.{ext}")))
     }
 
     /// Directory target for Iceberg-style table roots (no file extension).
@@ -204,10 +240,16 @@ impl RbtProjectConfig {
         project_dir: &Path,
         model_name: &str,
         layer: ModelLayer,
-    ) -> PathBuf {
-        self.resolve_layer_target_dir(project_dir, layer)
-            .unwrap_or_else(|_| project_dir.join("lake/gold"))
-            .join(model_name)
+    ) -> Result<PathBuf> {
+        let dir = self
+            .resolve_layer_target_dir(project_dir, layer)
+            .with_context(|| {
+                format!(
+                    "E_RBT_MODEL_TARGET: cannot resolve table directory for model '{model_name}' \
+                 (layer={layer:?}). Check layer target_path and roots:."
+                )
+            })?;
+        Ok(dir.join(model_name))
     }
 
     /// Discovers all `.sql` models under `models/` directory, resolves layer target paths, and constructs `ModelDag`.
@@ -237,11 +279,18 @@ impl RbtProjectConfig {
         for entry in WalkDir::new(&models_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.is_file() && path.extension().is_some_and(|ext| ext == "sql") {
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .context("Invalid file stem")?;
-                let raw_sql = fs::read_to_string(path)?;
+                let stem = path.file_stem().and_then(|s| s.to_str()).with_context(|| {
+                    format!(
+                        "E_RBT_MODEL_NAME: invalid file stem for model path {}",
+                        path.display()
+                    )
+                })?;
+                let raw_sql = fs::read_to_string(path).with_context(|| {
+                    format!(
+                        "E_RBT_MODEL_IO: failed reading model SQL {}",
+                        path.display()
+                    )
+                })?;
 
                 let layer = ModelLayer::from_name(stem);
                 let format = cli_format_override.clone().unwrap_or_else(|| {
@@ -265,21 +314,44 @@ impl RbtProjectConfig {
                 });
 
                 let target_file_path = match format {
-                    OutputFormat::Iceberg => {
-                        // Directory table root: lake/.../model_name/
-                        self.resolve_model_target_dir(project_dir, stem, layer)
-                    }
+                    OutputFormat::Iceberg => self
+                        .resolve_model_target_dir(project_dir, stem, layer)
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_MODEL_TARGET: model '{stem}' (Iceberg) — \
+                                 failed resolving layer target. \
+                                 layer={layer:?}; project={}",
+                                project_dir.display()
+                            )
+                        })?,
                     OutputFormat::Parquet
                     | OutputFormat::ParquetAndIceberg
-                    | OutputFormat::ZeroCopyClone => {
-                        self.resolve_model_target_path(project_dir, stem, layer, "parquet")
-                    }
-                    OutputFormat::Jsonl => {
-                        self.resolve_model_target_path(project_dir, stem, layer, "jsonl")
-                    }
-                    OutputFormat::Csv => {
-                        self.resolve_model_target_path(project_dir, stem, layer, "csv")
-                    }
+                    | OutputFormat::ZeroCopyClone => self
+                        .resolve_model_target_path(project_dir, stem, layer, "parquet")
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_MODEL_TARGET: model '{stem}' (parquet) — \
+                                 failed resolving layer target. \
+                                 layer={layer:?}; project={}",
+                                project_dir.display()
+                            )
+                        })?,
+                    OutputFormat::Jsonl => self
+                        .resolve_model_target_path(project_dir, stem, layer, "jsonl")
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_MODEL_TARGET: model '{stem}' (jsonl) — \
+                                 failed resolving layer target"
+                            )
+                        })?,
+                    OutputFormat::Csv => self
+                        .resolve_model_target_path(project_dir, stem, layer, "csv")
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_MODEL_TARGET: model '{stem}' (csv) — \
+                                 failed resolving layer target"
+                            )
+                        })?,
                 };
 
                 dag.add_model_with_format(
@@ -325,7 +397,7 @@ mod tests {
             "stg_trades",
             ModelLayer::Staging,
             "parquet",
-        );
+        )?;
         assert_eq!(stg_path, project_dir.join("lake/silver/stg_trades.parquet"));
 
         let tf_path = config.resolve_model_target_path(
@@ -333,7 +405,7 @@ mod tests {
             "tf_1m_bars",
             ModelLayer::Transform,
             "parquet",
-        );
+        )?;
         assert_eq!(tf_path, project_dir.join("lake/gold/tf_1m_bars.parquet"));
 
         let mart_path = config.resolve_model_target_path(
@@ -341,7 +413,7 @@ mod tests {
             "fact_1d_bars",
             ModelLayer::Mart,
             "parquet",
-        );
+        )?;
         assert_eq!(
             mart_path,
             project_dir.join("lake/gold/fact_1d_bars.parquet")
@@ -427,24 +499,24 @@ materialize:
     #[test]
     fn absolute_layer_target_not_nested_under_project() -> Result<()> {
         let yml = r#"
-name: kinna
+name: multi_root_demo
 version: "1"
 models_dir: models
-target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/gold
+target_path: /mnt/datalake/acme/nonprod/lake_us/lake/gold
 layers:
   staging:
     path: models/staging
-    target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt
+    target_path: /mnt/datalake/acme/nonprod/lake_us/lake/silver/stage
     default_format: parquet
 "#;
         let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
-        let project = Path::new("/home/dev/rbt_projects/kinna");
+        let project = Path::new("/home/dev/rbt_projects/demo");
         let stg =
-            cfg.resolve_model_target_path(project, "stg_crawlplan", ModelLayer::Staging, "parquet");
+            cfg.resolve_model_target_path(project, "stg_events", ModelLayer::Staging, "parquet")?;
         assert_eq!(
             stg,
             PathBuf::from(
-                "/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt/stg_crawlplan.parquet"
+                "/mnt/datalake/acme/nonprod/lake_us/lake/silver/stage/stg_events.parquet"
             )
         );
         assert!(!stg.starts_with(project));
@@ -454,16 +526,16 @@ layers:
     #[test]
     fn multi_root_template_in_layer_target() -> Result<()> {
         let yml = r#"
-name: kinna
+name: multi_root_demo
 version: "1"
 models_dir: models
 target_path: $nonprod_lake/gold
 roots:
-  nonprod_lake: /mnt/datalake/kinnalake/nonprod/lake_us/lake
+  nonprod_lake: /mnt/datalake/acme/nonprod/lake_us/lake
 layers:
   staging:
     path: models/staging
-    target_path: $nonprod_lake/silver/stage_rbt
+    target_path: $nonprod_lake/silver/stage
     default_format: parquet
 "#;
         let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
@@ -471,7 +543,65 @@ layers:
         let dir = cfg.resolve_layer_target_dir(project, ModelLayer::Staging)?;
         assert_eq!(
             dir,
-            PathBuf::from("/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt")
+            PathBuf::from("/mnt/datalake/acme/nonprod/lake_us/lake/silver/stage")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bad_root_in_layer_target_is_error() {
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+layers:
+  staging:
+    path: models/staging
+    target_path: $missing_root/silver
+    default_format: parquet
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml).unwrap();
+        let err = cfg
+            .resolve_layer_target_dir(Path::new("/proj"), ModelLayer::Staging)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("E_RBT_ROOT_UNKNOWN") || err.contains("E_RBT_LAYER_PATH"));
+    }
+
+    #[test]
+    fn scan_config_defaults_protobuf_cap() {
+        let cfg = ScanConfig::default();
+        assert_eq!(
+            cfg.protobuf_max_payload_bytes,
+            DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
+        );
+        assert_eq!(DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn scan_config_override_from_yml() -> Result<()> {
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+scan:
+  protobuf_max_payload_bytes: 4096
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        assert_eq!(cfg.scan.protobuf_max_payload_bytes, 4096);
+        // omit scan: → default 1 GiB
+        let yml2 = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+"#;
+        let cfg2: RbtProjectConfig = serde_yaml::from_str(yml2)?;
+        assert_eq!(
+            cfg2.scan.protobuf_max_payload_bytes,
+            DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
         );
         Ok(())
     }

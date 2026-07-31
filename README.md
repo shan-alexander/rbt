@@ -114,7 +114,7 @@ my_project/
 ```
 
 Staging frontmatter: `scan_path`, `source_format`, `path_glob`, `partition_by`, `grain`, `tests`, `columns.*.description` / `context`.  
-Multi-root lakes / absolute targets: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md).
+Multi-root lakes, absolute targets, glob semantics, protobuf bronze, and when `path_glob` disables DataFusion listing pushdown: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md).
 
 ### `ref()` after materialize (optional)
 

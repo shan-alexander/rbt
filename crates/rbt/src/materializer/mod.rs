@@ -361,7 +361,7 @@ mod tests {
 
         let parquet_file = temp_dir.path().join("output.parquet");
         let rows = MultiFormatWriter::write_batches(
-            &[batch.clone()],
+            std::slice::from_ref(&batch),
             &OutputFormat::Parquet,
             &parquet_file,
         )?;
@@ -371,7 +371,7 @@ mod tests {
 
         let iceberg_dir = temp_dir.path().join("tbl");
         let irows = MultiFormatWriter::write_batches(
-            &[batch.clone()],
+            std::slice::from_ref(&batch),
             &OutputFormat::Iceberg,
             &iceberg_dir,
         )?;
@@ -402,10 +402,10 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("t");
         let b = sample_batch();
-        write_iceberg_fs_table(&[b.clone()], &root)?;
+        write_iceberg_fs_table(std::slice::from_ref(&b), &root)?;
         // plant a junk file then rewrite
         fs::write(root.join("data/junk.txt"), b"x")?;
-        write_iceberg_fs_table(&[b], &root)?;
+        write_iceberg_fs_table(std::slice::from_ref(&b), &root)?;
         assert!(!root.join("data/junk.txt").exists());
         assert!(root.join("data/part-00000.parquet").exists());
         Ok(())

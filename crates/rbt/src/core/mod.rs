@@ -13,11 +13,13 @@ pub use frontmatter::{
     ColumnMeta, DiagnosticSeverity, ModelTests, SourceFormat, StagingFrontmatter,
 };
 pub use parser::{DependencyRef, RbtTemplateEngine, SqlModelParser};
+pub use paths::PathGlobSet;
 pub use paths::{
     expand_roots, path_matches_globs, resolve_configured_path, resolve_project_path,
     validate_glob_patterns,
 };
 pub use project::{
-    MaterializeConfig, RbtProjectConfig, RefBackend, RefStrategy, DEFAULT_MEMTABLE_MAX_ROWS,
+    MaterializeConfig, RbtProjectConfig, RefBackend, RefStrategy, ScanConfig,
+    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 pub use select::{model_has_test_contract, parse_select_spec, SelectMode, SelectToken};

@@ -46,7 +46,7 @@ regex = "1.13"
 sqlparser = "0.47"
 walkdir = "2"
 toml = "0.8"
-glob = "0.3"
+globset = "0.4"
 
 # cli
 clap = { workspace = true }

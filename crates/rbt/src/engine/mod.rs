@@ -16,7 +16,7 @@ use iceberg::Catalog;
 use iceberg_datafusion::IcebergCatalogProvider;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use bronze::{
     register_bronze_for_model, register_bronze_sources_for_dag, BronzeRegistrationMode,
@@ -58,6 +58,10 @@ impl RbtEngineBuilder {
 
 pub struct TransformationEngine {
     pub ctx: SessionContext,
+    /// Cached project config keyed by canonical project_dir (roots, materialize, scan limits).
+    ///
+    /// Avoids re-reading `rbt_project.yml` once per bronze model on large DAGs.
+    project_cache: Mutex<Option<(PathBuf, Arc<RbtProjectConfig>)>>,
 }
 
 impl Default for TransformationEngine {
@@ -70,6 +74,38 @@ impl TransformationEngine {
     pub fn new() -> Self {
         Self {
             ctx: SessionContext::new(),
+            project_cache: Mutex::new(None),
+        }
+    }
+
+    /// Load (or reuse cached) project config for `project_dir`.
+    pub fn load_project_config(&self, project_dir: &Path) -> Result<Arc<RbtProjectConfig>> {
+        let key = project_dir
+            .canonicalize()
+            .unwrap_or_else(|_| project_dir.to_path_buf());
+        let mut guard = self
+            .project_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("E_RBT_ENGINE: project config cache lock poisoned"))?;
+        if let Some((ref cached_dir, ref cfg)) = *guard {
+            if *cached_dir == key {
+                return Ok(Arc::clone(cfg));
+            }
+        }
+        let cfg = Arc::new(RbtProjectConfig::load(project_dir).with_context(|| {
+            format!(
+                "E_RBT_PROJECT_LOAD: failed loading rbt_project.yml under {}",
+                project_dir.display()
+            )
+        })?);
+        *guard = Some((key, Arc::clone(&cfg)));
+        Ok(cfg)
+    }
+
+    /// Clear cached project config (tests / multi-project hosts).
+    pub fn clear_project_cache(&self) {
+        if let Ok(mut guard) = self.project_cache.lock() {
+            *guard = None;
         }
     }
 
@@ -113,10 +149,8 @@ impl TransformationEngine {
         output_dir: impl AsRef<Path>,
     ) -> Result<DagExecutionSummary> {
         let project_dir = project_dir.as_ref();
-        let materialize = RbtProjectConfig::load(project_dir)
-            .map(|c| c.materialize)
-            .unwrap_or_default();
-        self.execute_dag_with_materialize(dag, project_dir, output_dir, &materialize)
+        let config = self.load_project_config(project_dir)?;
+        self.execute_dag_with_config(dag, project_dir, output_dir, &config)
             .await
     }
 
@@ -129,12 +163,28 @@ impl TransformationEngine {
         materialize: &MaterializeConfig,
     ) -> Result<DagExecutionSummary> {
         let project_dir = project_dir.as_ref();
+        let mut config = (*self.load_project_config(project_dir)?).clone();
+        config.materialize = materialize.clone();
+        self.execute_dag_with_config(dag, project_dir, output_dir, &config)
+            .await
+    }
+
+    /// Full DAG execution with a pre-loaded project config (roots, scan limits, materialize).
+    pub async fn execute_dag_with_config(
+        &self,
+        dag: &ModelDag,
+        project_dir: impl AsRef<Path>,
+        output_dir: impl AsRef<Path>,
+        config: &RbtProjectConfig,
+    ) -> Result<DagExecutionSummary> {
+        let project_dir = project_dir.as_ref();
         let output_base = output_dir.as_ref();
+        let materialize = &config.materialize;
         tokio::fs::create_dir_all(output_base).await?;
 
         let mut registered = HashSet::new();
         let bronze_sources_registered =
-            register_bronze_sources_for_dag(&self.ctx, dag, project_dir, &mut registered)
+            register_bronze_sources_for_dag(&self.ctx, dag, project_dir, &mut registered, config)
                 .await
                 .context("frontmatter-driven bronze registration failed")?;
 
@@ -153,7 +203,8 @@ impl TransformationEngine {
                 tracing::info!("Executing model '{}'...", model.name);
 
                 // Late-bind: if this model carries frontmatter not registered yet
-                register_bronze_for_model(&self.ctx, model, project_dir, &mut registered).await?;
+                register_bronze_for_model(&self.ctx, model, project_dir, &mut registered, config)
+                    .await?;
 
                 let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
                     format!(

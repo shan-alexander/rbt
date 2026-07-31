@@ -1,31 +1,32 @@
-# Multi-root lakes, absolute paths, and `path_glob` (P0)
+# Multi-root lakes, absolute paths, and `path_glob`
 
-These features exist so rbt can target real messy lakes (e.g. `/mnt/datalake/kinnalake`)
-without copying data into the git project tree.
+These features let rbt target multi-environment filesystem lakes without copying
+data into the git project tree.
 
 ## Absolute paths
 
 `scan_path` and layer `target_path` may be **absolute**. Absolute paths are never
-joined under the project directory.
+joined under the project directory. Resolution failures return structured errors
+(`E_RBT_LAYER_PATH`, `E_RBT_MODEL_TARGET`, `E_RBT_ROOT_UNKNOWN`, …).
 
 ```yaml
 # rbt_project.yml
-name: kinna_gold
+name: multi_root_demo
 version: "0.1.0"
 models_dir: models
-target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/gold
+target_path: /mnt/datalake/acme/nonprod/lake_us/lake/gold
 layers:
   staging:
     path: models/staging
-    target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt
+    target_path: /mnt/datalake/acme/nonprod/lake_us/lake/silver/stage
     default_format: parquet
   transforms:
     path: models/transforms
-    target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/tf_rbt
+    target_path: /mnt/datalake/acme/nonprod/lake_us/lake/silver/tf
     default_format: parquet
   marts:
     path: models/marts
-    target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/gold
+    target_path: /mnt/datalake/acme/nonprod/lake_us/lake/gold
     default_format: parquet
 ```
 
@@ -35,13 +36,13 @@ Avoid repeating long prefixes:
 
 ```yaml
 roots:
-  nonprod_lake: /mnt/datalake/kinnalake/nonprod/lake_us/lake
-  prod_lake: /mnt/datalake/kinnalake/prod/lake_us/lake
+  nonprod_lake: /mnt/datalake/acme/nonprod/lake_us/lake
+  prod_lake: /mnt/datalake/acme/prod/lake_us/lake
 
 layers:
   staging:
     path: models/staging
-    target_path: $nonprod_lake/silver/stage_rbt
+    target_path: $nonprod_lake/silver/stage
     default_format: parquet
   marts:
     path: models/marts
@@ -49,14 +50,16 @@ layers:
     default_format: parquet
 ```
 
-Templates: `$name` or `${name}`. Unknown names fail with `E_RBT_ROOT_UNKNOWN`.
+Templates: `$name` or `${name}`. Unknown names fail with **`E_RBT_ROOT_UNKNOWN`**
+and list known roots.
 
-Frontmatter `scan_path` expands the same way:
+Frontmatter `scan_path` expands the same way (project config is loaded once per engine
+run and reused for every bronze model).
 
 ```sql
 ---
 source_format: parquet
-scan_path: $nonprod_lake/lz/kinnaruns
+scan_path: $nonprod_lake/lz/runs
 path_glob: "**/raw_snoop/crawlplan.parquet"
 partition_by: [domain, report_date, run_id]
 require_partitions:
@@ -68,8 +71,8 @@ SELECT * FROM {{ source('lz', 'crawlplan') }}
 
 ## `path_glob` (artifact isolation)
 
-Kinna-style bronze trees mix many filenames under the same hive path. Use
-`path_glob` so each staging model reads **one artifact type**.
+Hive trees often mix many filenames under the same partition path. Use `path_glob`
+so each staging model reads **one artifact type**.
 
 | Field | Semantics |
 |-------|-----------|
@@ -77,29 +80,61 @@ Kinna-style bronze trees mix many filenames under the same hive path. Use
 | string | single pattern |
 | list | **OR** — file matches if any pattern matches |
 
-Patterns use the [`glob`](https://docs.rs/glob) crate syntax. Matching is tried
-against:
+Patterns use **globset** with **literal path separators** (strong semantics):
 
-1. path relative to `scan_path` (POSIX `/` separators),
-2. file basename only,
-3. absolute path string.
+| Token | Meaning |
+|-------|---------|
+| `*` | single path segment only (does **not** cross `/`) |
+| `?` | single character within a segment |
+| `**` | zero or more path segments (recursive) |
+| `[abc]` | character class |
+
+This matches gitignore-style expectations: `*/crawlplan.parquet` matches one directory
+level under `scan_path`, not a deep hive tree. Use `**/crawlplan.parquet` for any depth.
+
+### Match candidates
+
+A file matches if **any** pattern matches **any** applicable candidate:
+
+1. **Relative path** — always tried (path of the file relative to `scan_path`, POSIX `/`).
+2. **Basename** — tried when the set includes a pattern with **no** `/` (e.g.
+   `crawlplan.parquet`), so bare filenames match at any depth under `scan_path`.
+3. **Absolute path** — tried when a pattern starts with `/`.
 
 Examples:
 
 ```yaml
-path_glob: crawlplan.parquet
-path_glob: "**/raw_snoop/crawlplan.parquet"
+path_glob: crawlplan.parquet                    # basename at any depth
+path_glob: "**/raw_snoop/crawlplan.parquet"     # recursive under scan_path
+path_glob: "*/crawlplan.parquet"                # exactly one segment above the file
 path_glob:
   - "**/enriched_scrape.parquet"
   - "**/store_summary.parquet"
 ```
 
-When `path_glob`, hive partitions, or `inject_source_path` is set, bronze uses
-the **scan → MemTable** path (not raw DataFusion listing), so filters apply.
+Invalid / empty patterns fail at DAG build / scan setup with **`E_RBT_PATH_GLOB_INVALID`**.
+
+### DataFusion listing pushdown
+
+When **any** of the following are set, bronze registration uses the **scan→MemTable**
+path and **does not** use DataFusion directory listing / listing-table predicate
+pushdown for that source:
+
+- non-empty `path_glob`
+- `partition_by` / `require_partitions`
+- `inject_source_path: true`
+- `force_scan: true`
+- formats that require scan (log, txt, toml, arrow_ipc stream, protobuf)
+
+**`path_glob` disables DF listing pushdown for that bronze source** (by design):
+listing providers cannot apply rbt filename globs or hive path injection. Filters
+and injection stay correct on the scan path; large directory walks are still bounded
+by globs + `require_partitions`. Prefer a narrow `scan_path` + globs over pointing
+`scan_path` at an entire lake root.
 
 ## Protobuf bronze (`source_format: protobuf`)
 
-`.pb` files are supported as **opaque** bronze: one row per file with columns
+`.pb` files land as **opaque** bronze: one row per file.
 
 | Column | Type | Meaning |
 |--------|------|---------|
@@ -107,36 +142,36 @@ the **scan → MemTable** path (not raw DataFusion listing), so filters apply.
 | `payload` | Binary | raw file bytes |
 | `payload_len` | Int64 | byte length |
 
-Typed protobuf decode (prost + schema) is **not** in this release; land opaque
-payloads into silver, decode later via Rust models / schema registry.
+### Payload size limit
 
-## Kinna `stage-append` vs rbt (design note)
+Default max size for a single protobuf file: **1 GiB**
+(`1024 * 1024 * 1024` bytes).
 
-From nonprod receipts, `kinnastage stage-append` roughly:
+Override in project config:
 
-1. Discover domains for `(report_date, run_id)`.
-2. Write **part files** under `silver/stage/stg_*/parts/part-{date}-{run}-*.parquet`.
-3. Update domain-keyed crawlplan parts.
-4. Consolidate into `stg_*.parquet` + `_manifest.json`.
-5. Mode **append** / partial-run contracts.
+```yaml
+scan:
+  # optional; default is 1073741824 (1 GiB)
+  protobuf_max_payload_bytes: 1073741824
+```
 
-rbt today is **full-refresh model files** (one parquet per model name) with
-optional lake re-read for `ref()`. That can **own bronze→silver** for tabular
-lz parquet/jsonl via:
+Oversized files fail with **`E_RBT_PROTOBUF_TOO_LARGE`** and name the config key to raise.
+
+Typed protobuf decode (message schemas) is a later capability (Rust models / registry).
+
+## Append-style silver vs rbt full refresh
+
+Some external pipelines write **part files** under `parts/` plus a consolidated table
+and a `_manifest.json`. rbt today materializes **full-refresh** model files
+(one parquet per model name) with lake re-read for `ref()`.
+
+To own bronze→silver for tabular landing zones:
 
 - one staging model per artifact (`path_glob` + hive partitions),
-- SQL typing/dedupe/tests,
-- write to a dedicated silver root (do not overwrite Kinna’s live `stage/` until cutover).
+- SQL typing / dedupe / tests,
+- write to a dedicated silver root (do not overwrite another tool’s live paths until cutover).
 
-What rbt does **not** yet mirror (P1+):
-
-- true **append** part layout + `_manifest.json` contracts,
-- directory-of-parts as first-class sources for gold,
-- CAS `.zst` HTML (stay outside rbt),
-- typed protobuf messages.
-
-Recommended cutover path: rbt writes `silver/stage_rbt/` and `gold/` in parallel
-to Kinna; flip readers when DAGs match.
+Not yet in rbt (later): true append part layout, directory-of-parts sources, content-addressed blob stores as tables.
 
 ## Related
 

@@ -209,6 +209,10 @@ pub struct StagingFrontmatter {
     /// Examples: `crawlplan.parquet`, `**/raw_snoop/crawlplan.parquet`, `*.jsonl`.
     /// Empty / omitted = all files matching `source_format`.
     /// Accepts a single string or a YAML list.
+    ///
+    /// **Pushdown note:** any non-empty `path_glob` forces the scan→MemTable bronze path
+    /// (DataFusion directory listing / predicate pushdown is **not** used for that source),
+    /// because listing providers cannot apply rbt's filename globs or hive path injection.
     #[serde(default, deserialize_with = "deserialize_string_or_vec")]
     pub path_glob: Option<Vec<String>>,
     /// Optional hive-style partition keys (path injection + future pruning).

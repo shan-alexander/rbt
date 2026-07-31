@@ -14,7 +14,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rbt::{
     LakeScanner, OutputFormat, RbtProjectConfig, ScanRequest, SelectMode, SourceFormat,
-    TransformationEngine,
+    TransformationEngine, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -143,7 +143,10 @@ fn bench_bronze_scan(c: &mut Criterion) {
                     toml_rows_key: None,
                     partition_by: vec!["symbol".into(), "timeframe".into()],
                     require_partitions: require,
+                    path_glob: vec![],
                     inject_source_path: true,
+                    roots: HashMap::new(),
+                    protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
                 };
                 let scanner = LakeScanner::from_request(&req);
                 let batches = scanner.scan(&req).await.expect("scan 1d");
@@ -169,7 +172,10 @@ fn bench_bronze_scan(c: &mut Criterion) {
                     toml_rows_key: None,
                     partition_by: vec!["symbol".into(), "timeframe".into()],
                     require_partitions: require,
+                    path_glob: vec![],
                     inject_source_path: true,
+                    roots: HashMap::new(),
+                    protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
                 };
                 let scanner = LakeScanner::from_request(&req);
                 let batches = scanner.scan(&req).await.expect("scan 1m");

@@ -3,7 +3,8 @@
 //! Formats: JSONL (jshift), JSON, Parquet, CSV, Arrow IPC (file/stream), log, txt, TOML.
 
 use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
-use crate::core::paths::{path_matches_globs, resolve_project_path, validate_glob_patterns};
+use crate::core::paths::{resolve_project_path, validate_glob_patterns, PathGlobSet};
+use crate::core::project::{ScanConfig, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES};
 use anyhow::{anyhow, bail, Context, Result};
 use arrow::array::{ArrayRef, BinaryBuilder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -34,6 +35,8 @@ pub struct ScanRequest {
     pub inject_source_path: bool,
     /// Named roots for `$name` expansion in `scan_path` (from project config).
     pub roots: HashMap<String, String>,
+    /// Max bytes for one opaque protobuf file (from `scan.protobuf_max_payload_bytes`).
+    pub protobuf_max_payload_bytes: u64,
 }
 
 impl ScanRequest {
@@ -49,14 +52,29 @@ impl ScanRequest {
         fm: &StagingFrontmatter,
         roots: HashMap<String, String>,
     ) -> Result<Self> {
+        Self::from_frontmatter_with_config(project_dir, fm, roots, &ScanConfig::default())
+    }
+
+    pub fn from_frontmatter_with_config(
+        project_dir: impl AsRef<Path>,
+        fm: &StagingFrontmatter,
+        roots: HashMap<String, String>,
+        scan_cfg: &ScanConfig,
+    ) -> Result<Self> {
         let scan_path = fm
             .scan_path
             .as_ref()
-            .context("frontmatter.scan_path is required for bronze scan")?
+            .context(
+                "E_RBT_BRONZE_SCAN_PATH_MISSING: frontmatter.scan_path is required for bronze scan",
+            )?
             .clone();
-        let format = fm.resolve_format()?;
+        let format = fm.resolve_format().with_context(|| {
+            format!("E_RBT_BRONZE_FORMAT: cannot resolve source_format for scan_path '{scan_path}'")
+        })?;
         let path_glob = fm.path_glob.clone().unwrap_or_default();
-        validate_glob_patterns(&path_glob)?;
+        validate_glob_patterns(&path_glob).with_context(|| {
+            format!("E_RBT_PATH_GLOB_INVALID: bad path_glob on scan_path '{scan_path}'")
+        })?;
         Ok(Self {
             project_dir: project_dir.as_ref().to_path_buf(),
             scan_path,
@@ -68,6 +86,7 @@ impl ScanRequest {
             path_glob,
             inject_source_path: fm.inject_source_path.unwrap_or(false),
             roots,
+            protobuf_max_payload_bytes: scan_cfg.protobuf_max_payload_bytes,
         })
     }
 
@@ -94,12 +113,18 @@ impl LakeScanner {
 
     /// Scan using a full [`ScanRequest`] (format-aware).
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        let root = req
-            .resolved_path()
-            .with_context(|| format!("resolve scan_path '{}'", req.scan_path))?;
+        let root = req.resolved_path().with_context(|| {
+            format!(
+                "E_RBT_BRONZE_PATH: failed resolving scan_path '{}' \
+                 (project_dir={}). Check absolute paths and `roots:` templates.",
+                req.scan_path,
+                req.project_dir.display()
+            )
+        })?;
         if !root.exists() {
             bail!(
-                "Bronze scan_path does not exist: {} (resolved from '{}')",
+                "E_RBT_BRONZE_SCAN_PATH_NOT_FOUND: bronze scan_path does not exist: {} \
+                 (resolved from '{}'). Hint: verify the lake path and `$root` expansion.",
                 root.display(),
                 req.scan_path
             );
@@ -111,13 +136,18 @@ impl LakeScanner {
             files.retain(|f| path_matches_require_partitions(f, &root, &req.require_partitions));
         }
         if !req.path_glob.is_empty() {
-            files.retain(|f| path_matches_globs(f, &root, &req.path_glob));
+            let glob_set = PathGlobSet::compile(&req.path_glob)?;
+            files.retain(|f| glob_set.matches(f, &root));
         }
         if files.is_empty() {
             bail!(
-                "No {} files found under {} (after partition/path_glob filters; globs={:?})",
+                "E_RBT_BRONZE_SCAN_EMPTY: no {} files under {} after filters \
+                 (require_partitions={:?}, path_glob={:?}). \
+                 Hint: path_glob disables DataFusion listing pushdown and uses the \
+                 scan→MemTable path; check filename patterns and hive partitions.",
                 req.format.as_str(),
                 root.display(),
+                req.require_partitions,
                 req.path_glob
             );
         }
@@ -193,7 +223,10 @@ impl LakeScanner {
     fn read_file(&self, file_path: &Path, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
         match req.format {
             SourceFormat::Parquet => read_parquet(file_path, None),
-            SourceFormat::Protobuf => Ok(vec![read_protobuf_opaque(file_path)?]),
+            SourceFormat::Protobuf => Ok(vec![read_protobuf_opaque(
+                file_path,
+                req.protobuf_max_payload_bytes,
+            )?]),
             SourceFormat::Csv => read_csv(file_path, None),
             SourceFormat::Jsonl | SourceFormat::Json => {
                 if !self.paths.is_empty() {
@@ -285,12 +318,30 @@ fn extension_matches(format: SourceFormat, ext: &str) -> bool {
 /// Opaque protobuf bronze: one row per file with path + raw bytes.
 ///
 /// Typed message decode is intentionally deferred (schema registry / Rust models).
-fn read_protobuf_opaque(path: &Path) -> Result<RecordBatch> {
-    let mut file =
-        File::open(path).with_context(|| format!("open protobuf file {}", path.display()))?;
-    let mut payload = Vec::new();
+/// `max_bytes` defaults to 1 GiB via project `scan.protobuf_max_payload_bytes`.
+fn read_protobuf_opaque(path: &Path, max_bytes: u64) -> Result<RecordBatch> {
+    let meta = std::fs::metadata(path).with_context(|| {
+        format!(
+            "E_RBT_PROTOBUF_IO: cannot stat protobuf file {}",
+            path.display()
+        )
+    })?;
+    let len = meta.len();
+    if len > max_bytes {
+        bail!(
+            "E_RBT_PROTOBUF_TOO_LARGE: file {} is {len} bytes, exceeds \
+             scan.protobuf_max_payload_bytes={max_bytes} (default {} = 1 GiB). \
+             Raise `scan.protobuf_max_payload_bytes` in rbt_project.yml only if intentional.",
+            path.display(),
+            DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
+        );
+    }
+
+    let mut file = File::open(path)
+        .with_context(|| format!("E_RBT_PROTOBUF_IO: open protobuf file {}", path.display()))?;
+    let mut payload = Vec::with_capacity(len as usize);
     file.read_to_end(&mut payload)
-        .with_context(|| format!("read protobuf file {}", path.display()))?;
+        .with_context(|| format!("E_RBT_PROTOBUF_IO: read protobuf file {}", path.display()))?;
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("_source_path", DataType::Utf8, false),
@@ -850,7 +901,7 @@ k = "b"
     async fn test_path_glob_filters_artifacts() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let root = temp.path();
-        // Simulate kinnaruns multi-artifact hive
+        // Multi-artifact hive (same layout pattern as multi-domain landing zones)
         let d1 = root
             .join("domain=x.com")
             .join("report_date=2026-07-29")
@@ -900,12 +951,80 @@ k = "b"
             ..Default::default()
         };
         let req = ScanRequest::from_frontmatter(temp.path(), &fm)?;
+        assert_eq!(
+            req.protobuf_max_payload_bytes,
+            DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
+        );
         let scanner = LakeScanner::from_request(&req);
         let batches = scanner.scan(&req).await?;
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 1);
         assert_eq!(batches[0].schema().field(0).name(), "_source_path");
         assert_eq!(batches[0].schema().field(1).name(), "payload");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_protobuf_respects_max_payload_bytes() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let pb = temp.path().join("big.pb");
+        std::fs::write(&pb, vec![0u8; 64])?;
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Protobuf),
+            scan_path: Some("big.pb".into()),
+            ..Default::default()
+        };
+        let scan_cfg = ScanConfig {
+            protobuf_max_payload_bytes: 16,
+        };
+        let req = ScanRequest::from_frontmatter_with_config(
+            temp.path(),
+            &fm,
+            HashMap::new(),
+            &scan_cfg,
+        )?;
+        let scanner = LakeScanner::from_request(&req);
+        let err = scanner.scan(&req).await.unwrap_err();
+        // anyhow chains: outer "Failed reading bronze file …" + inner E_RBT_PROTOBUF_TOO_LARGE
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("E_RBT_PROTOBUF_TOO_LARGE"),
+            "expected size-cap error in chain, got: {full}"
+        );
+        assert!(full.contains("protobuf_max_payload_bytes"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_path_glob_single_star_is_not_recursive() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let deep = root.join("a").join("b").join("raw");
+        std::fs::create_dir_all(&deep)?;
+        let shallow = root.join("raw");
+        std::fs::create_dir_all(&shallow)?;
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        for (dir, id) in [(&deep, 1i64), (&shallow, 2i64)] {
+            let batch =
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![id]))])?;
+            let f = File::create(dir.join("crawlplan.parquet"))?;
+            let mut w =
+                parquet::arrow::arrow_writer::ArrowWriter::try_new(f, schema.clone(), None)?;
+            w.write(&batch)?;
+            w.close()?;
+        }
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Parquet),
+            scan_path: Some(".".into()),
+            // one segment only — should hit raw/crawlplan, not a/b/raw/crawlplan
+            path_glob: Some(vec!["*/crawlplan.parquet".into()]),
+            ..Default::default()
+        };
+        let req = ScanRequest::from_frontmatter(root, &fm)?;
+        let scanner = LakeScanner::from_request(&req);
+        let batches = scanner.scan(&req).await?;
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1, "single-star glob must not match deep hive path");
         Ok(())
     }
 

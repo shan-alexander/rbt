@@ -298,9 +298,9 @@ mod tests {
             .as_any()
             .downcast_ref::<arrow::array::BooleanArray>()
             .unwrap();
-        assert_eq!(active_array.value(0), true);
-        assert_eq!(active_array.value(1), false);
-        assert_eq!(active_array.value(2), true);
+        assert!(active_array.value(0));
+        assert!(!active_array.value(1));
+        assert!(active_array.value(2));
 
         let score_array = batch
             .column(3)

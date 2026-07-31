@@ -5,11 +5,16 @@ All notable changes to this project are documented in this file.
 ## [0.3.7] — 2026-07-31
 
 ### Added
-- **`path_glob`** on staging frontmatter (string or list, OR match) for multi-artifact hive bronze
+- **`path_glob`** on staging frontmatter (string or list, OR match) via **globset**
+  - **Strong semantics:** `literal_separator` — `*` / `?` stay in one path segment; use `**` for recursion
+  - Basename-only patterns (no `/`) match any depth; path-shaped patterns match relative (and absolute when pattern starts with `/`)
 - **`roots:`** map in `rbt_project.yml` with `$name` / `${name}` path templates
-- Explicit absolute + multi-root path resolution for layer `target_path` and `scan_path`
-- **`source_format: protobuf`** opaque bronze (one row/file: `_source_path`, `payload`, `payload_len`)
-- Docs: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md)
+- Fallible absolute + multi-root path resolution with structured **`E_RBT_*`** errors
+  (`E_RBT_ROOT_UNKNOWN`, `E_RBT_LAYER_PATH`, `E_RBT_MODEL_TARGET`, `E_RBT_PATH_GLOB_INVALID`, …)
+- Engine **caches** project config (roots, materialize, scan limits) per `project_dir` for large DAGs
+- **`source_format: protobuf`** opaque bronze (`_source_path`, `payload`, `payload_len`)
+- **`scan.protobuf_max_payload_bytes`** — default **1 GiB** (`1024³`); optional override under `scan:` in `rbt_project.yml`
+- Docs: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md) — multi-root, globs, protobuf cap, **DF listing pushdown disabled when `path_glob` is set**
 
 ## [0.3.6] — 2026-07-31
 

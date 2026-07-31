@@ -4,10 +4,13 @@
 //!
 //! * **Path A (DataFusion listing / external tables)** — Parquet, CSV, JSON/JSONL (no
 //!   jshift projection), Arrow IPC file: register via DataFusion native readers, then
-//!   wrap the resulting provider in [`BronzeTableProvider`].
-//! * **Path B (scan → MemTable)** — jshift-projected JSONL, Arrow IPC stream, `.log`,
-//!   `.txt`, TOML, or `force_scan: true`: load via `rbt::scan` into a `MemTable`, then
-//!   wrap in [`BronzeTableProvider`].
+//!   wrap the resulting provider in [`BronzeTableProvider`]. Listing predicate
+//!   pushdown is available on this path.
+//! * **Path B (scan → MemTable)** — used when rbt must apply its own filters or
+//!   inject path-derived columns. **Any non-empty `path_glob` forces Path B** (as do
+//!   `partition_by` / `require_partitions` / `inject_source_path` / `force_scan` and
+//!   formats that require scan: log, txt, toml, Arrow IPC stream, protobuf).
+//!   DataFusion directory listing pushdown is **disabled** for that source by design.
 //!
 //! [`BronzeTableProvider`] is intentionally thin: it delegates scan/schema to the
 //! inner provider and carries bronze metadata for lineage / debugging.
@@ -104,16 +107,20 @@ impl TableProvider for BronzeTableProvider {
 /// Registers all bronze sources declared by model frontmatter into `ctx`.
 ///
 /// Idempotent per `(schema, table)` within a single run (tracked by `registered`).
+/// Uses `config.roots` and `config.scan` (no re-read of yml per model).
 pub async fn register_bronze_sources_for_dag(
     ctx: &SessionContext,
     dag: &ModelDag,
     project_dir: &Path,
     registered: &mut HashSet<(String, String)>,
+    config: &crate::core::project::RbtProjectConfig,
 ) -> Result<usize> {
     let mut count = 0;
     for idx in dag.graph.node_indices() {
         let node = &dag.graph[idx];
-        if let Some(n) = register_bronze_for_model(ctx, node, project_dir, registered).await? {
+        if let Some(n) =
+            register_bronze_for_model(ctx, node, project_dir, registered, config).await?
+        {
             count += n;
         }
     }
@@ -126,6 +133,7 @@ pub async fn register_bronze_for_model(
     node: &ModelNode,
     project_dir: &Path,
     registered: &mut HashSet<(String, String)>,
+    config: &crate::core::project::RbtProjectConfig,
 ) -> Result<Option<usize>> {
     let Some(fm) = node.frontmatter.as_ref() else {
         return Ok(None);
@@ -159,15 +167,19 @@ pub async fn register_bronze_for_model(
         .resolve_format()
         .with_context(|| format!("model '{}': cannot resolve source_format", node.name))?;
 
-    let roots = crate::core::project::RbtProjectConfig::load(project_dir)
-        .map(|c| c.roots)
-        .unwrap_or_default();
     let raw_scan = fm.scan_path.as_deref().unwrap();
-    let resolved = crate::core::paths::resolve_project_path(project_dir, raw_scan, &roots)
-        .with_context(|| format!("model '{}': resolve scan_path", node.name))?;
+    let resolved = crate::core::paths::resolve_project_path(project_dir, raw_scan, &config.roots)
+        .with_context(|| {
+        format!(
+            "E_RBT_BRONZE_PATH: model '{}': cannot resolve scan_path '{}'. \
+                     Check absolute paths and `roots:` templates in rbt_project.yml.",
+            node.name, raw_scan
+        )
+    })?;
     if !resolved.exists() && !crate::core::frontmatter::is_remote_uri(raw_scan) {
         bail!(
-            "model '{}': bronze scan_path does not exist: {} (resolved {})",
+            "E_RBT_BRONZE_SCAN_PATH_NOT_FOUND: model '{}': bronze scan_path does not exist: {} \
+             (resolved {}). Hint: verify the lake path and `$root` expansion.",
             node.name,
             raw_scan,
             resolved.display()
@@ -178,7 +190,7 @@ pub async fn register_bronze_for_model(
     let use_scan = should_use_scan_path(fm, format);
 
     let (inner, mode) = if use_scan {
-        let provider = scan_to_memtable(project_dir, fm, format, roots)
+        let provider = scan_to_memtable(project_dir, fm, format, config)
             .await
             .with_context(|| format!("model '{}': bronze scan failed", node.name))?;
         (provider, BronzeRegistrationMode::ScanMemTable)
@@ -340,15 +352,20 @@ async fn scan_to_memtable(
     project_dir: &Path,
     fm: &StagingFrontmatter,
     format: SourceFormat,
-    roots: std::collections::HashMap<String, String>,
+    config: &crate::core::project::RbtProjectConfig,
 ) -> Result<Arc<dyn TableProvider>> {
-    let mut req = ScanRequest::from_frontmatter_with_roots(project_dir, fm, roots)?;
+    let mut req = ScanRequest::from_frontmatter_with_config(
+        project_dir,
+        fm,
+        config.roots.clone(),
+        &config.scan,
+    )?;
     req.format = format;
     let scanner = LakeScanner::from_request(&req);
     let batches = scanner.scan(&req).await?;
     if batches.is_empty() {
         bail!(
-            "bronze scan produced zero batches for {}",
+            "E_RBT_BRONZE_SCAN_EMPTY: bronze scan produced zero batches for {}",
             req.resolved_path()?.display()
         );
     }
@@ -398,8 +415,10 @@ SELECT ticker, price FROM {{{{ source('bronze', 'raw_trades') }}}}
 
         let engine_ctx = SessionContext::new();
         let mut registered = HashSet::new();
-        let n = register_bronze_sources_for_dag(&engine_ctx, &dag, temp.path(), &mut registered)
-            .await?;
+        let cfg = crate::core::project::RbtProjectConfig::default();
+        let n =
+            register_bronze_sources_for_dag(&engine_ctx, &dag, temp.path(), &mut registered, &cfg)
+                .await?;
         assert_eq!(n, 1);
 
         let df = engine_ctx

@@ -45,9 +45,9 @@ pub use core::{
     model_has_test_contract, parse_select_spec, resolve_scan_path, scan_path_exists,
     BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DependencyRef,
     DiagnosticSeverity, Materialization, MaterializeConfig, ModelDag, ModelLayer, ModelNode,
-    ModelTests, OutputFormat, RbtProjectConfig, RbtTemplateEngine, RefBackend, RefStrategy,
-    SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
-    DEFAULT_MEMTABLE_MAX_ROWS,
+    ModelTests, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine, RefBackend,
+    RefStrategy, ScanConfig, SelectMode, SelectToken, SourceFormat, SqlModelParser,
+    StagingFrontmatter, DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 
 pub use engine::{

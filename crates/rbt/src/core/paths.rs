@@ -6,17 +6,26 @@
 //!
 //! ```yaml
 //! roots:
-//!   nonprod_lake: /mnt/datalake/kinnalake/nonprod/lake_us/lake
-//!   prod_lake: /mnt/datalake/kinnalake/prod/lake_us/lake
+//!   nonprod_lake: /mnt/datalake/acme/nonprod/lake_us/lake
+//!   prod_lake: /mnt/datalake/acme/prod/lake_us/lake
 //! layers:
 //!   staging:
-//!     target_path: $nonprod_lake/silver/stage_rbt
+//!     target_path: $nonprod_lake/silver/stage
 //! ```
 //!
 //! Templates use `$name` or `${name}`. Expansion happens before absolute/relative join.
 //! Absolute paths (after expansion) are used as-is — they never hang under `project_dir`.
+//!
+//! # Path globs
+//!
+//! Bronze `path_glob` uses [`globset`](https://docs.rs/globset) with **literal path
+//! separators**: `*` / `?` never cross `/`; use `**` for recursive directory match
+//! (gitignore-style). When any `path_glob` is set, bronze registration **always** uses
+//! the scan→MemTable path so filters apply; DataFusion listing pushdown is disabled
+//! for that source.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +39,17 @@ pub fn resolve_project_path(
     configured: &str,
     roots: &HashMap<String, String>,
 ) -> Result<PathBuf> {
-    let expanded = expand_roots(configured.trim(), roots)?;
+    let raw = configured.trim();
+    if raw.is_empty() {
+        return Ok(project_dir.to_path_buf());
+    }
+    let expanded = expand_roots(raw, roots).with_context(|| {
+        format!(
+            "E_RBT_PATH_EXPAND: failed expanding path template '{raw}' \
+             (project_dir={})",
+            project_dir.display()
+        )
+    })?;
     if expanded.is_empty() {
         return Ok(project_dir.to_path_buf());
     }
@@ -52,12 +71,21 @@ pub fn resolve_configured_path(
     roots: &HashMap<String, String>,
 ) -> Result<PathBuf> {
     let s = configured.to_string_lossy();
-    resolve_project_path(project_dir, &s, roots)
+    resolve_project_path(project_dir, &s, roots).with_context(|| {
+        format!(
+            "E_RBT_LAYER_PATH: failed resolving configured path '{}' \
+             (project_dir={}). Hint: use an absolute path, a path relative to the \
+             project, or a `$root` / `${{root}}` template defined under `roots:` in \
+             rbt_project.yml.",
+            configured.display(),
+            project_dir.display()
+        )
+    })
 }
 
-/// Replace `${name}` then `$name` with values from `roots`.
+/// Replace `${name}` / `$name` with values from `roots`.
 ///
-/// Unknown `$identifiers` that are not in `roots` leave a hard error so typos fail fast.
+/// Unknown `$identifiers` that are not in `roots` error with `E_RBT_ROOT_UNKNOWN`.
 pub fn expand_roots(input: &str, roots: &HashMap<String, String>) -> Result<String> {
     if !input.contains('$') {
         return Ok(input.to_string());
@@ -71,18 +99,26 @@ pub fn expand_roots(input: &str, roots: &HashMap<String, String>) -> Result<Stri
                 // ${name}
                 if let Some(end) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let name: String = chars[i + 2..i + 2 + end].iter().collect();
+                    if name.is_empty() {
+                        bail!("E_RBT_ROOT_TEMPLATE: empty root name '${{}}' in path '{input}'");
+                    }
                     let val = roots.get(&name).ok_or_else(|| {
                         anyhow::anyhow!(
-                            "E_RBT_ROOT_UNKNOWN: path template references unknown root '${{{}}}'; known: {}",
-                            name,
-                            root_keys(roots)
+                            "E_RBT_ROOT_UNKNOWN: path template references unknown root \
+                             '${{{name}}}'. Known roots: {}. \
+                             Define it under `roots:` in rbt_project.yml, e.g. \
+                             `roots: {{ {name}: /absolute/lake/path }}`.",
+                            root_keys(roots),
                         )
                     })?;
                     out.push_str(val);
                     i = i + 3 + end; // past }
                     continue;
                 }
-                bail!("E_RBT_ROOT_TEMPLATE: unclosed '${{...' in path '{}'", input);
+                bail!(
+                    "E_RBT_ROOT_TEMPLATE: unclosed '${{...' in path '{input}'. \
+                     Expected `${{root_name}}`."
+                );
             }
             // $name — identifier chars
             let start = i + 1;
@@ -99,9 +135,10 @@ pub fn expand_roots(input: &str, roots: &HashMap<String, String>) -> Result<Stri
             let name: String = chars[start..j].iter().collect();
             let val = roots.get(&name).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "E_RBT_ROOT_UNKNOWN: path template references unknown root '${}'; known: {}",
-                    name,
-                    root_keys(roots)
+                    "E_RBT_ROOT_UNKNOWN: path template references unknown root \
+                     '${name}'. Known roots: {}. \
+                     Define it under `roots:` in rbt_project.yml.",
+                    root_keys(roots),
                 )
             })?;
             out.push_str(val);
@@ -138,39 +175,143 @@ pub fn is_remote_uri(path: &str) -> bool {
         || lower.starts_with("file://")
 }
 
-/// Match a file path against one or more globs relative to `scan_root` (or basename).
+/// Compiled set of path globs (gitignore-style `**` via globset).
 ///
-/// Patterns use the [`glob`] crate syntax (`*`, `?`, `**` via `glob::Pattern` — note:
-/// `**` is treated as multiple `*` segments by walking; we match against relative path
-/// string with `/` separators and against the file name alone).
-pub fn path_matches_globs(file: &Path, scan_root: &Path, globs: &[String]) -> bool {
-    if globs.is_empty() {
-        return true;
-    }
-    let rel = file
-        .strip_prefix(scan_root)
-        .unwrap_or(file)
-        .to_string_lossy()
-        .replace('\\', "/");
-    let name = file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_string();
-
-    globs.iter().any(|pat| match glob::Pattern::new(pat) {
-        Ok(p) => p.matches(&rel) || p.matches(&name) || p.matches(file.to_string_lossy().as_ref()),
-        Err(_) => false,
-    })
+/// # Semantics
+///
+/// Patterns are compiled with **literal path separators** (`GlobBuilder::literal_separator(true)`):
+/// - `*` and `?` match within a single path segment only
+/// - `**` matches across directories (including zero segments)
+/// - character classes (`[abc]`) work as in globset/gitignore
+///
+/// Empty pattern list matches **everything** (no filter).
+///
+/// # Match candidates
+///
+/// A file matches if **any** pattern matches **any** applicable candidate (OR/OR):
+///
+/// 1. **Relative path** — path of `file` relative to `scan_root`, POSIX `/` separators
+///    (always tried).
+/// 2. **Basename** — file name only, tried when the set contains at least one pattern
+///    with **no** `/` (e.g. `crawlplan.parquet`), so bare filenames match at any depth.
+/// 3. **Absolute path** — full path with `/` separators, tried when the set contains at
+///    least one pattern starting with `/`.
+///
+/// Path-shaped patterns (`*/…`, `**/…`) never fall back to basename-only matching in a
+/// way that would let a shallow `*` over-match deep trees — `*` cannot cross `/`.
+#[derive(Debug, Clone)]
+pub struct PathGlobSet {
+    set: GlobSet,
+    /// True when any pattern has no `/` (basename-style, e.g. `crawlplan.parquet`).
+    match_basename: bool,
+    /// True when any pattern starts with `/` (absolute path match).
+    match_absolute: bool,
+    /// Original patterns (for diagnostics).
+    pub patterns: Vec<String>,
 }
 
-/// Compile-time validation of glob patterns.
-pub fn validate_glob_patterns(globs: &[String]) -> Result<()> {
-    for g in globs {
-        glob::Pattern::new(g)
-            .map_err(|e| anyhow::anyhow!("E_RBT_PATH_GLOB_INVALID: pattern '{}': {}", g, e))?;
+impl PathGlobSet {
+    /// Compile patterns. Empty input matches everything.
+    pub fn compile(globs: &[String]) -> Result<Self> {
+        if globs.is_empty() {
+            return Ok(Self {
+                set: GlobSet::empty(),
+                match_basename: false,
+                match_absolute: false,
+                patterns: Vec::new(),
+            });
+        }
+        let mut builder = GlobSetBuilder::new();
+        let mut match_basename = false;
+        let mut match_absolute = false;
+        for (i, g) in globs.iter().enumerate() {
+            let trimmed = g.trim();
+            if trimmed.is_empty() {
+                bail!(
+                    "E_RBT_PATH_GLOB_INVALID: path_glob[{i}] is empty. \
+                     Use a filename (e.g. `crawlplan.parquet`) or a relative pattern \
+                     (e.g. `**/raw_snoop/crawlplan.parquet`). \
+                     Hint: `*` does not cross `/`; use `**` for recursive match."
+                );
+            }
+            if trimmed.contains('/') {
+                if trimmed.starts_with('/') {
+                    match_absolute = true;
+                }
+            } else {
+                match_basename = true;
+            }
+            // literal_separator: `*` / `?` never match `/` — only `**` is recursive.
+            let glob = GlobBuilder::new(trimmed)
+                .literal_separator(true)
+                .build()
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "E_RBT_PATH_GLOB_INVALID: path_glob[{i}] pattern '{trimmed}' is not valid: {e}. \
+                         Hint: use globset/gitignore syntax with literal separators \
+                         (`*` single segment, `**` recursive, `?`, `[abc]`)."
+                    )
+                })?;
+            builder.add(glob);
+        }
+        let set = builder.build().map_err(|e| {
+            anyhow::anyhow!(
+                "E_RBT_PATH_GLOB_INVALID: failed building glob set from patterns {globs:?}: {e}"
+            )
+        })?;
+        Ok(Self {
+            set,
+            match_basename,
+            match_absolute,
+            patterns: globs.iter().map(|s| s.trim().to_string()).collect(),
+        })
     }
-    Ok(())
+
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty()
+    }
+
+    /// Match `file` under `scan_root` against any compiled pattern (OR).
+    pub fn matches(&self, file: &Path, scan_root: &Path) -> bool {
+        if self.patterns.is_empty() {
+            return true;
+        }
+        let rel = file
+            .strip_prefix(scan_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if self.set.is_match(rel.as_str()) {
+            return true;
+        }
+        if self.match_basename {
+            if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
+                if self.set.is_match(name) {
+                    return true;
+                }
+            }
+        }
+        if self.match_absolute {
+            let abs = file.to_string_lossy().replace('\\', "/");
+            if self.set.is_match(abs.as_str()) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Match a file path against one or more globs relative to `scan_root` (or basename).
+pub fn path_matches_globs(file: &Path, scan_root: &Path, globs: &[String]) -> bool {
+    match PathGlobSet::compile(globs) {
+        Ok(set) => set.matches(file, scan_root),
+        Err(_) => false,
+    }
+}
+
+/// Compile-time validation of glob patterns (fail fast with clear codes).
+pub fn validate_glob_patterns(globs: &[String]) -> Result<()> {
+    PathGlobSet::compile(globs).map(|_| ())
 }
 
 #[cfg(test)]
@@ -183,13 +324,13 @@ mod tests {
         let roots = HashMap::new();
         let p = resolve_project_path(
             Path::new("/home/proj"),
-            "/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver",
+            "/mnt/datalake/acme/nonprod/lake_us/lake/silver",
             &roots,
         )
         .unwrap();
         assert_eq!(
             p,
-            PathBuf::from("/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver")
+            PathBuf::from("/mnt/datalake/acme/nonprod/lake_us/lake/silver")
         );
     }
 
@@ -205,55 +346,94 @@ mod tests {
         let mut roots = HashMap::new();
         roots.insert(
             "nonprod_lake".into(),
-            "/mnt/datalake/kinnalake/nonprod/lake_us/lake".into(),
+            "/mnt/datalake/acme/nonprod/lake_us/lake".into(),
         );
-        let a = expand_roots("$nonprod_lake/lz/kinnaruns", &roots).unwrap();
-        assert_eq!(
-            a,
-            "/mnt/datalake/kinnalake/nonprod/lake_us/lake/lz/kinnaruns"
-        );
+        let a = expand_roots("$nonprod_lake/lz/runs", &roots).unwrap();
+        assert_eq!(a, "/mnt/datalake/acme/nonprod/lake_us/lake/lz/runs");
         let b = expand_roots("${nonprod_lake}/silver/stage", &roots).unwrap();
-        assert_eq!(
-            b,
-            "/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage"
-        );
+        assert_eq!(b, "/mnt/datalake/acme/nonprod/lake_us/lake/silver/stage");
     }
 
     #[test]
-    fn unknown_root_errors() {
+    fn unknown_root_errors_with_hint() {
         let roots = HashMap::new();
         let err = expand_roots("$missing/x", &roots).unwrap_err().to_string();
         assert!(err.contains("E_RBT_ROOT_UNKNOWN"));
+        assert!(err.contains("roots:"));
     }
 
     #[test]
-    fn path_glob_filename_and_relative() {
-        let root = Path::new("/lake/lz/kinnaruns");
+    fn path_glob_double_star_and_basename() {
+        let root = Path::new("/lake/lz/runs");
         let file = Path::new(
-            "/lake/lz/kinnaruns/domain=x.com/report_date=2026-07-29/run_id=r1/raw_snoop/crawlplan.parquet",
+            "/lake/lz/runs/domain=x.com/report_date=2026-07-29/run_id=r1/raw_snoop/crawlplan.parquet",
         );
-        assert!(path_matches_globs(
-            file,
-            root,
-            &["**/crawlplan.parquet".into()]
-        ));
-        assert!(path_matches_globs(
-            file,
-            root,
-            &["crawlplan.parquet".into()]
-        ));
-        assert!(!path_matches_globs(
-            file,
-            root,
-            &["**/enriched_scrape.parquet".into()]
-        ));
-        assert!(path_matches_globs(file, root, &[])); // empty = match all
+        let set = PathGlobSet::compile(&["**/crawlplan.parquet".into()]).unwrap();
+        assert!(set.matches(file, root));
+        let set2 = PathGlobSet::compile(&["crawlplan.parquet".into()]).unwrap();
+        assert!(set2.matches(file, root));
+        let set3 = PathGlobSet::compile(&["**/enriched_scrape.parquet".into()]).unwrap();
+        assert!(!set3.matches(file, root));
+        assert!(PathGlobSet::compile(&[]).unwrap().matches(file, root));
+    }
+
+    #[test]
+    fn path_glob_or_semantics() {
+        let root = Path::new("/lake");
+        let a = Path::new("/lake/a/foo.parquet");
+        let b = Path::new("/lake/b/bar.parquet");
+        let set =
+            PathGlobSet::compile(&["**/foo.parquet".into(), "**/bar.parquet".into()]).unwrap();
+        assert!(set.matches(a, root));
+        assert!(set.matches(b, root));
+    }
+
+    #[test]
+    fn path_glob_nested_single_star() {
+        let root = Path::new("/lake/lz");
+        let file =
+            Path::new("/lake/lz/domain=x/report_date=d/run_id=r/raw_snoop/crawlplan.parquet");
+        // single-segment * does not cross / (literal_separator)
+        let shallow = PathGlobSet::compile(&["*/crawlplan.parquet".into()]).unwrap();
+        assert!(
+            !shallow.matches(file, root),
+            "*/crawlplan.parquet must not match a 5-segment relative path"
+        );
+        let one_level = Path::new("/lake/lz/raw_snoop/crawlplan.parquet");
+        assert!(shallow.matches(one_level, root));
+        let deep = PathGlobSet::compile(&["*/*/*/*/crawlplan.parquet".into()]).unwrap();
+        assert!(deep.matches(file, root));
+        // double-star still reaches deep trees
+        let any = PathGlobSet::compile(&["**/crawlplan.parquet".into()]).unwrap();
+        assert!(any.matches(file, root));
+    }
+
+    #[test]
+    fn path_glob_basename_only_matches_any_depth() {
+        let root = Path::new("/lake/lz");
+        let deep = Path::new("/lake/lz/a/b/c/crawlplan.parquet");
+        let set = PathGlobSet::compile(&["crawlplan.parquet".into()]).unwrap();
+        assert!(set.matches(deep, root));
+        assert!(!PathGlobSet::compile(&["other.parquet".into()])
+            .unwrap()
+            .matches(deep, root));
+    }
+
+    #[test]
+    fn path_glob_absolute_pattern() {
+        let root = Path::new("/lake");
+        let file = Path::new("/mnt/datalake/acme/lz/runs/x.pb");
+        let set = PathGlobSet::compile(&["/mnt/datalake/**/*.pb".into()]).unwrap();
+        assert!(set.matches(file, root));
+        assert!(!PathGlobSet::compile(&["/other/**/*.pb".into()])
+            .unwrap()
+            .matches(file, root));
     }
 
     #[test]
     fn invalid_glob_rejected() {
         assert!(validate_glob_patterns(&["**/ok.parquet".into()]).is_ok());
-        // unclosed bracket is invalid in glob
         assert!(validate_glob_patterns(&["file[".into()]).is_err());
+        assert!(validate_glob_patterns(&["".into()]).is_err());
     }
 }
