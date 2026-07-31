@@ -117,7 +117,7 @@ Staging frontmatter: `scan_path`, `source_format`, `grain`, `tests`, `columns.*.
 
 ## Package layout
 
-Single workspace member: [`crates/rbt`](crates/rbt) — lib modules (`core`, `engine`, `scan`, `json`, `materializer`, `testing`) + bin `rbt`.
+Single workspace member: [`crates/rbt`](crates/rbt) (crates.io: **`rbt-datalake`**) — lib modules (`core`, `engine`, `scan`, `json`, `materializer`, `testing`) + bin/lib name **`rbt`**.
 
 ## Docs
 
