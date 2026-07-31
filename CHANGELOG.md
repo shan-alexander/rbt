@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.7] — 2026-07-31
+
+### Added
+- **`path_glob`** on staging frontmatter (string or list, OR match) for multi-artifact hive bronze
+- **`roots:`** map in `rbt_project.yml` with `$name` / `${name}` path templates
+- Explicit absolute + multi-root path resolution for layer `target_path` and `scan_path`
+- **`source_format: protobuf`** opaque bronze (one row/file: `_source_path`, `payload`, `payload_len`)
+- Docs: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md)
+
 ## [0.3.6] — 2026-07-31
 
 ### Added

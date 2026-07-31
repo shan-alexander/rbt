@@ -3,6 +3,7 @@
 pub mod dag;
 pub mod frontmatter;
 pub mod parser;
+pub mod paths;
 pub mod project;
 pub mod select;
 
@@ -12,6 +13,10 @@ pub use frontmatter::{
     ColumnMeta, DiagnosticSeverity, ModelTests, SourceFormat, StagingFrontmatter,
 };
 pub use parser::{DependencyRef, RbtTemplateEngine, SqlModelParser};
+pub use paths::{
+    expand_roots, path_matches_globs, resolve_configured_path, resolve_project_path,
+    validate_glob_patterns,
+};
 pub use project::{
     MaterializeConfig, RbtProjectConfig, RefBackend, RefStrategy, DEFAULT_MEMTABLE_MAX_ROWS,
 };

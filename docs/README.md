@@ -10,6 +10,7 @@
 | [CRATES_IO.md](CRATES_IO.md) | Why orphan crates exist; single-package policy |
 | [STREAMING_MATERIALIZE_PLAN.md](STREAMING_MATERIALIZE_PLAN.md) | Plan: stream DF → Parquet, zero-copy bounds, crate research |
 | [REF_STRATEGY.md](REF_STRATEGY.md) | `ref()` MemTable vs lake re-read config + bench tradeoffs |
+| [MULTI_ROOT_AND_PATH_GLOB.md](MULTI_ROOT_AND_PATH_GLOB.md) | Absolute paths, `$roots`, `path_glob`, protobuf bronze, Kinna notes |
 | [../crates/rbt/benches/README.md](../crates/rbt/benches/README.md) | Criterion bench harness |
 
 ## ADRs (active)

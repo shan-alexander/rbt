@@ -2,13 +2,15 @@
 //!
 //! Formats: JSONL (jshift), JSON, Parquet, CSV, Arrow IPC (file/stream), log, txt, TOML.
 
-use crate::core::frontmatter::{resolve_scan_path, SourceFormat, StagingFrontmatter};
+use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
+use crate::core::paths::{path_matches_globs, resolve_project_path, validate_glob_patterns};
 use anyhow::{anyhow, bail, Context, Result};
-use arrow::array::{ArrayRef, Int64Builder, StringBuilder};
+use arrow::array::{ArrayRef, BinaryBuilder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -26,8 +28,12 @@ pub struct ScanRequest {
     pub partition_by: Vec<String>,
     /// Keep only files whose hive path matches these partition values.
     pub require_partitions: std::collections::HashMap<String, String>,
+    /// Filename / relative globs under scan_path (OR). Empty = all format matches.
+    pub path_glob: Vec<String>,
     /// Inject `_source_path` column (absolute path of the bronze file).
     pub inject_source_path: bool,
+    /// Named roots for `$name` expansion in `scan_path` (from project config).
+    pub roots: HashMap<String, String>,
 }
 
 impl ScanRequest {
@@ -35,12 +41,22 @@ impl ScanRequest {
         project_dir: impl AsRef<Path>,
         fm: &StagingFrontmatter,
     ) -> Result<Self> {
+        Self::from_frontmatter_with_roots(project_dir, fm, HashMap::new())
+    }
+
+    pub fn from_frontmatter_with_roots(
+        project_dir: impl AsRef<Path>,
+        fm: &StagingFrontmatter,
+        roots: HashMap<String, String>,
+    ) -> Result<Self> {
         let scan_path = fm
             .scan_path
             .as_ref()
             .context("frontmatter.scan_path is required for bronze scan")?
             .clone();
         let format = fm.resolve_format()?;
+        let path_glob = fm.path_glob.clone().unwrap_or_default();
+        validate_glob_patterns(&path_glob)?;
         Ok(Self {
             project_dir: project_dir.as_ref().to_path_buf(),
             scan_path,
@@ -49,12 +65,14 @@ impl ScanRequest {
             toml_rows_key: fm.toml_rows_key.clone(),
             partition_by: fm.partition_by.clone().unwrap_or_default(),
             require_partitions: fm.require_partitions.clone().unwrap_or_default(),
+            path_glob,
             inject_source_path: fm.inject_source_path.unwrap_or(false),
+            roots,
         })
     }
 
-    pub fn resolved_path(&self) -> PathBuf {
-        resolve_scan_path(&self.project_dir, &self.scan_path)
+    pub fn resolved_path(&self) -> Result<PathBuf> {
+        resolve_project_path(&self.project_dir, &self.scan_path, &self.roots)
     }
 }
 
@@ -76,7 +94,9 @@ impl LakeScanner {
 
     /// Scan using a full [`ScanRequest`] (format-aware).
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        let root = req.resolved_path();
+        let root = req
+            .resolved_path()
+            .with_context(|| format!("resolve scan_path '{}'", req.scan_path))?;
         if !root.exists() {
             bail!(
                 "Bronze scan_path does not exist: {} (resolved from '{}')",
@@ -90,19 +110,24 @@ impl LakeScanner {
         if !req.require_partitions.is_empty() {
             files.retain(|f| path_matches_require_partitions(f, &root, &req.require_partitions));
         }
+        if !req.path_glob.is_empty() {
+            files.retain(|f| path_matches_globs(f, &root, &req.path_glob));
+        }
         if files.is_empty() {
             bail!(
-                "No {} files found under {} (after partition filters)",
+                "No {} files found under {} (after partition/path_glob filters; globs={:?})",
                 req.format.as_str(),
-                root.display()
+                root.display(),
+                req.path_glob
             );
         }
 
         tracing::info!(
-            "Bronze scan: {} file(s) under {} (format={})",
+            "Bronze scan: {} file(s) under {} (format={}, globs={:?})",
             files.len(),
             root.display(),
-            req.format
+            req.format,
+            req.path_glob
         );
 
         let mut batches = Vec::new();
@@ -168,6 +193,7 @@ impl LakeScanner {
     fn read_file(&self, file_path: &Path, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
         match req.format {
             SourceFormat::Parquet => read_parquet(file_path, None),
+            SourceFormat::Protobuf => Ok(vec![read_protobuf_opaque(file_path)?]),
             SourceFormat::Csv => read_csv(file_path, None),
             SourceFormat::Jsonl | SourceFormat::Json => {
                 if !self.paths.is_empty() {
@@ -252,7 +278,41 @@ fn extension_matches(format: SourceFormat, ext: &str) -> bool {
         SourceFormat::Log => ext == "log",
         SourceFormat::Txt => matches!(ext.as_str(), "txt" | "text" | "md"),
         SourceFormat::Toml => ext == "toml",
+        SourceFormat::Protobuf => matches!(ext.as_str(), "pb" | "protobuf" | "protobin"),
     }
+}
+
+/// Opaque protobuf bronze: one row per file with path + raw bytes.
+///
+/// Typed message decode is intentionally deferred (schema registry / Rust models).
+fn read_protobuf_opaque(path: &Path) -> Result<RecordBatch> {
+    let mut file =
+        File::open(path).with_context(|| format!("open protobuf file {}", path.display()))?;
+    let mut payload = Vec::new();
+    file.read_to_end(&mut payload)
+        .with_context(|| format!("read protobuf file {}", path.display()))?;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("_source_path", DataType::Utf8, false),
+        Field::new("payload", DataType::Binary, false),
+        Field::new("payload_len", DataType::Int64, false),
+    ]));
+
+    let mut path_b = StringBuilder::new();
+    let mut bin_b = BinaryBuilder::new();
+    let mut len_b = Int64Builder::new();
+    path_b.append_value(path.to_string_lossy().as_ref());
+    bin_b.append_value(&payload);
+    len_b.append_value(payload.len() as i64);
+
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(path_b.finish()),
+            Arc::new(bin_b.finish()),
+            Arc::new(len_b.finish()),
+        ],
+    )?)
 }
 
 fn collect_files_for_format(
@@ -783,6 +843,88 @@ k = "b"
             .downcast_ref::<StringArray>()
             .unwrap();
         assert!(col.value(0) == "a" || col.value(1) == "a");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_path_glob_filters_artifacts() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        // Simulate kinnaruns multi-artifact hive
+        let d1 = root
+            .join("domain=x.com")
+            .join("report_date=2026-07-29")
+            .join("run_id=r1")
+            .join("raw_snoop");
+        std::fs::create_dir_all(&d1)?;
+        // two different parquet artifact types
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        for (name, ids) in [
+            ("crawlplan.parquet", vec![1i64]),
+            ("other.parquet", vec![9i64]),
+        ] {
+            let batch =
+                RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(ids))])?;
+            let f = File::create(d1.join(name))?;
+            let mut w =
+                parquet::arrow::arrow_writer::ArrowWriter::try_new(f, schema.clone(), None)?;
+            w.write(&batch)?;
+            w.close()?;
+        }
+
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Parquet),
+            scan_path: Some(".".into()),
+            path_glob: Some(vec!["**/crawlplan.parquet".into()]),
+            partition_by: Some(vec!["domain".into()]),
+            inject_source_path: Some(true),
+            ..Default::default()
+        };
+        let req = ScanRequest::from_frontmatter(root, &fm)?;
+        let scanner = LakeScanner::from_request(&req);
+        let batches = scanner.scan(&req).await?;
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(rows, 1, "only crawlplan.parquet rows");
+        assert!(batches[0].schema().index_of("domain").is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_protobuf_opaque_scan() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let pb = temp.path().join("msg.pb");
+        std::fs::write(&pb, b"\x08\x96\x01")?; // arbitrary bytes
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Protobuf),
+            scan_path: Some(pb.file_name().unwrap().to_string_lossy().into()),
+            ..Default::default()
+        };
+        let req = ScanRequest::from_frontmatter(temp.path(), &fm)?;
+        let scanner = LakeScanner::from_request(&req);
+        let batches = scanner.scan(&req).await?;
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(batches[0].schema().field(0).name(), "_source_path");
+        assert_eq!(batches[0].schema().field(1).name(), "payload");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_absolute_scan_path() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let abs = temp.path().join("abs.jsonl");
+        std::fs::write(&abs, b"{\"a\":1}\n{\"a\":2}\n")?;
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Jsonl),
+            scan_path: Some(abs.to_string_lossy().into()),
+            ..Default::default()
+        };
+        // project_dir is different from parent of abs
+        let proj = tempfile::tempdir()?;
+        let req = ScanRequest::from_frontmatter(proj.path(), &fm)?;
+        let scanner = LakeScanner::from_request(&req);
+        let batches = scanner.scan(&req).await?;
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
         Ok(())
     }
 }

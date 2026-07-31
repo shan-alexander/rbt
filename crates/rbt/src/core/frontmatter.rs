@@ -57,6 +57,12 @@ pub enum SourceFormat {
     Txt,
     /// TOML tables / array-of-tables as rows.
     Toml,
+    /// Length-delimited or whole-file protobuf blobs (opaque bronze).
+    ///
+    /// Each file becomes one row: `_source_path` (Utf8) + `payload` (Binary).
+    /// Typed decode of domain messages is a later step (Rust models / schema registry).
+    #[serde(alias = "pb", alias = "proto")]
+    Protobuf,
 }
 
 impl SourceFormat {
@@ -71,6 +77,7 @@ impl SourceFormat {
             Self::Log => "log",
             Self::Txt => "txt",
             Self::Toml => "toml",
+            Self::Protobuf => "protobuf",
         }
     }
 
@@ -91,6 +98,7 @@ impl SourceFormat {
             "log" => Some(Self::Log),
             "txt" | "text" | "md" => Some(Self::Txt),
             "toml" => Some(Self::Toml),
+            "pb" | "protobuf" | "protobin" => Some(Self::Protobuf),
             _ => None,
         }
     }
@@ -108,8 +116,9 @@ impl SourceFormat {
             "log" => Ok(Self::Log),
             "txt" | "text" => Ok(Self::Txt),
             "toml" => Ok(Self::Toml),
+            "protobuf" | "pb" | "proto" | "protobin" => Ok(Self::Protobuf),
             other => bail!(
-                "Unknown source_format '{}'. Expected one of: jsonl, json, parquet, csv, arrow_ipc, arrow_ipc_stream, log, txt, toml",
+                "Unknown source_format '{}'. Expected one of: jsonl, json, parquet, csv, arrow_ipc, arrow_ipc_stream, log, txt, toml, protobuf",
                 other
             ),
         }
@@ -192,9 +201,16 @@ pub struct StagingFrontmatter {
     /// Explicit bronze format. If omitted, inferred from `scan_path` extension.
     #[serde(default)]
     pub source_format: Option<SourceFormat>,
-    /// File or directory to scan (project-relative or absolute; `s3://` deferred).
+    /// File or directory to scan (project-relative, absolute, or `$root/...` template).
     #[serde(default)]
     pub scan_path: Option<String>,
+    /// Filename / relative-path glob(s) under `scan_path` (OR semantics).
+    ///
+    /// Examples: `crawlplan.parquet`, `**/raw_snoop/crawlplan.parquet`, `*.jsonl`.
+    /// Empty / omitted = all files matching `source_format`.
+    /// Accepts a single string or a YAML list.
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub path_glob: Option<Vec<String>>,
     /// Optional hive-style partition keys (path injection + future pruning).
     #[serde(default)]
     pub partition_by: Option<Vec<String>>,
@@ -331,44 +347,83 @@ impl BronzeValidationReport {
     }
 }
 
-/// Resolve `scan_path` against the project root. Non-local URIs are returned as-is (unchecked).
+/// Resolve `scan_path` against the project root (no named roots). Prefer
+/// [`crate::core::paths::resolve_project_path`] when `roots:` are in play.
 pub fn resolve_scan_path(project_dir: &Path, scan_path: &str) -> PathBuf {
-    let trimmed = scan_path.trim();
-    if trimmed.is_empty() {
-        return project_dir.to_path_buf();
-    }
-    if is_remote_uri(trimmed) {
-        return PathBuf::from(trimmed);
-    }
-    let p = Path::new(trimmed);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        project_dir.join(p)
-    }
+    crate::core::paths::resolve_project_path(project_dir, scan_path, &Default::default())
+        .unwrap_or_else(|_| project_dir.to_path_buf())
 }
 
-pub fn is_remote_uri(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.starts_with("s3://")
-        || lower.starts_with("s3a://")
-        || lower.starts_with("gs://")
-        || lower.starts_with("gcs://")
-        || lower.starts_with("az://")
-        || lower.starts_with("abfs://")
-        || lower.starts_with("abfss://")
-        || lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("file://")
+pub use crate::core::paths::is_remote_uri;
+
+/// Deserialize either a single string or a sequence into `Option<Vec<String>>`.
+fn deserialize_string_or_vec<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct StringOrVec;
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Option<Vec<String>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string or list of strings")
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Some(vec![v.to_string()]))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Self::Value, E> {
+            Ok(Some(vec![v]))
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                out.push(s);
+            }
+            Ok(Some(out))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 /// Whether a resolved local scan path currently exists (file or directory).
 /// Remote URIs are treated as "exists" for compile (runtime / object-store later).
 pub fn scan_path_exists(project_dir: &Path, scan_path: &str) -> bool {
+    scan_path_exists_with_roots(project_dir, scan_path, &std::collections::HashMap::new())
+}
+
+/// Like [`scan_path_exists`] but expands `$root` templates from project config.
+pub fn scan_path_exists_with_roots(
+    project_dir: &Path,
+    scan_path: &str,
+    roots: &std::collections::HashMap<String, String>,
+) -> bool {
     if is_remote_uri(scan_path.trim()) {
         return true;
     }
-    let resolved = resolve_scan_path(project_dir, scan_path);
+    let Ok(resolved) = crate::core::paths::resolve_project_path(project_dir, scan_path, roots)
+    else {
+        return false;
+    };
     // Support simple trailing globs: `dir/*.jsonl` → check parent dir
     let check = strip_simple_glob(&resolved);
     check.exists()

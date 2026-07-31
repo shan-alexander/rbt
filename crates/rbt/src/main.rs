@@ -170,7 +170,11 @@ async fn main() -> Result<()> {
             }
 
             // Bronze validation on full project (or selected subgraph for paths)
-            let report = dag.validate_bronze_sources(&project_dir, bronze_check.into())?;
+            let report = dag.validate_bronze_sources_with_roots(
+                &project_dir,
+                bronze_check.into(),
+                &config.roots,
+            )?;
             for d in &report.diagnostics {
                 eprintln!("{d}");
             }
@@ -209,7 +213,11 @@ async fn main() -> Result<()> {
                 .apply_select(select.as_deref(), SelectMode::Execute)
                 .context("invalid --select")?;
 
-            let report = dag.validate_bronze_sources(&project_dir, bronze_check.into())?;
+            let report = dag.validate_bronze_sources_with_roots(
+                &project_dir,
+                bronze_check.into(),
+                &config.roots,
+            )?;
             for d in &report.diagnostics {
                 eprintln!("{d}");
             }
@@ -280,7 +288,11 @@ async fn main() -> Result<()> {
                 .apply_select(Some(&select_spec), SelectMode::Execute)
                 .context("invalid --select / --model")?;
 
-            let report = dag.validate_bronze_sources(&project_dir, bronze_check.into())?;
+            let report = dag.validate_bronze_sources_with_roots(
+                &project_dir,
+                bronze_check.into(),
+                &config.roots,
+            )?;
             for d in &report.diagnostics {
                 eprintln!("{d}");
             }

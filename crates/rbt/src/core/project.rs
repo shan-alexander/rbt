@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use super::dag::{Materialization, ModelDag, ModelLayer, OutputFormat};
+use super::paths::{resolve_configured_path, resolve_project_path};
 
 /// Default MemTable row cutoff when `ref_strategy: memtable` and max rows omitted.
 pub const DEFAULT_MEMTABLE_MAX_ROWS: usize = 50_000;
@@ -92,6 +93,11 @@ pub struct RbtProjectConfig {
     /// Optional; defaults to lake-as-truth Parquet re-read for `ref()`.
     #[serde(default)]
     pub materialize: MaterializeConfig,
+    /// Named absolute (or relative) roots for multi-root lakes.
+    ///
+    /// Referenced in paths as `$name` or `${name}` (e.g. `$nonprod_lake/lz/kinnaruns`).
+    #[serde(default)]
+    pub roots: HashMap<String, String>,
 }
 
 impl Default for RbtProjectConfig {
@@ -129,6 +135,7 @@ impl Default for RbtProjectConfig {
             target_path: PathBuf::from("lake/gold"),
             layers,
             materialize: MaterializeConfig::default(),
+            roots: HashMap::new(),
         }
     }
 }
@@ -152,7 +159,33 @@ impl RbtProjectConfig {
         }
     }
 
-    /// Resolves destination output directory path for a model based on its layer configuration.
+    /// Resolve a configured path (absolute, relative, or `$root/...`) against the project.
+    pub fn resolve_path(&self, project_dir: &Path, configured: &str) -> Result<PathBuf> {
+        resolve_project_path(project_dir, configured, &self.roots)
+    }
+
+    /// Layer output directory (file parent for flat parquet, or table root parent).
+    pub fn resolve_layer_target_dir(
+        &self,
+        project_dir: &Path,
+        layer: ModelLayer,
+    ) -> Result<PathBuf> {
+        let layer_key = match layer {
+            ModelLayer::Staging => "staging",
+            ModelLayer::Transform => "transforms",
+            ModelLayer::Mart => "marts",
+        };
+        if let Some(layer_cfg) = self.layers.get(layer_key) {
+            resolve_configured_path(project_dir, &layer_cfg.target_path, &self.roots)
+        } else {
+            resolve_configured_path(project_dir, &self.target_path, &self.roots)
+        }
+    }
+
+    /// Resolves destination output file path for a model based on its layer configuration.
+    ///
+    /// Supports absolute `target_path` and `$root` templates — never nests an absolute
+    /// lake path under `project_dir`.
     pub fn resolve_model_target_path(
         &self,
         project_dir: &Path,
@@ -160,19 +193,9 @@ impl RbtProjectConfig {
         layer: ModelLayer,
         ext: &str,
     ) -> PathBuf {
-        let layer_key = match layer {
-            ModelLayer::Staging => "staging",
-            ModelLayer::Transform => "transforms",
-            ModelLayer::Mart => "marts",
-        };
-
-        let target_dir = if let Some(layer_cfg) = self.layers.get(layer_key) {
-            project_dir.join(&layer_cfg.target_path)
-        } else {
-            project_dir.join(&self.target_path)
-        };
-
-        target_dir.join(format!("{}.{}", model_name, ext))
+        self.resolve_layer_target_dir(project_dir, layer)
+            .unwrap_or_else(|_| project_dir.join("lake/gold"))
+            .join(format!("{}.{}", model_name, ext))
     }
 
     /// Directory target for Iceberg-style table roots (no file extension).
@@ -182,17 +205,9 @@ impl RbtProjectConfig {
         model_name: &str,
         layer: ModelLayer,
     ) -> PathBuf {
-        let layer_key = match layer {
-            ModelLayer::Staging => "staging",
-            ModelLayer::Transform => "transforms",
-            ModelLayer::Mart => "marts",
-        };
-        let target_dir = if let Some(layer_cfg) = self.layers.get(layer_key) {
-            project_dir.join(&layer_cfg.target_path)
-        } else {
-            project_dir.join(&self.target_path)
-        };
-        target_dir.join(model_name)
+        self.resolve_layer_target_dir(project_dir, layer)
+            .unwrap_or_else(|_| project_dir.join("lake/gold"))
+            .join(model_name)
     }
 
     /// Discovers all `.sql` models under `models/` directory, resolves layer target paths, and constructs `ModelDag`.
@@ -406,6 +421,58 @@ materialize:
         let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
         assert_eq!(cfg.materialize.ref_strategy, RefStrategy::Memtable);
         assert_eq!(cfg.materialize.memtable_max_rows, DEFAULT_MEMTABLE_MAX_ROWS);
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_layer_target_not_nested_under_project() -> Result<()> {
+        let yml = r#"
+name: kinna
+version: "1"
+models_dir: models
+target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/gold
+layers:
+  staging:
+    path: models/staging
+    target_path: /mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt
+    default_format: parquet
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        let project = Path::new("/home/dev/rbt_projects/kinna");
+        let stg =
+            cfg.resolve_model_target_path(project, "stg_crawlplan", ModelLayer::Staging, "parquet");
+        assert_eq!(
+            stg,
+            PathBuf::from(
+                "/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt/stg_crawlplan.parquet"
+            )
+        );
+        assert!(!stg.starts_with(project));
+        Ok(())
+    }
+
+    #[test]
+    fn multi_root_template_in_layer_target() -> Result<()> {
+        let yml = r#"
+name: kinna
+version: "1"
+models_dir: models
+target_path: $nonprod_lake/gold
+roots:
+  nonprod_lake: /mnt/datalake/kinnalake/nonprod/lake_us/lake
+layers:
+  staging:
+    path: models/staging
+    target_path: $nonprod_lake/silver/stage_rbt
+    default_format: parquet
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        let project = Path::new("/home/dev/proj");
+        let dir = cfg.resolve_layer_target_dir(project, ModelLayer::Staging)?;
+        assert_eq!(
+            dir,
+            PathBuf::from("/mnt/datalake/kinnalake/nonprod/lake_us/lake/silver/stage_rbt")
+        );
         Ok(())
     }
 }

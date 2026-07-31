@@ -13,7 +13,7 @@
 //! inner provider and carries bronze metadata for lineage / debugging.
 
 use crate::core::dag::{ModelDag, ModelNode};
-use crate::core::frontmatter::{resolve_scan_path, SourceFormat, StagingFrontmatter};
+use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
 use crate::scan::{LakeScanner, ScanRequest};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -159,14 +159,17 @@ pub async fn register_bronze_for_model(
         .resolve_format()
         .with_context(|| format!("model '{}': cannot resolve source_format", node.name))?;
 
-    let resolved = resolve_scan_path(project_dir, fm.scan_path.as_deref().unwrap());
-    if !resolved.exists()
-        && !crate::core::frontmatter::is_remote_uri(fm.scan_path.as_deref().unwrap())
-    {
+    let roots = crate::core::project::RbtProjectConfig::load(project_dir)
+        .map(|c| c.roots)
+        .unwrap_or_default();
+    let raw_scan = fm.scan_path.as_deref().unwrap();
+    let resolved = crate::core::paths::resolve_project_path(project_dir, raw_scan, &roots)
+        .with_context(|| format!("model '{}': resolve scan_path", node.name))?;
+    if !resolved.exists() && !crate::core::frontmatter::is_remote_uri(raw_scan) {
         bail!(
             "model '{}': bronze scan_path does not exist: {} (resolved {})",
             node.name,
-            fm.scan_path.as_deref().unwrap(),
+            raw_scan,
             resolved.display()
         );
     }
@@ -175,7 +178,7 @@ pub async fn register_bronze_for_model(
     let use_scan = should_use_scan_path(fm, format);
 
     let (inner, mode) = if use_scan {
-        let provider = scan_to_memtable(project_dir, fm, format)
+        let provider = scan_to_memtable(project_dir, fm, format, roots)
             .await
             .with_context(|| format!("model '{}': bronze scan failed", node.name))?;
         (provider, BronzeRegistrationMode::ScanMemTable)
@@ -224,8 +227,8 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
     if fm.force_scan.unwrap_or(false) {
         return true;
     }
-    // Hive partition injection / filters / source path require the scan path
-    // (DataFusion listing does not inject path-derived columns).
+    // Hive partition injection / filters / source path / path_glob require the scan path
+    // (DataFusion listing does not inject path-derived columns or apply rbt globs).
     if fm
         .partition_by
         .as_ref()
@@ -233,6 +236,11 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
         .unwrap_or(false)
         || fm
             .require_partitions
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+        || fm
+            .path_glob
             .as_ref()
             .map(|p| !p.is_empty())
             .unwrap_or(false)
@@ -246,7 +254,7 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
     {
         return true;
     }
-    // Nested hive dirs + stream IPC are not reliably handled by DF listing alone.
+    // Nested hive dirs, stream IPC, and opaque protobuf need the scan path.
     matches!(
         format,
         SourceFormat::Log
@@ -254,6 +262,7 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
             | SourceFormat::Toml
             | SourceFormat::ArrowIpc
             | SourceFormat::ArrowIpcStream
+            | SourceFormat::Protobuf
     )
 }
 
@@ -331,15 +340,16 @@ async fn scan_to_memtable(
     project_dir: &Path,
     fm: &StagingFrontmatter,
     format: SourceFormat,
+    roots: std::collections::HashMap<String, String>,
 ) -> Result<Arc<dyn TableProvider>> {
-    let mut req = ScanRequest::from_frontmatter(project_dir, fm)?;
+    let mut req = ScanRequest::from_frontmatter_with_roots(project_dir, fm, roots)?;
     req.format = format;
     let scanner = LakeScanner::from_request(&req);
     let batches = scanner.scan(&req).await?;
     if batches.is_empty() {
         bail!(
             "bronze scan produced zero batches for {}",
-            req.resolved_path().display()
+            req.resolved_path()?.display()
         );
     }
     let schema = batches[0].schema();

@@ -3328,7 +3328,7 @@ dependencies = [
 
 [[package]]
 name = "rbt-datalake"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3337,6 +3337,7 @@ dependencies = [
  "clap",
  "criterion",
  "datafusion",
+ "glob",
  "iceberg",
  "iceberg-datafusion",
  "jshift",

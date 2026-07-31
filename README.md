@@ -24,7 +24,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.3.6"
+rbt-datalake = "0.3.7"
 ```
 
 ```rust
@@ -113,7 +113,8 @@ my_project/
   lake/gold/…
 ```
 
-Staging frontmatter: `scan_path`, `source_format`, `grain`, `tests`, `columns.*.description` / `context`.
+Staging frontmatter: `scan_path`, `source_format`, `path_glob`, `partition_by`, `grain`, `tests`, `columns.*.description` / `context`.  
+Multi-root lakes / absolute targets: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md).
 
 ### `ref()` after materialize (optional)
 

@@ -1,6 +1,6 @@
 use super::frontmatter::{
-    scan_path_exists, BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport,
-    DiagnosticSeverity, StagingFrontmatter,
+    BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, DiagnosticSeverity,
+    StagingFrontmatter,
 };
 use super::parser::{DependencyRef, SqlModelParser};
 use anyhow::{bail, Result};
@@ -308,6 +308,20 @@ impl ModelDag {
         project_dir: &Path,
         mode: BronzeCheckMode,
     ) -> Result<BronzeValidationReport> {
+        self.validate_bronze_sources_with_roots(
+            project_dir,
+            mode,
+            &std::collections::HashMap::new(),
+        )
+    }
+
+    /// Compile-time bronze checks with project `roots:` for `$name` path templates.
+    pub fn validate_bronze_sources_with_roots(
+        &self,
+        project_dir: &Path,
+        mode: BronzeCheckMode,
+        roots: &std::collections::HashMap<String, String>,
+    ) -> Result<BronzeValidationReport> {
         if mode == BronzeCheckMode::Off {
             return Ok(BronzeValidationReport::default());
         }
@@ -365,8 +379,9 @@ impl ModelDag {
                 });
             }
 
-            if !scan_path_exists(project_dir, scan_path) {
-                let resolved = super::frontmatter::resolve_scan_path(project_dir, scan_path);
+            if !super::frontmatter::scan_path_exists_with_roots(project_dir, scan_path, roots) {
+                let resolved = super::paths::resolve_project_path(project_dir, scan_path, roots)
+                    .unwrap_or_else(|_| project_dir.join(scan_path));
                 report.diagnostics.push(BronzeDiagnostic {
                     model: node.name.clone(),
                     severity,
@@ -377,6 +392,18 @@ impl ModelDag {
                         resolved.display()
                     ),
                 });
+            }
+
+            // Validate path_glob patterns early (syntax only).
+            if let Some(globs) = fm.path_glob.as_ref() {
+                if let Err(e) = super::paths::validate_glob_patterns(globs) {
+                    report.diagnostics.push(BronzeDiagnostic {
+                        model: node.name.clone(),
+                        severity,
+                        code: "E_RBT_PATH_GLOB_INVALID",
+                        message: e.to_string(),
+                    });
+                }
             }
 
             // source() identity vs frontmatter overrides — soft check
