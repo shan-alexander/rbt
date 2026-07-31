@@ -2,6 +2,33 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.0] — 2026-07-31
+
+### Added (P4 — measure, incremental, WAP, UDFs)
+
+#### Built-in scalar UDFs (ADR-003 Design A)
+- Auto-registered on every `TransformationEngine`: `rbt_upper`, `rbt_lower`, `rbt_trim`, `rbt_nullif_empty`
+- API: `register_builtin_udfs`, `register_scalar_udf`, `BUILTIN_UDF_NAMES`
+
+#### Incremental append (honest, part files)
+- Frontmatter `materialization: incremental_append` (also `append` / `incremental`)
+- Writes `model.parts/part-*.parquet` + `_rbt_manifest.json` (no full rewrite)
+- `ref()` registers the **parts directory**
+- **Not** row-level MERGE (`incremental_merge` errors with clear code)
+
+#### Write-Audit-Publish (honest FS protocol)
+- `materialize.wap: true` → stage under `.wap/{run_id}/`, audit, atomic publish
+- Failed audit leaves production dest untouched; audit JSON retained
+- **Not** Iceberg branch WAP theater
+
+#### Measure packs
+- `rbt measure --scenario smoke_pipeline|validate_dx|incremental_append`
+- JSON report: wall_ms, rows, models, optional Linux VmRSS
+- Default path: `{project}/.rbt/measure/{scenario}.json`
+
+### Docs
+- [docs/P4_CAPABILITIES.md](docs/P4_CAPABILITIES.md)
+
 ## [0.4.0] — 2026-07-31
 
 ### Added (P2 full — Iceberg catalog SoR proof gate)

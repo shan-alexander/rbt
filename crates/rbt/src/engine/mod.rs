@@ -1,15 +1,18 @@
 //! `rbt::engine`: Apache DataFusion query engine integration, bronze registration, and DAG execution.
 
 pub mod bronze;
+pub mod udf;
 
-use crate::core::dag::{ModelDag, ModelNode, OutputFormat};
+use crate::core::dag::{Materialization, ModelDag, ModelNode, OutputFormat};
 use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
 };
 use crate::materializer::{
-    load_parquet_batches, materialize_stream, sibling_iceberg_dir, MaterializeWriteOptions,
-    MultiFormatWriter, StreamWriteStats,
+    incremental_ref_path, load_parquet_batches, materialize_incremental_append_stream,
+    materialize_stream, new_wap_run_id, sibling_iceberg_dir, wap_publish, MaterializeWriteOptions,
+    MultiFormatWriter, StreamWriteStats, WapModelPaths,
 };
+use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
 use anyhow::{bail, Context, Result};
 use datafusion::datasource::MemTable;
@@ -87,8 +90,12 @@ impl Default for TransformationEngine {
 
 impl TransformationEngine {
     pub fn new() -> Self {
+        let ctx = SessionContext::new();
+        if let Err(e) = register_builtin_udfs(&ctx) {
+            tracing::warn!("E_RBT_UDF: failed to register builtins: {e}");
+        }
         Self {
-            ctx: SessionContext::new(),
+            ctx,
             project_cache: Mutex::new(None),
         }
     }
@@ -316,6 +323,11 @@ impl TransformationEngine {
         let tiers = dag.execution_tiers()?;
         let mut models_executed = 0;
         let mut total_rows_produced = 0;
+        let wap_run_id = if materialize.wap {
+            Some(new_wap_run_id())
+        } else {
+            None
+        };
 
         for (tier_idx, tier) in tiers.iter().enumerate() {
             tracing::info!(
@@ -351,31 +363,106 @@ impl TransformationEngine {
                     MaterializeWriteOptions::from_config(materialize, fail_on_error);
                 let mode = materialize.effective_mode();
 
-                let row_count = match mode {
-                    MaterializeMode::Stream => {
+                // WAP: write to stage path first; publish only after audit.
+                let (write_path, wap_paths) = if let Some(ref run_id) = wap_run_id {
+                    if matches!(
+                        model.output_format,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+                    ) && model.materialization != Materialization::IncrementalAppend
+                    {
+                        let paths =
+                            WapModelPaths::for_model(project_dir, run_id, &model.name, &dest_path);
+                        if let Some(p) = paths.stage_path.parent() {
+                            std::fs::create_dir_all(p)?;
+                        }
+                        (paths.stage_path.clone(), Some(paths))
+                    } else {
+                        (dest_path.clone(), None)
+                    }
+                } else {
+                    (dest_path.clone(), None)
+                };
+
+                let (row_count, write_stats) = match (
+                    &model.materialization,
+                    &model.output_format,
+                    mode,
+                ) {
+                    (
+                        Materialization::IncrementalAppend,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Stream,
+                    ) => {
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let stream = df.execute_stream().await?;
+                        let stats = materialize_incremental_append_stream(
+                            stream,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_INCREMENTAL: model '{}' append failed",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        (stats.rows, Some(stats))
+                    }
+                    (
+                        Materialization::IncrementalMerge,
+                        _,
+                        _,
+                    ) => {
+                        bail!(
+                            "E_RBT_INCREMENTAL: model '{}': incremental_merge is not implemented yet \
+                             (use incremental_append for part-file appends)",
+                            model.name
+                        );
+                    }
+                    (_, _, MaterializeMode::Stream) => {
                         let stats = execute_model_stream(
                             &self.ctx,
                             model,
-                            &dest_path,
+                            &write_path,
                             &write_opts,
                             &assertions,
                             fail_on_error,
                         )
                         .await?;
-                        stats.rows
+                        (stats.rows, Some(stats))
                     }
-                    MaterializeMode::Collect => {
-                        execute_model_collect(
+                    (_, _, MaterializeMode::Collect) => {
+                        let rows = execute_model_collect(
                             &self.ctx,
                             model,
-                            &dest_path,
+                            &write_path,
                             &write_opts,
                             &assertions,
                             fail_on_error,
                         )
-                        .await?
+                        .await?;
+                        (rows, None)
                     }
                 };
+
+                // WAP publish after successful write+audit (stream assertions already applied).
+                if let Some(ref paths) = wap_paths {
+                    let validation = write_stats
+                        .as_ref()
+                        .map(|s| s.validation.clone())
+                        .unwrap_or_else(|| crate::testing::ValidationResult {
+                            total_rows: row_count,
+                            passed_assertions: 0,
+                            failed_assertions: 0,
+                            errors: Vec::new(),
+                        });
+                    wap_publish(paths, &model.name, row_count, &validation)?;
+                }
 
                 // Expose model for downstream {{ ref() }} per project materialize policy.
                 if row_count > 0
@@ -387,14 +474,22 @@ impl TransformationEngine {
                             | OutputFormat::ZeroCopyClone
                     )
                 {
-                    // Empty parquet still may exist after stream (schema-only); skip ref if no file.
                     let backend = materialize.choose_ref_backend(row_count);
                     if row_count > 0 {
+                        let ref_path = if model.materialization == Materialization::IncrementalAppend
+                            && matches!(
+                                model.output_format,
+                                OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+                            ) {
+                            incremental_ref_path(&dest_path)
+                        } else {
+                            dest_path.clone()
+                        };
                         register_model_for_ref(
                             &self.ctx,
                             &model.name,
                             &model.output_format,
-                            &dest_path,
+                            &ref_path,
                             backend,
                         )
                         .await
@@ -410,6 +505,7 @@ impl TransformationEngine {
                             ?backend,
                             ?mode,
                             strategy = ?materialize.ref_strategy,
+                            mat = ?model.materialization,
                             "registered model for ref()"
                         );
                     }
@@ -463,6 +559,33 @@ fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
         Vec::new()
     };
     (assertions, fail_on_error)
+}
+
+fn log_assertion_result(
+    model: &ModelNode,
+    stats: &StreamWriteStats,
+    fail_on_error: bool,
+) -> Result<()> {
+    if stats.validation.failed_assertions > 0 {
+        let msg = format!(
+            "model '{}' failed {} test(s): {}",
+            model.name,
+            stats.validation.failed_assertions,
+            stats.validation.errors.join("; ")
+        );
+        if fail_on_error {
+            bail!("{msg}");
+        }
+        tracing::warn!("{msg}");
+    } else if stats.validation.passed_assertions > 0 {
+        tracing::info!(
+            "model '{}': {} assertion(s) passed ({} rows)",
+            model.name,
+            stats.validation.passed_assertions,
+            stats.rows
+        );
+    }
+    Ok(())
 }
 
 async fn execute_model_stream(

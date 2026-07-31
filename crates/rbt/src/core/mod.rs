@@ -7,7 +7,9 @@ pub mod paths;
 pub mod project;
 pub mod select;
 
-pub use dag::{Materialization, ModelDag, ModelLayer, ModelNode, OutputFormat};
+pub use dag::{
+    parse_materialization_hint, Materialization, ModelDag, ModelLayer, ModelNode, OutputFormat,
+};
 pub use frontmatter::{
     resolve_scan_path, scan_path_exists, BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport,
     ColumnMeta, DiagnosticSeverity, ModelTests, SourceFormat, StagingFrontmatter,

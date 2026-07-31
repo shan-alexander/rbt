@@ -118,6 +118,10 @@ pub struct MaterializeConfig {
     /// Iceberg catalog vs filesystem layout.
     #[serde(default)]
     pub iceberg: IcebergConfig,
+    /// Write-Audit-Publish: stage under `.wap/{run_id}/`, audit, then atomic publish.
+    /// Default false (stream still uses partial→rename atomicity without WAP dirs).
+    #[serde(default)]
+    pub wap: bool,
 }
 
 fn default_memtable_max_rows() -> usize {
@@ -141,6 +145,7 @@ impl Default for MaterializeConfig {
             max_row_group_rows: DEFAULT_MAX_ROW_GROUP_ROWS,
             max_row_group_bytes: DEFAULT_MAX_ROW_GROUP_BYTES,
             iceberg: IcebergConfig::default(),
+            wap: false,
         }
     }
 }

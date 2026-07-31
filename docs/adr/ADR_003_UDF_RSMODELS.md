@@ -416,7 +416,7 @@ Aligned with CONTRIBUTING: **P0 SQL spine first**; polyglot lands when seams do 
 | Phase | Deliverable | Exit criteria |
 |-------|-------------|---------------|
 | **P0** | Document ADR; stub module paths `rbt-engine::udf`, `rbt-engine::rust_model` | ADR accepted; no behavior change required |
-| **P1 — Design A MVP** | Trait + register builtins; 1 sample UDF; SQL call works in sample or unit test | `SessionContext` has UDF; plan+execute |
+| **P1 — Design A MVP** | Trait + register builtins; 1 sample UDF; SQL call works in sample or unit test | **Shipped 0.5.0** — `rbt_upper`/`lower`/`trim`/`nullif_empty` auto-registered |
 | **P2 — Design B MVP** | `RustModel` trait + manual registry; 1 sample Rust model in DAG; materialize + ref from downstream SQL | End-to-end: SQL → Rust → SQL or SQL → Rust → gold |
 | **P3** | Project extension crate pattern in sample; `output_schema`; better errors | Stockmarket or sibling example documents both A and B |
 | **P4** | Stream outputs; optional Polars feature; select/preview parity | Large-batch safe path |

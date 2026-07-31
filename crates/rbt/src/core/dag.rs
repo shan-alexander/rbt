@@ -21,6 +21,21 @@ pub enum Materialization {
     ZeroCopyClone,
 }
 
+/// Parse frontmatter `materialization:` string into [`Materialization`].
+pub fn parse_materialization_hint(s: &str) -> Result<Materialization> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "table" | "full_refresh" | "full-refresh" => Ok(Materialization::Table),
+        "view" => Ok(Materialization::View),
+        "incremental_append" | "append" | "incremental" => Ok(Materialization::IncrementalAppend),
+        "incremental_merge" | "merge" => Ok(Materialization::IncrementalMerge),
+        "zero_copy_clone" | "clone" => Ok(Materialization::ZeroCopyClone),
+        other => bail!(
+            "E_RBT_MATERIALIZATION: unknown materialization '{other}' \
+             (table | view | incremental_append | incremental_merge)"
+        ),
+    }
+}
+
 /// Configurable model output format supported by the engine.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -127,6 +142,13 @@ impl ModelDag {
         let compiled_sql = SqlModelParser::compile_sql(&pure_sql, catalog_prefix)?;
         let layer = ModelLayer::from_name(&name);
         let description = frontmatter.as_ref().and_then(|f| f.description.clone());
+        // Frontmatter materialization overrides the positional default when set.
+        let materialization = frontmatter
+            .as_ref()
+            .and_then(|f| f.materialization.as_deref())
+            .map(parse_materialization_hint)
+            .transpose()?
+            .unwrap_or(materialization);
 
         let node = ModelNode {
             name: name.clone(),

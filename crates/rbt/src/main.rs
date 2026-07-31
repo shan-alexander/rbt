@@ -164,6 +164,22 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
     },
+    /// Thesis measure packs (wall time, rows, optional RSS) — honest experiment harness
+    Measure {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Scenario: smoke_pipeline | validate_dx | incremental_append
+        #[arg(long, default_value = "smoke_pipeline")]
+        scenario: String,
+        #[arg(short, long, default_value = "./target/output")]
+        output_dir: PathBuf,
+        /// Write JSON report (default: {project}/.rbt/measure/{scenario}.json)
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Print JSON report to stdout
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Run micro-benchmarks measuring transformation engine throughput (rows/sec)
     Bench {
         #[arg(short, long, default_value_t = 1000000)]
@@ -586,6 +602,46 @@ async fn main() -> Result<()> {
                 }
             } else {
                 println!("  (no rows)");
+            }
+        }
+        Commands::Measure {
+            project_dir,
+            scenario,
+            output_dir,
+            report,
+            json,
+        } => {
+            println!(
+                "[rbt] measure scenario='{scenario}' project={project_dir:?}"
+            );
+            let report_data =
+                rbt::run_measure_scenario(&scenario, &project_dir, &output_dir).await?;
+            let out = report.unwrap_or_else(|| {
+                rbt::default_report_path(&project_dir, &scenario)
+            });
+            rbt::write_measure_report(&report_data, &out)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report_data)?);
+            } else {
+                println!(
+                    "[rbt] measure OK={} wall_ms={} models={} rows={} bronze={} rss_kb={:?}",
+                    report_data.ok,
+                    report_data.wall_ms,
+                    report_data.models_executed,
+                    report_data.total_rows,
+                    report_data.bronze_sources,
+                    report_data.peak_rss_kb
+                );
+                println!("[rbt] report written → {}", out.display());
+                for n in &report_data.notes {
+                    println!("  note: {n}");
+                }
+            }
+            if !report_data.ok {
+                bail!(
+                    "[rbt] measure scenario failed: {}",
+                    report_data.error.unwrap_or_default()
+                );
             }
         }
         Commands::Bench { num_rows } => {

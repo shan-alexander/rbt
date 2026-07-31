@@ -4,17 +4,24 @@
 //! batch stream, write batch-by-batch, drop each batch, atomic-publish the file.
 
 pub mod iceberg_catalog;
+pub mod incremental;
 pub mod stream;
+pub mod wap;
 
 pub use iceberg_catalog::{
     verify_iceberg_catalog_table, write_iceberg_catalog_batches, write_iceberg_catalog_stream,
     IcebergCatalogOptions, IcebergCatalogWriteStats,
+};
+pub use incremental::{
+    clear_incremental_parts, incremental_ref_path, load_manifest, materialize_incremental_append_stream,
+    parts_dir_for_parquet, IncrementalManifest,
 };
 pub use stream::{
     atomic_publish, load_parquet_batches, materialize_stream, partial_path_for,
     write_empty_parquet, write_parquet_batches_atomic, write_parquet_stream, MaterializeWriteOptions,
     StreamWriteStats,
 };
+pub use wap::{new_wap_run_id, wap_publish, WapAuditLog, WapModelPaths, WapPhase};
 
 use crate::core::dag::OutputFormat;
 use crate::core::project::MaterializeConfig;

@@ -1,0 +1,79 @@
+# P4 capabilities (0.5.0)
+
+Thesis-aligned features beyond the SQL spine: **measure packs**, **incremental append**,
+**honest WAP**, and **in-process UDFs**. Multi-catalog sprawl and Rust model plugins remain deferred.
+
+## 1. Built-in UDFs (Design A)
+
+Registered on every engine:
+
+| SQL name | Behavior |
+|----------|----------|
+| `rbt_upper(s)` | uppercase Utf8 |
+| `rbt_lower(s)` | lowercase |
+| `rbt_trim(s)` | trim whitespace |
+| `rbt_nullif_empty(s)` | empty string → NULL |
+
+```sql
+SELECT rbt_upper(ticker) AS ticker_u FROM {{ ref('stg_trades') }}
+```
+
+Project-specific UDFs: register with `register_scalar_udf` before `execute_dag` (library hosts).
+
+## 2. Incremental append
+
+Frontmatter:
+
+```yaml
+materialization: incremental_append   # or append | incremental
+```
+
+| Full refresh (`table`) | Incremental append |
+|------------------------|--------------------|
+| Overwrites `model.parquet` | Adds `model.parts/part-*.parquet` |
+| Single file for `ref()` | `ref()` lists the **parts directory** |
+| Default | Opt-in |
+
+Manifest: `model.parts/_rbt_manifest.json` (`parts`, `total_rows`, `updated_at_ms`).
+
+**Not shipped:** `incremental_merge` (row-level MERGE) — fails with `E_RBT_INCREMENTAL`.
+
+## 3. Write-Audit-Publish (WAP)
+
+```yaml
+materialize:
+  wap: true
+```
+
+1. Write stream output to `.wap/{run_id}/{model}.parquet`
+2. Assertions already applied on the stream (fail → no publish)
+3. Atomic rename to production dest; write `.wap/{run_id}/{model}.audit.json`
+
+Production dest is left unchanged on audit failure. This is **filesystem WAP**, not Iceberg branch APIs.
+
+## 4. Measure packs
+
+```bash
+rbt measure -p examples/smoke_fixture --scenario smoke_pipeline
+rbt measure -p examples/smoke_fixture --scenario validate_dx --json
+rbt measure -p examples/smoke_fixture --scenario incremental_append
+```
+
+Report fields: `wall_ms`, `models_executed`, `total_rows`, `peak_rss_kb` (Linux VmRSS), `notes`, `ok`.
+
+Public performance claims require checked-in scenarios + reports — see thesis §7.
+
+## 5. Explicitly out of P4
+
+| Item | Status |
+|------|--------|
+| Multi REST/Glue catalogs | Use `RbtEngineBuilder::with_catalog` (library); no multi-backend sprawl in core |
+| First-class Rust models (Design B) | ADR-003 later |
+| Dynamic `cdylib` UDF load | Later |
+| Spark comparison packs | Need external Spark; not in-repo default CI |
+
+## Related
+
+- [ADR_003_UDF_RSMODELS.md](adr/ADR_003_UDF_RSMODELS.md)
+- [ICEBERG_SOR.md](ICEBERG_SOR.md)
+- [REF_STRATEGY.md](REF_STRATEGY.md)

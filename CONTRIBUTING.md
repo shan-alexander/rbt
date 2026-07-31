@@ -34,7 +34,7 @@ We deliberately ship **primary function before developer verbs**.
 | **P1** | Streaming materialize, bronze spill, assertions, atomic publish | **0.3.9** stream + Arrow IPC spill; further harden optional |
 | **P2** | Iceberg as real system of record (catalog + snapshot commit), or deliberate pivot | **0.4.0** catalog create→write→commit→scan proof gate (local FS warehouse); REST/Glue multi-writer still open |
 | **P3** | DX verbs: `validate`, `explain`, `preview` | **0.3.9** shipped |
-| **P4** | Measure packs, incremental strategies, WAP, multi-catalog, Rust models/UDFs | Thesis / later (see ADRs) |
+| **P4** | Measure packs, incremental strategies, WAP, multi-catalog, Rust models/UDFs | **0.5.0** measure + incremental_append + FS WAP + builtin UDFs; multi-catalog / Rust models deferred |
 
 **Contributor rule:** If a PR adds polish while `compile`/`run` on the smoke fixture is flaky, it is out of order. Fix the spine first.
 

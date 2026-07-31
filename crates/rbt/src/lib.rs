@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.4.0"
+//! rbt-datalake = "0.5.0"
 //! ```
 //!
 //! ## Quick start (library)
@@ -30,12 +30,13 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.4.0")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.5.0")]
 
 pub mod core;
 pub mod engine;
 pub mod json;
 pub mod materializer;
+pub mod measure;
 pub mod scan;
 pub mod testing;
 
@@ -56,12 +57,18 @@ pub use engine::{
     BronzeSourceMeta, BronzeTableProvider, DagExecutionSummary, PreviewResult, RbtEngineBuilder,
     TransformationEngine,
 };
+pub use engine::udf::{register_builtin_udfs, register_scalar_udf, BUILTIN_UDF_NAMES};
 
 pub use materializer::{
-    materialize_stream, sibling_iceberg_dir, verify_iceberg_catalog_table,
-    write_iceberg_catalog_batches, write_iceberg_fs_table, write_parquet_stream,
+    clear_incremental_parts, incremental_ref_path, materialize_incremental_append_stream,
+    materialize_stream, new_wap_run_id, sibling_iceberg_dir, verify_iceberg_catalog_table,
+    wap_publish, write_iceberg_catalog_batches, write_iceberg_fs_table, write_parquet_stream,
     IcebergCatalogOptions, IcebergCatalogWriteStats, MaterializeWriteOptions, MultiFormatWriter,
-    StreamWriteStats, WapMaterializer, WapStatus,
+    StreamWriteStats, WapAuditLog, WapMaterializer, WapModelPaths, WapPhase, WapStatus,
+};
+pub use measure::{
+    default_report_path, list_scenarios, run_measure_scenario, write_measure_report, MeasureReport,
+    SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE, SCENARIO_VALIDATE_DX,
 };
 
 pub use json::{JShiftExtractor, JsonExtractSpec};

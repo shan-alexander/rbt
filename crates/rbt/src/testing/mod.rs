@@ -26,7 +26,7 @@ pub enum Assertion {
 }
 
 /// Validation result summary for a tested model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ValidationResult {
     pub total_rows: usize,
     pub passed_assertions: usize,
