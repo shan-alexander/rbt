@@ -5,13 +5,13 @@ All notable changes to this project are documented in this file.
 ## [0.0.2] — 2026-07-31
 
 ### Changed
-- **Single package `rbt`**: library + CLI binary in one crate (`crates/rbt` only)
+- **Single package `rbt-datalake`** (binary + lib import `rbt`): library + CLI binary in one crate (`crates/rbt` only)
 - Workspace members reduced to `crates/rbt`; legacy `crates/rbt-*` trees removed
 - Docs reorganized: active ADRs under `docs/adr/`, essays under `docs/archive/`
 - Orphan crates on crates.io (`rbt-core`, `rbt-engine`, `rbt-scan`, `rbt-json`, `rbt-materializer`, `rbt-testing`) republished as **0.0.2 deprecation stubs** (README → use unified monorepo)
 
 ### Note
-- crates.io name `rbt` is taken by an unrelated project; install via git until a publish name is finalized. See [docs/CRATES_IO.md](docs/CRATES_IO.md).
+- crates.io package is **`rbt-datalake`** (`rbt` short name taken by unrelated crate). See [docs/CRATES_IO.md](docs/CRATES_IO.md).
 
 ## [0.0.1] — 2026-07-31
 

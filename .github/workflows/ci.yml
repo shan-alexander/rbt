@@ -28,13 +28,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy -p rbt -- -D warnings
+        run: cargo clippy -p rbt-datalake -- -D warnings
 
       - name: Unit tests
-        run: cargo test -p rbt --lib
+        run: cargo test -p rbt-datalake --lib
 
       - name: Release build CLI
-        run: cargo build -p rbt --release
+        run: cargo build -p rbt-datalake --release
 
       - name: Smoke fixture (compile / select / run / test / iceberg)
         run: bash scripts/smoke.sh

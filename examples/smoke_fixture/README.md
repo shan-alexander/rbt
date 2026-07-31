@@ -3,7 +3,7 @@
 Tiny JSONL bronze project for CI and local smoke tests.
 
 ```bash
-cargo build -p rbt --release
+cargo build -p rbt-datalake --release
 ./target/release/rbt compile -p examples/smoke_fixture --bronze-check fail
 ./target/release/rbt run -p examples/smoke_fixture --format parquet --select dim_ticker
 ./target/release/rbt test -p examples/smoke_fixture

@@ -49,7 +49,7 @@ We deliberately ship **primary function before developer verbs**.
 | `--select` + frontmatter `test` | Working |
 | Iceberg | FS table layout (`data/` + `metadata/`); **not** REST/Glue OCC SoR |
 | DX verbs (`validate` / `explain` / `preview`) | **Not implemented** |
-| Package surface | **One crate:** `rbt` (lib + bin) |
+| Package surface | **One crate:** `rbt-datalake` (binary + lib import `rbt`) |
 
 Do not document unfinished features as shipped.
 
@@ -120,8 +120,8 @@ Legacy dirs under `crates/rbt-*` (if present) are **not** workspace members — 
 ### Build and test
 
 ```bash
-cargo build -p rbt --release
-cargo test -p rbt --lib
+cargo build -p rbt-datalake --release
+cargo test -p rbt-datalake --lib
 bash scripts/smoke.sh
 
 # Golden paths

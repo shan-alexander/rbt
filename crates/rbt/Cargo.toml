@@ -1,5 +1,6 @@
 [package]
-name = "rbt"
+# crates.io name: `rbt` is taken by an unrelated project.
+name = "rbt-datalake"
 version = "0.0.2"
 edition.workspace = true
 license.workspace = true
@@ -13,6 +14,7 @@ categories.workspace = true
 rust-version.workspace = true
 
 [lib]
+# Library import path stays `rbt::…` even though the package is `rbt-datalake`.
 name = "rbt"
 path = "src/lib.rs"
 

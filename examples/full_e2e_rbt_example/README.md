@@ -31,7 +31,7 @@ stg_ohlcv_1d ─┬─► tf_bar_metrics_1d ► fact_1d_bars ┘
 
 ```bash
 cd /path/to/rbt
-cargo build -p rbt --release
+cargo build -p rbt-datalake --release
 # binary: ./target/release/rbt
 ```
 

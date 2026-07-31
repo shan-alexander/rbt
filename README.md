@@ -16,16 +16,32 @@
 ## Install
 
 ```bash
-# Recommended until/unless our package lands under an available crates.io name
-cargo install --git https://github.com/shan-alexander/rbt --locked
+cargo install rbt-datalake
 rbt --help
+```
+
+**Library** (crate name differs from import path):
+
+```toml
+[dependencies]
+rbt-datalake = "0.0.2"
+```
+
+```rust
+use rbt::RbtProjectConfig; // lib name is still `rbt`
+```
+
+**Git / from source:**
+
+```bash
+cargo install --git https://github.com/shan-alexander/rbt --locked
 ```
 
 **From this repo:**
 
 ```bash
 git clone https://github.com/shan-alexander/rbt && cd rbt
-cargo build -p rbt --release
+cargo build -p rbt-datalake --release
 # binary: ./target/release/rbt
 ```
 
@@ -33,7 +49,7 @@ Requires a matching `rustc`/`cargo` pair (see `rust-toolchain.toml`).
 
 > **crates.io notes**
 >
-> - The name [`rbt`](https://crates.io/crates/rbt) is already taken by an **unrelated** project (“Rust bot toolkit”). Our monorepo package is still named `rbt` locally; crates.io publish may use a different package name with binary still `rbt` — see [docs/CRATES_IO.md](docs/CRATES_IO.md).
+> - **Package name:** [`rbt-datalake`](https://crates.io/crates/rbt-datalake) (the short name [`rbt`](https://crates.io/crates/rbt) is an unrelated “Rust bot toolkit”). Binary and lib import path remain **`rbt`**.
 > - Early `0.0.1` internals (`rbt-core`, `rbt-engine`, …) are **orphaned**. Each has a **0.0.2 deprecation stub** README pointing here. **Do not depend on them.**
 
 ## Quick start (smoke fixture)
@@ -41,7 +57,7 @@ Requires a matching `rustc`/`cargo` pair (see `rust-toolchain.toml`).
 Tiny JSONL bronze → staging → dim:
 
 ```bash
-cargo build -p rbt --release
+cargo build -p rbt-datalake --release
 ./target/release/rbt compile -p examples/smoke_fixture --bronze-check fail
 ./target/release/rbt run -p examples/smoke_fixture --select dim_ticker --format parquet
 ./target/release/rbt test -p examples/smoke_fixture --select dim_ticker

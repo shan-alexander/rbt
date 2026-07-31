@@ -6,14 +6,14 @@
 //!
 //! **CLI**
 //! ```bash
-//! cargo install rbt
+//! cargo install rbt-datalake
 //! rbt --help
 //! ```
 //!
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt = "0.0.2"
+//! rbt-datalake = "0.0.2"
 //! ```
 //!
 //! ## Quick start (library)
