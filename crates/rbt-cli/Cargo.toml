@@ -1,0 +1,26 @@
+[package]
+name = "rbt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for rbt — medallion SQL DAG runner (Parquet / Iceberg-FS lakes)"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "rbt"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+rbt-core.workspace = true
+rbt-engine.workspace = true
+rbt-materializer.workspace = true
+rbt-testing.workspace = true

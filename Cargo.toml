@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rbt-core",
+    "crates/rbt-scan",
+    "crates/rbt-json",
+    "crates/rbt-catalog",
+    "crates/rbt-engine",
+    "crates/rbt-materializer",
+    "crates/rbt-models",
+    "crates/rbt-testing",
+    "crates/rbt-cli",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["rbt contributors"]
+description = "Medallion SQL DAG engine for lakehouse transforms (Rust + DataFusion + Parquet/Iceberg-FS)"
+readme = "README.md"
+repository = "https://github.com/shan-alexander/rbt"
+homepage = "https://github.com/shan-alexander/rbt"
+keywords = ["dbt", "datafusion", "iceberg", "parquet", "etl"]
+categories = ["database", "command-line-utilities"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+arrow = { version = "58.0" }
+parquet = { version = "58.0", features = ["arrow"] }
+datafusion = { version = "53.1" }
+iceberg = { version = "0.10" }
+iceberg-datafusion = { version = "0.10" }
+minijinja = { version = "2.7", features = ["loader"] }
+prost = "0.13"
+petgraph = "0.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+chrono = "0.4"
+jshift = "0.6.0"
+rbt-core = { path = "crates/rbt-core", version = "0.0.1" }
+rbt-scan = { path = "crates/rbt-scan", version = "0.0.1" }
+rbt-json = { path = "crates/rbt-json", version = "0.0.1" }
+rbt-catalog = { path = "crates/rbt-catalog", version = "0.0.1" }
+rbt-engine = { path = "crates/rbt-engine", version = "0.0.1" }
+rbt-materializer = { path = "crates/rbt-materializer", version = "0.0.1" }
+rbt-models = { path = "crates/rbt-models", version = "0.0.1" }
+rbt-testing = { path = "crates/rbt-testing", version = "0.0.1" }
+serde_json = "1"

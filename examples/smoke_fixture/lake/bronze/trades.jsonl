@@ -1,0 +1,4 @@
+{"id":1,"ticker":"AAA","price":10.5,"qty":100}
+{"id":2,"ticker":"BBB","price":20.0,"qty":50}
+{"id":2,"ticker":"BBB","price":21.0,"qty":50}
+{"id":3,"ticker":"AAA","price":11.0,"qty":10}

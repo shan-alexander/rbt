@@ -1,0 +1,17 @@
+name: smoke_fixture
+version: "0.0.1"
+models_dir: models
+target_path: lake/gold
+layers:
+  staging:
+    path: models/staging
+    target_path: lake/silver
+    default_format: parquet
+  transforms:
+    path: models/transforms
+    target_path: lake/silver
+    default_format: parquet
+  marts:
+    path: models/marts
+    target_path: lake/gold
+    default_format: parquet

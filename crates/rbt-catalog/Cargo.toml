@@ -1,0 +1,20 @@
+[package]
+name = "rbt-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+iceberg.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

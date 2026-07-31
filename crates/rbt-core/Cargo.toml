@@ -1,0 +1,23 @@
+[package]
+name = "rbt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+petgraph.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+minijinja.workspace = true
+sqlparser = "0.47"
+regex = "1.13"
+walkdir = "2"

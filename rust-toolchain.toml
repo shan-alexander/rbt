@@ -1,0 +1,4 @@
+# Keep cargo and rustc on the same channel (avoids check-cfg / MSRV skew).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
