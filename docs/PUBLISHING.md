@@ -10,10 +10,12 @@ git commit  # cargo publish refuses dirty trees by default
 cargo publish -p rbt-datalake
 ```
 
-Package name on crates.io: **`rbt-datalake`**. Binary: **`rbt`**. Lib import: **`rbt::`**.
+Package name on crates.io: **`rbt-datalake`** (currently **0.3.6**). Binary: **`rbt`**. Lib import: **`rbt::`**.
 
-## Orphan deprecation stubs (0.3.6 — point at rbt-datalake)
+Link: https://crates.io/crates/rbt-datalake
 
-`rbt-testing`, `rbt-json`, `rbt-core`, `rbt-scan`, `rbt-materializer`, `rbt-engine` — empty stubs with README → use `rbt-datalake`.
+## Orphan deprecation stubs (0.0.4)
+
+`rbt-testing`, `rbt-json`, `rbt-core`, `rbt-scan`, `rbt-materializer`, `rbt-engine` — empty stubs; README + description → **https://crates.io/crates/rbt-datalake**.
 
 See [CRATES_IO.md](CRATES_IO.md).
