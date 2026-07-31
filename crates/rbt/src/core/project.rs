@@ -57,6 +57,43 @@ pub const DEFAULT_MAX_ROW_GROUP_ROWS: usize = 1_000_000;
 /// Default Parquet in-progress size threshold before `flush()` (128 MiB).
 pub const DEFAULT_MAX_ROW_GROUP_BYTES: usize = 128 * 1024 * 1024;
 
+/// How `OutputFormat::Iceberg` is written.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IcebergWriteMode {
+    /// Official `iceberg` crate: create table → DataFileWriter → fast_append commit.
+    #[default]
+    #[serde(alias = "catalog_commit", alias = "sor")]
+    Catalog,
+    /// Hand-rolled FS layout (`data/` + `metadata/vN.json`) — demos / dual-write sidecar.
+    #[serde(alias = "fs", alias = "layout")]
+    Filesystem,
+}
+
+/// Iceberg-specific materialize options (`materialize.iceberg:`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IcebergConfig {
+    /// `catalog` (default, P2 SoR) | `filesystem` (legacy layout)
+    #[serde(default)]
+    pub mode: IcebergWriteMode,
+    /// Catalog namespace (MemoryCatalog single level). Default: `rbt`.
+    #[serde(default = "default_iceberg_namespace")]
+    pub namespace: String,
+}
+
+fn default_iceberg_namespace() -> String {
+    "rbt".into()
+}
+
+impl Default for IcebergConfig {
+    fn default() -> Self {
+        Self {
+            mode: IcebergWriteMode::Catalog,
+            namespace: default_iceberg_namespace(),
+        }
+    }
+}
+
 /// Optional materialization / `ref()` registration policy (`materialize:` in yml).
 ///
 /// All fields are optional; omitting the whole block keeps lake-as-truth Parquet re-read
@@ -78,6 +115,9 @@ pub struct MaterializeConfig {
     /// Soft flush threshold for Parquet `in_progress_size` (bytes).
     #[serde(default = "default_max_row_group_bytes")]
     pub max_row_group_bytes: usize,
+    /// Iceberg catalog vs filesystem layout.
+    #[serde(default)]
+    pub iceberg: IcebergConfig,
 }
 
 fn default_memtable_max_rows() -> usize {
@@ -100,6 +140,7 @@ impl Default for MaterializeConfig {
             memtable_max_rows: DEFAULT_MEMTABLE_MAX_ROWS,
             max_row_group_rows: DEFAULT_MAX_ROW_GROUP_ROWS,
             max_row_group_bytes: DEFAULT_MAX_ROW_GROUP_BYTES,
+            iceberg: IcebergConfig::default(),
         }
     }
 }

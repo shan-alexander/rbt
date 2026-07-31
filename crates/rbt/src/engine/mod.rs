@@ -588,7 +588,24 @@ async fn execute_model_collect(
 /// Path used to re-read a model from the lake after materialize.
 fn lake_read_path(format: &OutputFormat, dest_path: &Path) -> PathBuf {
     match format {
-        OutputFormat::Iceberg => dest_path.join("data/part-00000.parquet"),
+        OutputFormat::Iceberg => {
+            // Catalog SoR: prefer `.rbt_iceberg_data` hint, then any parquet under table root.
+            let hint = dest_path.join(".rbt_iceberg_data");
+            if let Ok(p) = std::fs::read_to_string(&hint) {
+                let p = PathBuf::from(p.trim());
+                if p.exists() {
+                    return p;
+                }
+            }
+            let preferred = dest_path.join("data/part-00000.parquet");
+            if preferred.exists() {
+                preferred
+            } else if let Some(p) = find_first_parquet_under(dest_path) {
+                p
+            } else {
+                preferred
+            }
+        }
         OutputFormat::ParquetAndIceberg => {
             // Flat parquet is the primary dual-write artifact for ref().
             if dest_path.extension().and_then(|e| e.to_str()) == Some("parquet") {
@@ -599,6 +616,22 @@ fn lake_read_path(format: &OutputFormat, dest_path: &Path) -> PathBuf {
         }
         _ => dest_path.to_path_buf(),
     }
+}
+
+fn find_first_parquet_under(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).ok()?;
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("parquet") {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// Register a completed model so later SQL `ref('name')` resolves.

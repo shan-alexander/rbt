@@ -32,7 +32,7 @@ We deliberately ship **primary function before developer verbs**.
 |----------|--------|-----------------|
 | **P0** | Project load → DAG compile → bronze registration → SQL models → materialize silver/gold | **Working** — smoke + full e2e examples |
 | **P1** | Streaming materialize, bronze spill, assertions, atomic publish | **0.3.9** stream + Arrow IPC spill; further harden optional |
-| **P2** | Iceberg as real system of record (catalog + snapshot commit), or deliberate pivot | FS layout + **versioned metadata** (0.3.9); REST/OCC still open |
+| **P2** | Iceberg as real system of record (catalog + snapshot commit), or deliberate pivot | **0.4.0** catalog create→write→commit→scan proof gate (local FS warehouse); REST/Glue multi-writer still open |
 | **P3** | DX verbs: `validate`, `explain`, `preview` | **0.3.9** shipped |
 | **P4** | Measure packs, incremental strategies, WAP, multi-catalog, Rust models/UDFs | Thesis / later (see ADRs) |
 

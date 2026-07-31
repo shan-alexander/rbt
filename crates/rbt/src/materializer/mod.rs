@@ -3,8 +3,13 @@
 //! **Streaming materialize** ([`stream`]) is the default engine path: pull a DataFusion
 //! batch stream, write batch-by-batch, drop each batch, atomic-publish the file.
 
+pub mod iceberg_catalog;
 pub mod stream;
 
+pub use iceberg_catalog::{
+    verify_iceberg_catalog_table, write_iceberg_catalog_batches, write_iceberg_catalog_stream,
+    IcebergCatalogOptions, IcebergCatalogWriteStats,
+};
 pub use stream::{
     atomic_publish, load_parquet_batches, materialize_stream, partial_path_for,
     write_empty_parquet, write_parquet_batches_atomic, write_parquet_stream, MaterializeWriteOptions,
@@ -78,7 +83,19 @@ impl MultiFormatWriter {
                 }
             }
             OutputFormat::Iceberg => {
-                write_iceberg_fs_table(batches, destination_path)?;
+                // Collect path: prefer catalog SoR (P2); FS layout only when configured.
+                let opts = MaterializeWriteOptions::from_config(
+                    &crate::core::project::MaterializeConfig::default(),
+                    true,
+                );
+                match opts.iceberg_mode {
+                    crate::core::project::IcebergWriteMode::Catalog => {
+                        write_iceberg_catalog_batches_sync(batches, destination_path, &opts)?;
+                    }
+                    crate::core::project::IcebergWriteMode::Filesystem => {
+                        write_iceberg_fs_table(batches, destination_path)?;
+                    }
+                }
             }
             OutputFormat::ParquetAndIceberg => {
                 let parquet_path =
@@ -94,6 +111,36 @@ impl MultiFormatWriter {
 
         Ok(total_rows)
     }
+}
+
+fn write_iceberg_catalog_batches_sync(
+    batches: &[RecordBatch],
+    destination_path: &Path,
+    opts: &MaterializeWriteOptions,
+) -> Result<()> {
+    let cat_opts = IcebergCatalogOptions {
+        namespace: opts.iceberg_namespace.clone(),
+        warehouse: Some(destination_path.to_path_buf()),
+    };
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // Safe when called from async via spawn_blocking/block_in_place or sync tests.
+        tokio::task::block_in_place(|| {
+            handle.block_on(write_iceberg_catalog_batches(
+                batches,
+                destination_path,
+                &cat_opts,
+            ))
+        })?;
+    } else {
+        let rt = tokio::runtime::Runtime::new()
+            .context("E_RBT_ICEBERG_CATALOG: create tokio runtime")?;
+        rt.block_on(write_iceberg_catalog_batches(
+            batches,
+            destination_path,
+            &cat_opts,
+        ))?;
+    }
+    Ok(())
 }
 
 fn write_parquet_file(batches: &[RecordBatch], path: &Path) -> Result<()> {
@@ -373,11 +420,8 @@ mod tests {
         assert!(parquet_file.metadata()?.len() > 0);
 
         let iceberg_dir = temp_dir.path().join("tbl");
-        let irows = MultiFormatWriter::write_batches(
-            std::slice::from_ref(&batch),
-            &OutputFormat::Iceberg,
-            &iceberg_dir,
-        )?;
+        // Explicit FS layout path for dual-compat tests; catalog SoR has its own unit test.
+        let irows = write_iceberg_fs_table(std::slice::from_ref(&batch), &iceberg_dir)?;
         assert_eq!(irows, 3);
         assert!(iceberg_dir.join("data/part-00000.parquet").exists());
         assert!(iceberg_dir.join("metadata/v1.metadata.json").exists());

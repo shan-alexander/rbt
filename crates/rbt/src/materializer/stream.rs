@@ -37,6 +37,9 @@ pub struct MaterializeWriteOptions {
     pub max_row_group_bytes: usize,
     /// Abort on first assertion failure (default true for fail_on_error models).
     pub fail_fast_assertions: bool,
+    /// Iceberg write backend for `OutputFormat::Iceberg`.
+    pub iceberg_mode: crate::core::project::IcebergWriteMode,
+    pub iceberg_namespace: String,
 }
 
 impl Default for MaterializeWriteOptions {
@@ -45,6 +48,8 @@ impl Default for MaterializeWriteOptions {
             max_row_group_rows: DEFAULT_MAX_ROW_GROUP_ROWS,
             max_row_group_bytes: DEFAULT_MAX_ROW_GROUP_BYTES,
             fail_fast_assertions: true,
+            iceberg_mode: crate::core::project::IcebergWriteMode::Catalog,
+            iceberg_namespace: "rbt".into(),
         }
     }
 }
@@ -55,6 +60,8 @@ impl MaterializeWriteOptions {
             max_row_group_rows: cfg.max_row_group_rows.max(1),
             max_row_group_bytes: cfg.max_row_group_bytes.max(1),
             fail_fast_assertions,
+            iceberg_mode: cfg.iceberg.mode,
+            iceberg_namespace: cfg.iceberg.namespace.clone(),
         }
     }
 }
@@ -144,9 +151,24 @@ pub async fn materialize_stream(
             write_line_stream(&mut stream, destination_path, opts, assertions, LineFormat::Csv)
                 .await
         }
-        OutputFormat::Iceberg => {
-            write_iceberg_stream(&mut stream, destination_path, opts, assertions).await
-        }
+        OutputFormat::Iceberg => match opts.iceberg_mode {
+            crate::core::project::IcebergWriteMode::Catalog => {
+                crate::materializer::iceberg_catalog::write_iceberg_catalog_stream(
+                    &mut stream,
+                    destination_path,
+                    &crate::materializer::iceberg_catalog::IcebergCatalogOptions {
+                        namespace: opts.iceberg_namespace.clone(),
+                        warehouse: Some(destination_path.to_path_buf()),
+                    },
+                    opts,
+                    assertions,
+                )
+                .await
+            }
+            crate::core::project::IcebergWriteMode::Filesystem => {
+                write_iceberg_stream(&mut stream, destination_path, opts, assertions).await
+            }
+        },
         OutputFormat::ParquetAndIceberg => {
             // Dual-write: stream once into parquet, then re-read path for iceberg layout
             // would double IO. For dual-write we buffer is bad — write parquet stream,
@@ -733,6 +755,7 @@ mod tests {
             max_row_group_rows: 2,
             max_row_group_bytes: 1024,
             fail_fast_assertions: true,
+            ..Default::default()
         };
         let assertions = vec![Assertion::UniqueKey {
             columns: vec!["id".into()],

@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] — 2026-07-31
+
+### Added (P2 full — Iceberg catalog SoR proof gate)
+- **Official Iceberg catalog materialize** for `--format iceberg` (default)
+  - `MemoryCatalog` + **LocalFs** warehouse → `create_table` → `DataFileWriter` → `Transaction::fast_append` → **`commit`**
+  - Post-commit **scan** asserts row count (same process)
+  - Durable files: `data/rbt-*.parquet`, `metadata/*.metadata.json`, manifests/snap avro
+  - `ref()` via `.rbt_iceberg_data` hint or first parquet under table root
+- Config:
+  ```yaml
+  materialize:
+    iceberg:
+      mode: catalog      # default; use filesystem for hand-rolled vN layout
+      namespace: rbt
+  ```
+- APIs: `write_iceberg_catalog_batches`, `write_iceberg_catalog_stream`, `verify_iceberg_catalog_table`
+
+### Fixed (audit)
+- MemoryCatalog default storage was **in-memory only** — forced `LocalFsStorageFactory` so SoR files persist
+- Iceberg `ref()` registration for catalog UUID data files
+- Smoke checks updated for official metadata layout
+
+### Honesty
+- Still **not** multi-writer REST/Glue OCC; in-process MemoryCatalog with FS warehouse is the proof gate
+- Dual-write `parquet-and-iceberg` still uses filesystem sidecar layout
+
 ## [0.3.9] — 2026-07-31
 
 ### Added (P1 remainder + P2 lite + P3 DX)

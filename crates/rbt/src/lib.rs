@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.3.9"
+//! rbt-datalake = "0.4.0"
 //! ```
 //!
 //! ## Quick start (library)
@@ -30,7 +30,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.3.9")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.4.0")]
 
 pub mod core;
 pub mod engine;
@@ -44,11 +44,11 @@ pub mod testing;
 pub use core::{
     model_has_test_contract, parse_select_spec, resolve_scan_path, scan_path_exists,
     BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DependencyRef,
-    DiagnosticSeverity, Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelLayer,
-    ModelNode, ModelTests, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
-    RefBackend, RefStrategy, ScanConfig, SelectMode, SelectToken, SourceFormat, SqlModelParser,
-    StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
-    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    DiagnosticSeverity, IcebergConfig, IcebergWriteMode, Materialization, MaterializeConfig,
+    MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelTests, OutputFormat, PathGlobSet,
+    RbtProjectConfig, RbtTemplateEngine, RefBackend, RefStrategy, ScanConfig, SelectMode,
+    SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES,
+    DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 
 pub use engine::{
@@ -58,8 +58,10 @@ pub use engine::{
 };
 
 pub use materializer::{
-    materialize_stream, sibling_iceberg_dir, write_iceberg_fs_table, write_parquet_stream,
-    MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapMaterializer, WapStatus,
+    materialize_stream, sibling_iceberg_dir, verify_iceberg_catalog_table,
+    write_iceberg_catalog_batches, write_iceberg_fs_table, write_parquet_stream,
+    IcebergCatalogOptions, IcebergCatalogWriteStats, MaterializeWriteOptions, MultiFormatWriter,
+    StreamWriteStats, WapMaterializer, WapStatus,
 };
 
 pub use json::{JShiftExtractor, JsonExtractSpec};

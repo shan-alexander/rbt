@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.3.9`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine: `compile` / `run` / `test` / `validate` / `explain` / `preview` / `--select`. Default **streaming materialize**; Arrow IPC bronze **spills to Parquet** (bounded RAM). Multi-root, `path_glob`, protobuf bronze. Iceberg FS layout with **versioned metadata** (not REST OCC).
+> **Status:** **`0.4.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine: `compile` / `run` / `test` / `validate` / `explain` / `preview` / `--select`. Default **streaming materialize**; Arrow IPC bronze **spills to Parquet**. Iceberg **`--format iceberg`** uses official catalog **snapshot commit** (local FS warehouse; not multi-writer REST/Glue yet).
 
 ## Why rbt
 
@@ -24,7 +24,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.3.9"
+rbt-datalake = "0.4.0"
 ```
 
 ```rust

@@ -30,11 +30,16 @@ test -f "$OUT/gold/dim_ticker.parquet"
 echo "[smoke] test (frontmatter assertions)"
 "$BIN" test -p "$FIX" --select dim_ticker --bronze-check fail
 
-echo "[smoke] iceberg format on staging only"
+echo "[smoke] iceberg format on staging only (catalog SoR commit)"
 "$BIN" run -p "$FIX" --format iceberg --select stg_trades --bronze-check fail
-test -f "$OUT/silver/stg_trades/data/part-00000.parquet"
-test -f "$OUT/silver/stg_trades/metadata/v1.metadata.json"
-test -f "$OUT/silver/stg_trades/metadata/version-hint.text"
+# Catalog writes data/*.parquet + metadata/*.metadata.json (official layout; not hand-rolled v1 only)
+test -d "$OUT/silver/stg_trades"
+test -d "$OUT/silver/stg_trades/metadata"
+# at least one metadata json and one data parquet
+meta_count=$(find "$OUT/silver/stg_trades/metadata" -name '*.metadata.json' 2>/dev/null | wc -l | tr -d ' ')
+data_count=$(find "$OUT/silver/stg_trades" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
+test "${meta_count:-0}" -ge 1
+test "${data_count:-0}" -ge 1
 
 echo "[smoke] parquet_and_iceberg dual write"
 "$BIN" run -p "$FIX" --format parquet-and-iceberg --select stg_trades --bronze-check fail

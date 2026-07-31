@@ -19,8 +19,8 @@ pub use paths::{
     validate_glob_patterns,
 };
 pub use project::{
-    MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend, RefStrategy, ScanConfig,
-    DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
-    DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    IcebergConfig, IcebergWriteMode, MaterializeConfig, MaterializeMode, RbtProjectConfig,
+    RefBackend, RefStrategy, ScanConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
+    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 pub use select::{model_has_test_contract, parse_select_spec, SelectMode, SelectToken};

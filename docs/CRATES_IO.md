@@ -4,11 +4,11 @@
 
 | Package | Install / use |
 |---------|----------------|
-| [`rbt-datalake`](https://crates.io/crates/rbt-datalake) | `cargo install rbt-datalake` → binary **`rbt`** · dep `rbt-datalake = "0.3.9"` · `use rbt::…` |
+| [`rbt-datalake`](https://crates.io/crates/rbt-datalake) | `cargo install rbt-datalake` → binary **`rbt`** · dep `rbt-datalake = "0.4.0"` · `use rbt::…` |
 
 The short name [`rbt`](https://crates.io/crates/rbt) is taken by an unrelated project (“Rust bot toolkit”, owner `a7g4`). Our package is **`rbt-datalake`**, with `[[bin]] name = "rbt"` and `[lib] name = "rbt"`.
 
-Latest published: **0.3.9**.
+Latest published: **0.4.0**.
 
 ## Orphan crates (deprecation stubs)
 
