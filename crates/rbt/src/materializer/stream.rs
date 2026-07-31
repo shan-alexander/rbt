@@ -448,7 +448,7 @@ fn write_iceberg_metadata(
     total_rows: usize,
     data_file_name: &str,
 ) -> Result<()> {
-    use serde_json::{json, Value};
+    use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let meta_dir = table_root.join("metadata");
