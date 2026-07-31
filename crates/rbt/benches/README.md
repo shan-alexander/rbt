@@ -7,54 +7,86 @@ Package: `rbt-datalake`. Harness: [criterion](https://docs.rs/criterion) 0.5.
 From the **workspace root**:
 
 ```bash
-# All groups (skips e2e if bronze missing; full DAG is included when bronze exists)
+# Pipeline stages (compile / smoke / bronze / e2e)
 cargo bench -p rbt-datalake --bench pipeline
 
-# Filter by name substring
-cargo bench -p rbt-datalake --bench pipeline -- compile
-cargo bench -p rbt-datalake --bench pipeline -- run_smoke
-cargo bench -p rbt-datalake --bench pipeline -- bronze_scan
-cargo bench -p rbt-datalake --bench pipeline -- run_e2e_select
-cargo bench -p rbt-datalake --bench pipeline -- full_e2e_dag
+# MemTable (2nd lifetime) vs Parquet re-read for ref()
+cargo bench -p rbt-datalake --bench downstream_ref
 
-# Skip full 9-model DAG (still runs 1d select + bronze scan)
-RBT_BENCH_FULL=0 cargo bench -p rbt-datalake --bench pipeline
+# Filters
+cargo bench -p rbt-datalake --bench pipeline -- compile
+cargo bench -p rbt-datalake --bench downstream_ref -- decision
+cargo bench -p rbt-datalake --bench downstream_ref -- query/count_star
+RBT_BENCH_FULL=0 cargo bench -p rbt-datalake --bench pipeline   # skip 9-model e2e
 ```
 
-HTML reports: `target/criterion/report/index.html` (after a run).
+HTML reports: `target/criterion/report/index.html`.
 
 ## Data
 
-| Group | Dataset |
+| Bench | Dataset |
 |-------|---------|
-| `compile` / `run_smoke` | `examples/smoke_fixture` (in-repo) |
-| `materialize_synth` | synthetic Arrow batches |
-| `bronze_scan` / `run_e2e_*` | `examples/full_e2e_rbt_example/lake/bronze` (~447MB) |
+| `pipeline` smoke / compile | `examples/smoke_fixture` |
+| `pipeline` e2e / bronze | `examples/full_e2e_rbt_example/lake/bronze` |
+| `downstream_ref` synthetic | generated Arrow → temp Parquet |
+| `downstream_ref` e2e_lake | first available e2e silver/gold Parquet |
 
-E2e groups **no-op skip** if bronze is absent so `cargo bench` does not fail on a thin checkout.
+E2e groups **skip** if bronze/outputs are absent.
 
-## Interpreting results
+## Baseline — pipeline (2026-07-31)
 
-- Wall times are **machine-specific**; commit messages / PRs should note CPU class.
-- Full e2e uses `sample_size = 10` (Criterion minimum); each iter is ~20s on a mid laptop.
-- Use these numbers as **baselines** for streaming materialize RSS/time comparisons (see `docs/STREAMING_MATERIALIZE_PLAN.md`).
+Machine: AMD Ryzen 7 PRO 6850U (16 threads), 28 GiB RAM, NixOS.
 
-## Baseline snapshot (2026-07-31)
-
-Machine: AMD Ryzen 7 PRO 6850U (16 threads), 28 GiB RAM, NixOS, `cargo bench` release.
-
-| Benchmark | Median (approx) | Notes |
-|-----------|-----------------|-------|
-| `compile/smoke_fixture` | **2.4 ms** | project load + DAG |
+| Benchmark | Median | Notes |
+|-----------|--------|-------|
+| `compile/smoke_fixture` | **2.4 ms** | project + DAG |
 | `compile/full_e2e_project` | **6.5 ms** | 9 models |
-| `run_smoke/full_dag_parquet` | **9.5 ms** | 3 models, tiny JSONL |
-| `materialize_synth/parquet_write/10k` | **1.57 ms** | ~6.4 M rows/s |
-| `materialize_synth/parquet_write/100k` | **16.1 ms** | ~6.2 M rows/s |
-| `materialize_synth/parquet_write/500k` | **50.0 ms** | ~10 M rows/s |
-| `bronze_scan/arrow_ipc_1d_all_files` | **32–34 ms** | 73 files, ~35k rows |
-| `bronze_scan/arrow_ipc_1m_all_files` | **368 ms** | 2638 files, ~3.1M rows |
-| `run_e2e_select/stg_ohlcv_1d` | **110 ms** | scan+SQL+write+tests |
-| `run_e2e_select/tf_bar_metrics_1d` | **197 ms** | stg_1d + metrics |
-| `run_e2e_full/full_e2e_dag_parquet` | **20.7 s** | 9 models, ~9.4M row-writes |
+| `run_smoke/full_dag_parquet` | **9.5 ms** | tiny JSONL |
+| `materialize_synth` 10k / 100k / 500k | **1.6 / 16 / 50 ms** | write only |
+| `bronze_scan` 1d / 1m | **~34 ms / ~368 ms** | IPC → batches |
+| `run_e2e_select` stg_1d / tf_metrics_1d | **~110 / ~197 ms** | |
+| `run_e2e_full` 9-model DAG | **~20.7 s** | |
 
-Re-run after streaming materialize lands and compare wall time + RSS.
+## Baseline — MemTable vs Parquet `ref()` (`downstream_ref`, same machine)
+
+### Is a size threshold “free”?
+
+| Signal | Median |
+|--------|--------|
+| Known `u64` row count (from materialize) | **~0.76 ns** |
+| `if rows < 100_000` | **~0.77 ns** |
+| Sum `batch.num_rows()` | **~6.7 ns** |
+| `fs::metadata` length | **~3 µs** |
+| Parquet footer `num_rows` | **~23 µs** |
+| MemTable Arc build | **~0.8 µs** |
+| `register_parquet` | **~0.38 ms** |
+
+Yes — use the row count you already counted while writing; never open the file just to decide.
+
+### Register only
+
+| Rows | MemTable Arc | Parquet register |
+|-----:|-------------:|-----------------:|
+| 1k–500k | **85–96 µs** | **0.32–0.77 ms** |
+| 2M | **~118 µs** | **~0.65 ms** |
+
+### Query (register + SQL), median
+
+| Rows | Query | MemTable | Parquet | Δ |
+|-----:|-------|---------:|--------:|--:|
+| 1k | `count(*)` | 0.65 ms | 1.01 ms | +0.36 ms |
+| 100k | `count(*)` | 0.66 ms | 1.13 ms | +0.47 ms |
+| 2M | `count(*)` | 0.73 ms | 1.14 ms | +0.41 ms |
+| 1k | filter+project | 0.55 ms | 2.45 ms | +1.9 ms |
+| 100k | filter+project | 1.25 ms | 4.20 ms | +3.0 ms |
+| 500k | filter+project | 1.16 ms | 7.42 ms | +6.3 ms |
+| 100k | `sum(px)` | 1.14 ms | 4.08 ms | +2.9 ms |
+| 500k | `sum(px)` | 1.02 ms | 6.35 ms | +5.3 ms |
+| e2e stg_1d (35k) | `count(*)` | 0.65 ms | 1.49 ms | +0.84 ms |
+
+### Policy recommendation (from these numbers)
+
+- Absolute wall-clock gap is **milliseconds**; full e2e DAG is **~20 s**.
+- **Parquet re-read for large models** (staging/facts): tiny time cost, large RSS win.
+- Optional **MemTable for tiny dims** (&lt; ~10k–100k rows) if desired.
+- Threshold on **already-known row count** — effectively zero wall time.

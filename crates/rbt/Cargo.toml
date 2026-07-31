@@ -62,3 +62,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "pipeline"
 harness = false
+
+[[bench]]
+name = "downstream_ref"
+harness = false
