@@ -124,6 +124,10 @@ cargo build -p rbt-datalake --release
 cargo test -p rbt-datalake --lib
 bash scripts/smoke.sh
 
+# Benchmarks (Criterion; see crates/rbt/benches/README.md)
+# cargo bench -p rbt-datalake --bench pipeline
+# RBT_BENCH_FULL=0 cargo bench -p rbt-datalake --bench pipeline   # skip 9-model e2e
+
 # Golden paths
 ./target/release/rbt compile -p examples/smoke_fixture --bronze-check fail
 ./target/release/rbt run -p examples/smoke_fixture --format parquet --select dim_ticker

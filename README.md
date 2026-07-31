@@ -126,6 +126,13 @@ Single workspace member: [`crates/rbt`](crates/rbt) (crates.io: **`rbt-datalake`
 - [docs/README.md](docs/README.md) — ADR index, archive, publishing  
 - [docs/adr/ADR_003_UDF_RSMODELS.md](docs/adr/ADR_003_UDF_RSMODELS.md) — polyglot roadmap  
 
+## Benchmarks
+
+```bash
+cargo bench -p rbt-datalake --bench pipeline
+# see crates/rbt/benches/README.md — uses smoke + full_e2e bronze when present
+```
+
 ## CI
 
 ```bash

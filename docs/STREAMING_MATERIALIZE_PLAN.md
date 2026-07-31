@@ -442,3 +442,90 @@ No new workspace crates required for Phases 1–3.
 | 7 | (optional) `object_store` + AsyncArrowWriter | 5 |
 
 This plan is ready to execute starting at PR 1 without further research blockers.
+
+---
+
+## 16. After streaming materialize is implemented — other roadmap items
+
+Streaming materialize is a **memory/throughput foundation**. Once Phases 1–3 land and measure packs show RSS wins, prioritize the following product tracks (order is guidance, not a hard Gantt chart). Criterion benches under `crates/rbt/benches/` are the measurement harness for claims below.
+
+### 16.1 Bench tests & performance program
+
+| Item | Why |
+|------|-----|
+| Grow Criterion suite (smoke / e2e-1d / e2e-full / stream vs collect) | Defend “team-scale lake” claims with numbers |
+| RSS / peak memory capture alongside wall time | Streaming SoR for success criteria (§10) |
+| Fixed dataset seeds + machine class notes | Comparable runs across machines |
+| Optional `rbt-measure` scenario packs (thesis) | Public Spark/serde comparisons only after packs exist |
+| CI: lightweight benches only; full e2e nightly/local | Keep PR CI fast |
+
+### 16.2 Iceberg system-of-record proof
+
+| Item | Why |
+|------|-----|
+| Official Rust `iceberg` create → write data files → **commit snapshot** → read back via DF | CONTRIBUTE / thesis table-truth gate |
+| One catalog path first (filesystem or REST), not multi-catalog sprawl | Avoid WAP theater |
+| Stream materialize → Iceberg data files, then commit | Compose with this plan’s Phase 1–5 |
+| Time travel / snapshot id in run report | Ops and debugging |
+
+### 16.3 `preview` / `validate` (DX loop)
+
+| Item | Why |
+|------|-----|
+| `rbt validate` — syntax, refs, layer rules, optional schema bind | Fail before heavy IO |
+| `rbt preview --limit N` — `execute_stream` + take N rows (shares stream path) | Instant feedback; natural fit after streaming |
+| `rbt explain` — DataFusion logical/physical plan dump | Trust and tuning |
+| Structured errors (`E_RBT_*`, suggestions) | Agent-repairable DX (JSON first; prost later) |
+
+### 16.4 Ergonomic enhancements
+
+| Item | Why |
+|------|-----|
+| Clearer CLI progress (model, rows/s, phase: scan/sql/write) | Long e2e runs need signal |
+| Project config defaults + comments polish | Onboarding |
+| Better `--select` UX / error messages | Already partial |
+| Frontmatter schema docs / examples | Column `description`/`context` already started |
+| Small-result MemTable vs ListingTable auto threshold | Phase 2 of this plan |
+
+### 16.5 Autodetect bronze structural layouts
+
+| Item | Why |
+|------|-----|
+| Infer hive partitions from path (`key=value`) without full frontmatter | Faster onboarding |
+| Detect Arrow IPC file vs stream (partially done) | Fewer footguns |
+| Infer format from extension / magic bytes | `source_format` optional |
+| Sample N files → draft staging frontmatter | `rbt init` / `rbt discover` style |
+| Partition value cardinality / schema drift warnings | Lake hygiene |
+
+### 16.6 CI
+
+| Item | Why |
+|------|-----|
+| Keep `fmt` + `clippy -D warnings` + unit + smoke | Gate |
+| Optional bench job (smoke-scale only) | Catch regressions without 447MB bronze on every PR |
+| Full e2e + full Criterion as scheduled/manual workflow | When runner disk/RAM allows |
+| Cache cargo + bronze artifact strategy if e2e moves to CI | Cost control |
+
+### 16.7 Cloud integration
+
+| Item | Why |
+|------|-----|
+| `object_store` (Apache) for `s3://` / `gs://` / `az://` | Same code path local + cloud |
+| `AsyncArrowWriter` + multipart upload | Streaming write to object storage |
+| Credentials via env/standard AWS/GCP chains | Ops reality |
+| Remote bronze ListingTable scan | Don’t download whole lake to disk first |
+| Document cost/latency expectations | No magic cloud claims |
+
+### 16.8 Suggested sequencing after stream land
+
+```text
+stream materialize (this plan Phases 1–3)
+    → expand benches + RSS (16.1)
+    → preview + validate (16.3)          # cheap DX wins on stream path
+    → Iceberg SoR proof (16.2)           # table truth
+    → bronze autodetect (16.5)           # adoption
+    → cloud object_store (16.7)          # when users leave local FS
+    → CI expansion (16.6) interleaved
+```
+
+Ergonomics (16.4) land continuously as small PRs; never block the spine.
