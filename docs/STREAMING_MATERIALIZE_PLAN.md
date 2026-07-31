@@ -1,6 +1,6 @@
 # Implementation Plan: Streaming Materialize
 
-- **Status**: **Phase 1–3 landed in 0.3.8** (stream write default + streaming assertions + lake-file `ref()`). Phase 4+ (bronze streaming, object store) still planned.  
+- **Status**: **Phases 1–4 landed through 0.3.9** (stream write, assertions, lake `ref()`, **Arrow IPC bronze spill→Parquet**). Phase 5+ (object store) still planned.  
 - **Date**: 2026-07-31  
 - **Package**: `rbt-datalake` (lib import `rbt::`)  
 - **Related**: [CONTRIBUTING.md](../CONTRIBUTING.md) (stream write priority), [thesis.md](../thesis.md), [adr/ADR_001_PROJECT_STRUCTURE.md](adr/ADR_001_PROJECT_STRUCTURE.md)  

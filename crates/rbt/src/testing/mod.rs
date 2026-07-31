@@ -136,7 +136,9 @@ impl RecordBatchValidator {
         Ok(())
     }
 
-    /// Validates that all non-null values in a Utf8 column belong to the `accepted_values` set.
+    /// Validates that all non-null values in a string-like column belong to the `accepted_values` set.
+    ///
+    /// Accepts Utf8 / LargeUtf8 / Utf8View (Parquet re-read / spill often yields Utf8View).
     pub fn assert_accepted_values(
         batch: &RecordBatch,
         column: &str,
@@ -148,28 +150,19 @@ impl RecordBatchValidator {
             .map_err(|_| anyhow!("Column '{}' not found in RecordBatch schema", column))?;
 
         let array = batch.column(column_idx);
-        let string_array = array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                anyhow!(
-                    "Column '{}' must be Utf8 type for accepted_values validation",
-                    column
-                )
-            })?;
-
         let valid_set: HashSet<&str> = accepted_values.iter().copied().collect();
-        for i in 0..string_array.len() {
-            if string_array.is_valid(i) {
-                let val = string_array.value(i);
-                if !valid_set.contains(val) {
-                    return Err(anyhow!(
-                        "Assertion failed: Value '{}' in column '{}' is not in accepted list {:?}",
-                        val,
-                        column,
-                        accepted_values
-                    ));
-                }
+        for i in 0..array.len() {
+            if array.is_null(i) {
+                continue;
+            }
+            let val = array_value_to_key(array, i);
+            if !valid_set.contains(val.as_str()) {
+                return Err(anyhow!(
+                    "Assertion failed: Value '{}' in column '{}' is not in accepted list {:?}",
+                    val,
+                    column,
+                    accepted_values
+                ));
             }
         }
 

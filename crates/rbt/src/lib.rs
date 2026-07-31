@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.3.8"
+//! rbt-datalake = "0.3.9"
 //! ```
 //!
 //! ## Quick start (library)
@@ -30,7 +30,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.3.8")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.3.9")]
 
 pub mod core;
 pub mod engine;
@@ -53,7 +53,7 @@ pub use core::{
 
 pub use engine::{
     register_bronze_for_model, register_bronze_sources_for_dag, BronzeRegistrationMode,
-    BronzeSourceMeta, BronzeTableProvider, DagExecutionSummary, RbtEngineBuilder,
+    BronzeSourceMeta, BronzeTableProvider, DagExecutionSummary, PreviewResult, RbtEngineBuilder,
     TransformationEngine,
 };
 

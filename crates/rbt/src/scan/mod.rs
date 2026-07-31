@@ -111,8 +111,8 @@ impl LakeScanner {
         }
     }
 
-    /// Scan using a full [`ScanRequest`] (format-aware).
-    pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
+    /// Resolve scan root and list bronze files after partition/glob filters.
+    pub fn list_files(&self, req: &ScanRequest) -> Result<(PathBuf, Vec<PathBuf>)> {
         let root = req.resolved_path().with_context(|| {
             format!(
                 "E_RBT_BRONZE_PATH: failed resolving scan_path '{}' \
@@ -144,14 +144,19 @@ impl LakeScanner {
                 "E_RBT_BRONZE_SCAN_EMPTY: no {} files under {} after filters \
                  (require_partitions={:?}, path_glob={:?}). \
                  Hint: path_glob disables DataFusion listing pushdown and uses the \
-                 scan→MemTable path; check filename patterns and hive partitions.",
+                 scan→MemTable/spill path; check filename patterns and hive partitions.",
                 req.format.as_str(),
                 root.display(),
                 req.require_partitions,
                 req.path_glob
             );
         }
+        Ok((root, files))
+    }
 
+    /// Scan using a full [`ScanRequest`] (format-aware). Loads all batches into memory.
+    pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
+        let (root, files) = self.list_files(req)?;
         tracing::info!(
             "Bronze scan: {} file(s) under {} (format={}, globs={:?})",
             files.len(),
@@ -162,22 +167,174 @@ impl LakeScanner {
 
         let mut batches = Vec::new();
         for file_path in files {
-            let file_batches = self
-                .read_file(&file_path, req)
-                .with_context(|| format!("Failed reading bronze file {}", file_path.display()))?;
-            for batch in file_batches {
-                let mut batch = if req.partition_by.is_empty() {
-                    batch
-                } else {
-                    inject_hive_partitions(batch, &file_path, &root, &req.partition_by)?
-                };
-                if req.inject_source_path {
-                    batch = inject_source_path_column(batch, &file_path)?;
-                }
+            for batch in self.read_enriched(&file_path, &root, req)? {
                 batches.push(batch);
             }
         }
         Ok(batches)
+    }
+
+    /// Stream bronze files into a single Parquet file (atomic publish).
+    ///
+    /// Peak memory ≈ one source file's batches + Parquet encoder — not the full hive tree.
+    /// Used for Arrow IPC multi-file bronze when `scan.spill_arrow_ipc` is true.
+    pub fn scan_spill_to_parquet(
+        &self,
+        req: &ScanRequest,
+        dest: &Path,
+        opts: &crate::materializer::MaterializeWriteOptions,
+    ) -> Result<crate::materializer::StreamWriteStats> {
+        use crate::materializer::{atomic_publish, partial_path_for};
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::Compression;
+        use parquet::file::properties::WriterProperties;
+        use std::fs::{self, File};
+        use std::io::BufWriter;
+
+        let (root, files) = self.list_files(req)?;
+        tracing::info!(
+            "Bronze spill→parquet: {} file(s) under {} → {} (format={})",
+            files.len(),
+            root.display(),
+            dest.display(),
+            req.format
+        );
+
+        let partial = partial_path_for(dest);
+        if partial.exists() {
+            let _ = fs::remove_file(&partial);
+        }
+        if let Some(parent) = partial.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(opts.max_row_group_rows.max(1)))
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        let mut writer: Option<ArrowWriter<BufWriter<File>>> = None;
+        let mut schema: Option<SchemaRef> = None;
+        let mut rows = 0usize;
+        let mut batches_n = 0usize;
+
+        let mut write_loop = || -> Result<()> {
+            for file_path in &files {
+                let file_batches = self.read_enriched(file_path, &root, req).with_context(|| {
+                    format!(
+                        "E_RBT_BRONZE_SPILL: read {} for spill",
+                        file_path.display()
+                    )
+                })?;
+                for batch in file_batches {
+                    if batch.num_rows() == 0 && batch.num_columns() == 0 {
+                        continue;
+                    }
+                    if writer.is_none() {
+                        schema = Some(batch.schema());
+                        let file = File::create(&partial).with_context(|| {
+                            format!(
+                                "E_RBT_BRONZE_SPILL: create partial {}",
+                                partial.display()
+                            )
+                        })?;
+                        let buf = BufWriter::with_capacity(8 * 1024 * 1024, file);
+                        writer = Some(
+                            ArrowWriter::try_new(buf, batch.schema(), Some(props.clone()))
+                                .with_context(|| {
+                                    format!(
+                                        "E_RBT_BRONZE_SPILL: ArrowWriter for {}",
+                                        partial.display()
+                                    )
+                                })?,
+                        );
+                    }
+                    let w = writer.as_mut().unwrap();
+                    w.write(&batch).with_context(|| {
+                        format!(
+                            "E_RBT_BRONZE_SPILL: write batch from {}",
+                            file_path.display()
+                        )
+                    })?;
+                    rows += batch.num_rows();
+                    batches_n += 1;
+                    if w.in_progress_size() >= opts.max_row_group_bytes {
+                        w.flush()?;
+                    }
+                    // batch dropped
+                }
+            }
+            Ok(())
+        };
+
+        if let Err(e) = write_loop() {
+            if let Some(w) = writer.take() {
+                let _ = w.close();
+            }
+            let _ = fs::remove_file(&partial);
+            return Err(e);
+        }
+
+        if let Some(w) = writer.take() {
+            w.close().with_context(|| {
+                format!("E_RBT_BRONZE_SPILL: close writer {}", partial.display())
+            })?;
+            atomic_publish(&partial, dest)?;
+        } else {
+            // Zero rows but known schema is rare; fail if we never saw a batch.
+            let _ = schema;
+            bail!(
+                "E_RBT_BRONZE_SPILL: no batches produced for spill to {} \
+                 ({} candidate files)",
+                dest.display(),
+                files.len()
+            );
+        }
+
+        let bytes_written = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        tracing::info!(
+            "Bronze spill complete: {} rows, {} batches, {} bytes → {}",
+            rows,
+            batches_n,
+            bytes_written,
+            dest.display()
+        );
+        Ok(crate::materializer::StreamWriteStats {
+            rows,
+            batches: batches_n,
+            path: dest.to_path_buf(),
+            bytes_written,
+            validation: crate::testing::ValidationResult {
+                total_rows: rows,
+                passed_assertions: 0,
+                failed_assertions: 0,
+                errors: Vec::new(),
+            },
+        })
+    }
+
+    fn read_enriched(
+        &self,
+        file_path: &Path,
+        root: &Path,
+        req: &ScanRequest,
+    ) -> Result<Vec<RecordBatch>> {
+        let file_batches = self
+            .read_file(file_path, req)
+            .with_context(|| format!("Failed reading bronze file {}", file_path.display()))?;
+        let mut out = Vec::with_capacity(file_batches.len());
+        for batch in file_batches {
+            let mut batch = if req.partition_by.is_empty() {
+                batch
+            } else {
+                inject_hive_partitions(batch, file_path, root, &req.partition_by)?
+            };
+            if req.inject_source_path {
+                batch = inject_source_path_column(batch, file_path)?;
+            }
+            out.push(batch);
+        }
+        Ok(out)
     }
 
     /// Legacy helper: recurse path and read by extension with an explicit schema
@@ -976,6 +1133,7 @@ k = "b"
         };
         let scan_cfg = ScanConfig {
             protobuf_max_payload_bytes: 16,
+            ..Default::default()
         };
         let req = ScanRequest::from_frontmatter_with_config(
             temp.path(),

@@ -31,9 +31,9 @@ We deliberately ship **primary function before developer verbs**.
 | Priority | Focus | Status (honest) |
 |----------|--------|-----------------|
 | **P0** | Project load → DAG compile → bronze registration → SQL models → materialize silver/gold | **Working** — smoke + full e2e examples |
-| **P1** | Streaming materialize, assertion correctness, atomic publish, fail-fast `E_RBT_*` | **0.3.8** stream default; further harden ongoing |
-| **P2** | Iceberg as real system of record (catalog + snapshot commit), or deliberate pivot | FS layout only today; proof gate open |
-| **P3** | DX verbs: `validate`, `explain`, `preview` | Not shipped (`compile`/`run`/`test`/`--select` exist) |
+| **P1** | Streaming materialize, bronze spill, assertions, atomic publish | **0.3.9** stream + Arrow IPC spill; further harden optional |
+| **P2** | Iceberg as real system of record (catalog + snapshot commit), or deliberate pivot | FS layout + **versioned metadata** (0.3.9); REST/OCC still open |
+| **P3** | DX verbs: `validate`, `explain`, `preview` | **0.3.9** shipped |
 | **P4** | Measure packs, incremental strategies, WAP, multi-catalog, Rust models/UDFs | Thesis / later (see ADRs) |
 
 **Contributor rule:** If a PR adds polish while `compile`/`run` on the smoke fixture is flaky, it is out of order. Fix the spine first.

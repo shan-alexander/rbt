@@ -115,16 +115,36 @@ pub struct ScanConfig {
     /// Override to raise/lower the safety cap for opaque `payload` columns.
     #[serde(default = "default_protobuf_max_payload_bytes")]
     pub protobuf_max_payload_bytes: u64,
+    /// Spill Arrow IPC bronze (hive / multi-file) to a single Parquet cache, then
+    /// register via DataFusion listing — avoids holding every IPC partition in a MemTable.
+    ///
+    /// Default **true**. Set `false` only for tiny trees or debugging MemTable path.
+    #[serde(default = "default_spill_arrow_ipc")]
+    pub spill_arrow_ipc: bool,
+    /// Directory (project-relative or absolute / `$root`) for bronze spill files.
+    /// Default: `.rbt/bronze_spill`.
+    #[serde(default = "default_spill_dir")]
+    pub spill_dir: String,
 }
 
 fn default_protobuf_max_payload_bytes() -> u64 {
     DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
 }
 
+fn default_spill_arrow_ipc() -> bool {
+    true
+}
+
+fn default_spill_dir() -> String {
+    ".rbt/bronze_spill".into()
+}
+
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
             protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+            spill_arrow_ipc: true,
+            spill_dir: default_spill_dir(),
         }
     }
 }

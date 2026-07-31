@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.3.8`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine works (`compile` / `run` / `test` / `--select`). Default materialization is **streaming full-refresh Parquet** (no full-result RAM retention); default `ref()` is **lake Parquet re-read**. Multi-root paths, `path_glob`, opaque protobuf bronze. **Filesystem Iceberg-style tables** via `--format iceberg` (data + metadata layout; not multi-catalog OCC).
+> **Status:** **`0.3.9`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine: `compile` / `run` / `test` / `validate` / `explain` / `preview` / `--select`. Default **streaming materialize**; Arrow IPC bronze **spills to Parquet** (bounded RAM). Multi-root, `path_glob`, protobuf bronze. Iceberg FS layout with **versioned metadata** (not REST OCC).
 
 ## Why rbt
 
@@ -24,7 +24,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.3.8"
+rbt-datalake = "0.3.9"
 ```
 
 ```rust
@@ -78,6 +78,9 @@ See [examples/smoke_fixture/README.md](examples/smoke_fixture/README.md) and
 | Command | Purpose |
 |---------|---------|
 | `rbt compile -p <proj> [--select …]` | DAG + bronze path checks |
+| `rbt validate -p <proj> [--json]` | Static validate (DAG, bronze, refs) — no execute |
+| `rbt explain -s <model>` | Compiled SQL, deps, bronze contract |
+| `rbt preview -s <model> [--limit N]` | Sample rows (ancestors materialize; target not written) |
 | `rbt run -p <proj> [--select …] [--format parquet\|iceberg\|…]` | Execute subgraph (ancestors always included) |
 | `rbt test -p <proj> [--select …]` | Run subgraph + frontmatter tests |
 | `rbt bench` | In-memory throughput microbench |

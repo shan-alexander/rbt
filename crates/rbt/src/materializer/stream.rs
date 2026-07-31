@@ -366,22 +366,47 @@ async fn write_iceberg_stream(
     opts: &MaterializeWriteOptions,
     assertions: &[Assertion],
 ) -> Result<StreamWriteStats> {
-    // Full refresh: clear previous table if present (after successful data write we replace).
-    // Write data to a staging table dir, then rename into place.
+    // Data file is full-refresh; metadata versions are retained for a local snapshot log
+    // (not multi-writer OCC / REST catalog — honest FS Iceberg-style history).
+    let prior = read_iceberg_version_hint(table_root);
+    let next_version = prior.map(|v| v + 1).unwrap_or(1);
+    let mut meta_log = prior_metadata_log(table_root, prior);
+
     let staging = table_root.with_extension("rbt-partial-table");
     remove_if_exists(&staging);
     let data_dir = staging.join("data");
     let meta_dir = staging.join("metadata");
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&meta_dir)?;
-    let data_path = data_dir.join("part-00000.parquet");
 
+    // Preserve prior metadata JSON files into staging for history.
+    if let Some(old_meta) = table_root.join("metadata").exists().then(|| table_root.join("metadata"))
+    {
+        if let Ok(entries) = fs::read_dir(&old_meta) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                    if let Some(name) = p.file_name() {
+                        let _ = fs::copy(&p, meta_dir.join(name));
+                    }
+                }
+            }
+        }
+    }
+
+    let data_path = data_dir.join("part-00000.parquet");
     let schema = stream.schema();
     let stats = write_parquet_stream(stream, &data_path, opts, assertions).await?;
 
-    write_iceberg_metadata(&staging, &schema, stats.rows, "part-00000.parquet")?;
+    write_iceberg_metadata(
+        &staging,
+        &schema,
+        stats.rows,
+        "part-00000.parquet",
+        next_version,
+        &mut meta_log,
+    )?;
 
-    // Atomic-ish replace of table root.
     if table_root.exists() {
         fs::remove_dir_all(table_root).with_context(|| {
             format!(
@@ -402,9 +427,10 @@ async fn write_iceberg_stream(
     })?;
 
     tracing::info!(
-        "Iceberg FS table written (stream): {} ({} rows, data/part-00000.parquet)",
+        "Iceberg FS table written (stream): {} ({} rows, metadata v{}, data/part-00000.parquet)",
         table_root.display(),
-        stats.rows
+        stats.rows,
+        next_version
     );
 
     Ok(StreamWriteStats {
@@ -416,19 +442,65 @@ async fn write_iceberg_stream(
     })
 }
 
+fn read_iceberg_version_hint(table_root: &Path) -> Option<u64> {
+    let hint = table_root.join("metadata/version-hint.text");
+    let s = fs::read_to_string(hint).ok()?;
+    s.trim().parse().ok()
+}
+
+fn prior_metadata_log(table_root: &Path, prior: Option<u64>) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let mut log = Vec::new();
+    if let Some(v) = prior {
+        let meta_path = table_root.join(format!("metadata/v{v}.metadata.json"));
+        if meta_path.exists() {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            log.push(json!({
+                "timestamp-ms": now_ms,
+                "metadata-file": format!("v{v}.metadata.json"),
+            }));
+        }
+    }
+    log
+}
+
 fn write_iceberg_sidecar_from_parquet(
     parquet_path: &Path,
     row_count: usize,
     _stats_path: &Path,
 ) -> Result<()> {
     let table_root = super::sibling_iceberg_dir(parquet_path);
-    // Read schema from parquet file without loading all rows.
+    let prior = read_iceberg_version_hint(&table_root);
+    let next = prior.map(|v| v + 1).unwrap_or(1);
+    let mut log = prior_metadata_log(&table_root, prior);
+    // Preserve prior metadata JSON into a temp list of copies.
+    let mut prior_meta_files: Vec<(String, Vec<u8>)> = Vec::new();
+    let old_meta = table_root.join("metadata");
+    if old_meta.is_dir() {
+        if let Ok(entries) = fs::read_dir(&old_meta) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                    if let (Some(name), Ok(bytes)) = (
+                        p.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        fs::read(&p),
+                    ) {
+                        prior_meta_files.push((name, bytes));
+                    }
+                }
+            }
+        }
+    }
+
     let file = File::open(parquet_path)
         .with_context(|| format!("open {} for iceberg sidecar", parquet_path.display()))?;
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("parquet reader {}", parquet_path.display()))?;
     let schema = builder.schema().clone();
-    // Copy data file into iceberg layout
+
     if table_root.exists() {
         fs::remove_dir_all(&table_root)?;
     }
@@ -436,9 +508,19 @@ fn write_iceberg_sidecar_from_parquet(
     let meta_dir = table_root.join("metadata");
     fs::create_dir_all(&data_dir)?;
     fs::create_dir_all(&meta_dir)?;
+    for (name, bytes) in prior_meta_files {
+        let _ = fs::write(meta_dir.join(name), bytes);
+    }
     let data_name = "part-00000.parquet";
     fs::copy(parquet_path, data_dir.join(data_name))?;
-    write_iceberg_metadata(&table_root, &schema, row_count, data_name)?;
+    write_iceberg_metadata(
+        &table_root,
+        &schema,
+        row_count,
+        data_name,
+        next,
+        &mut log,
+    )?;
     Ok(())
 }
 
@@ -447,6 +529,8 @@ fn write_iceberg_metadata(
     schema: &SchemaRef,
     total_rows: usize,
     data_file_name: &str,
+    version: u64,
+    metadata_log: &mut Vec<serde_json::Value>,
 ) -> Result<()> {
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -468,7 +552,7 @@ fn write_iceberg_metadata(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let snapshot_id = now_ms;
+    let snapshot_id = now_ms.wrapping_add(version);
     let location = table_root
         .canonicalize()
         .unwrap_or_else(|_| table_root.to_path_buf());
@@ -478,7 +562,7 @@ fn write_iceberg_metadata(
         "format-version": 2,
         "table-uuid": format!("{:032x}", snapshot_id),
         "location": location_uri,
-        "last-sequence-number": 1,
+        "last-sequence-number": version,
         "last-updated-ms": now_ms,
         "last-column-id": fields.len(),
         "current-schema-id": 0,
@@ -496,12 +580,13 @@ fn write_iceberg_metadata(
             "rbt.writer": "rbt",
             "rbt.layout": "filesystem-iceberg-v1",
             "write.format.default": "parquet",
-            "rbt.materialize": "stream"
+            "rbt.materialize": "stream",
+            "rbt.metadata-version": version.to_string()
         },
         "current-snapshot-id": snapshot_id,
         "snapshots": [{
             "snapshot-id": snapshot_id,
-            "sequence-number": 1,
+            "sequence-number": version,
             "timestamp-ms": now_ms,
             "summary": {
                 "operation": "overwrite",
@@ -515,22 +600,22 @@ fn write_iceberg_metadata(
             "timestamp-ms": now_ms,
             "snapshot-id": snapshot_id
         }],
-        "metadata-log": [],
+        "metadata-log": metadata_log,
         "rbt": {
-            "note": "Filesystem Iceberg-style table written by rbt (full refresh, stream materialize).",
+            "note": "Filesystem Iceberg-style table (full-refresh data, versioned metadata). Not REST/Glue OCC.",
             "data_files": [format!("data/{data_file_name}")],
-            "row_count": total_rows
+            "row_count": total_rows,
+            "metadata_version": version
         }
     });
 
-    let meta_path = meta_dir.join("v1.metadata.json");
+    let meta_name = format!("v{version}.metadata.json");
+    let meta_path = meta_dir.join(&meta_name);
     let mut meta_file = File::create(&meta_path)?;
     writeln!(meta_file, "{}", serde_json::to_string_pretty(&metadata)?)?;
     let mut hint = File::create(meta_dir.join("version-hint.text"))?;
-    writeln!(hint, "1")?;
+    writeln!(hint, "{version}")?;
     fs::copy(&meta_path, meta_dir.join("metadata.json"))?;
-
-    let _ = data_file_name;
     Ok(())
 }
 
@@ -660,6 +745,35 @@ mod tests {
         let loaded = load_parquet_batches(&dest)?;
         let n: usize = loaded.iter().map(|b| b.num_rows()).sum();
         assert_eq!(n, 5);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn iceberg_stream_versions_metadata() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("tbl");
+        let ctx = SessionContext::new();
+        let opts = MaterializeWriteOptions::default();
+
+        let df1 = ctx.sql("SELECT 1 AS id").await?;
+        let mut s1 = df1.execute_stream().await?;
+        write_iceberg_stream(&mut s1, &root, &opts, &[]).await?;
+        assert!(root.join("metadata/v1.metadata.json").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("metadata/version-hint.text"))?.trim(),
+            "1"
+        );
+
+        let df2 = ctx.sql("SELECT 2 AS id").await?;
+        let mut s2 = df2.execute_stream().await?;
+        write_iceberg_stream(&mut s2, &root, &opts, &[]).await?;
+        assert!(root.join("metadata/v2.metadata.json").exists());
+        // prior v1 preserved
+        assert!(root.join("metadata/v1.metadata.json").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("metadata/version-hint.text"))?.trim(),
+            "2"
+        );
         Ok(())
     }
 

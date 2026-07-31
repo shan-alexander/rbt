@@ -35,6 +35,17 @@ pub struct DagExecutionSummary {
     pub bronze_sources_registered: usize,
 }
 
+/// Result of `preview` — limited rows from one model without materializing it.
+#[derive(Debug, Clone)]
+pub struct PreviewResult {
+    pub model: String,
+    pub compiled_sql: String,
+    pub limit: usize,
+    pub rows: usize,
+    pub batches: Vec<arrow::record_batch::RecordBatch>,
+    pub ancestors_executed: usize,
+}
+
 /// Fluent Builder for configuring and launching `TransformationEngine` instances.
 #[derive(Default)]
 pub struct RbtEngineBuilder {
@@ -171,6 +182,116 @@ impl TransformationEngine {
         config.materialize = materialize.clone();
         self.execute_dag_with_config(dag, project_dir, output_dir, &config)
             .await
+    }
+
+    /// Preview a single model: materialize ancestors, then run target SQL with `LIMIT`.
+    ///
+    /// Does **not** write the target model to the lake. Bronze + ancestor `ref()` tables
+    /// are registered as for a normal run. `limit` is clamped to `1..=10_000`.
+    pub async fn preview_model(
+        &self,
+        full_dag: &ModelDag,
+        project_dir: impl AsRef<Path>,
+        output_dir: impl AsRef<Path>,
+        model_name: &str,
+        limit: usize,
+    ) -> Result<PreviewResult> {
+        let project_dir = project_dir.as_ref();
+        let config = self.load_project_config(project_dir)?;
+        let limit = limit.clamp(1, 10_000);
+
+        let sub = full_dag
+            .apply_select(Some(model_name), crate::core::SelectMode::Execute)
+            .with_context(|| {
+                format!(
+                    "E_RBT_PREVIEW: cannot select model '{model_name}' (check name / --select)"
+                )
+            })?;
+        let seq = sub.topological_sequence()?;
+        let target = seq
+            .iter()
+            .find(|m| m.name == model_name)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("E_RBT_PREVIEW: model '{model_name}' not found in project DAG")
+            })?;
+        self.preview_model_inner(full_dag, project_dir, output_dir, &target, limit, &config)
+            .await
+    }
+
+    async fn preview_model_inner(
+        &self,
+        full_dag: &ModelDag,
+        project_dir: &Path,
+        output_dir: impl AsRef<Path>,
+        target: &ModelNode,
+        limit: usize,
+        config: &RbtProjectConfig,
+    ) -> Result<PreviewResult> {
+        let output_dir = output_dir.as_ref();
+        let sub = full_dag
+            .apply_select(Some(&target.name), crate::core::SelectMode::Execute)?;
+        let seq = sub.topological_sequence()?;
+        let ancestor_names: Vec<String> = seq
+            .iter()
+            .map(|m| m.name.clone())
+            .filter(|n| n != &target.name)
+            .collect();
+
+        let mut ancestors_executed = 0usize;
+        if !ancestor_names.is_empty() {
+            let anc_select = ancestor_names.join(",");
+            let anc_dag = full_dag
+                .apply_select(Some(&anc_select), crate::core::SelectMode::Execute)
+                .context("E_RBT_PREVIEW: ancestor select failed")?;
+            let summary = self
+                .execute_dag_with_config(&anc_dag, project_dir, output_dir, config)
+                .await
+                .context("E_RBT_PREVIEW: ancestor materialize failed")?;
+            ancestors_executed = summary.models_executed;
+        } else {
+            // Still need bronze for staging-only preview
+            let mut registered = HashSet::new();
+            register_bronze_sources_for_dag(
+                &self.ctx,
+                &sub,
+                project_dir,
+                &mut registered,
+                config,
+            )
+            .await
+            .context("E_RBT_PREVIEW: bronze registration failed")?;
+        }
+
+        // Ensure target bronze contract is registered (staging models).
+        let mut registered = HashSet::new();
+        register_bronze_for_model(&self.ctx, target, project_dir, &mut registered, config)
+            .await?;
+
+        let preview_sql = format!(
+            "SELECT * FROM (\n{}\n) AS _rbt_preview LIMIT {}",
+            target.compiled_sql.trim().trim_end_matches(';'),
+            limit
+        );
+        let df = self.ctx.sql(&preview_sql).await.with_context(|| {
+            format!(
+                "E_RBT_PREVIEW: SQL failed for model '{}': {preview_sql}",
+                target.name
+            )
+        })?;
+        let batches = df.collect().await.with_context(|| {
+            format!("E_RBT_PREVIEW: collect failed for model '{}'", target.name)
+        })?;
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+        Ok(PreviewResult {
+            model: target.name.clone(),
+            compiled_sql: target.compiled_sql.clone(),
+            limit,
+            rows,
+            batches,
+            ancestors_executed,
+        })
     }
 
     /// Full DAG execution with a pre-loaded project config (roots, scan limits, materialize).

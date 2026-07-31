@@ -51,8 +51,10 @@ pub struct BronzeSourceMeta {
 pub enum BronzeRegistrationMode {
     /// Inner provider is a DataFusion listing / external table.
     DataFusionListing,
-    /// Inner provider is a MemTable filled by `rbt::scan`.
+    /// Inner provider is a MemTable filled by `rbt::scan` (small / non-spill formats).
     ScanMemTable,
+    /// Arrow IPC (etc.) spilled file-by-file to Parquet then listed — bounded peak RAM.
+    ScanSpillParquet,
 }
 
 /// Thin `TableProvider` wrapper around a DataFusion listing table or MemTable.
@@ -190,10 +192,22 @@ pub async fn register_bronze_for_model(
     let use_scan = should_use_scan_path(fm, format);
 
     let (inner, mode) = if use_scan {
-        let provider = scan_to_memtable(project_dir, fm, format, config)
-            .await
-            .with_context(|| format!("model '{}': bronze scan failed", node.name))?;
-        (provider, BronzeRegistrationMode::ScanMemTable)
+        if should_spill_to_parquet(format, config) {
+            let provider = scan_spill_to_listing(ctx, project_dir, fm, format, config, &schema_name, &table_name)
+                .await
+                .with_context(|| {
+                    format!(
+                        "model '{}': bronze spill→parquet failed (format={})",
+                        node.name, format
+                    )
+                })?;
+            (provider, BronzeRegistrationMode::ScanSpillParquet)
+        } else {
+            let provider = scan_to_memtable(project_dir, fm, format, config)
+                .await
+                .with_context(|| format!("model '{}': bronze scan failed", node.name))?;
+            (provider, BronzeRegistrationMode::ScanMemTable)
+        }
     } else {
         let provider = listing_table_provider(ctx, &path_str, format)
             .await
@@ -348,6 +362,17 @@ async fn listing_table_provider(
     Ok(provider)
 }
 
+fn should_spill_to_parquet(
+    format: SourceFormat,
+    config: &crate::core::project::RbtProjectConfig,
+) -> bool {
+    config.scan.spill_arrow_ipc
+        && matches!(
+            format,
+            SourceFormat::ArrowIpc | SourceFormat::ArrowIpcStream
+        )
+}
+
 async fn scan_to_memtable(
     project_dir: &Path,
     fm: &StagingFrontmatter,
@@ -376,10 +401,160 @@ async fn scan_to_memtable(
     Ok(Arc::new(mem))
 }
 
+/// Stream Arrow IPC (etc.) file-by-file into a project spill Parquet, then DF-list it.
+async fn scan_spill_to_listing(
+    ctx: &SessionContext,
+    project_dir: &Path,
+    fm: &StagingFrontmatter,
+    format: SourceFormat,
+    config: &crate::core::project::RbtProjectConfig,
+    schema_name: &str,
+    table_name: &str,
+) -> Result<Arc<dyn TableProvider>> {
+    let mut req = ScanRequest::from_frontmatter_with_config(
+        project_dir,
+        fm,
+        config.roots.clone(),
+        &config.scan,
+    )?;
+    req.format = format;
+    let scanner = LakeScanner::from_request(&req);
+
+    let spill_root = crate::core::paths::resolve_project_path(
+        project_dir,
+        &config.scan.spill_dir,
+        &config.roots,
+    )
+    .with_context(|| {
+        format!(
+            "E_RBT_BRONZE_SPILL: resolve spill_dir '{}'",
+            config.scan.spill_dir
+        )
+    })?;
+    std::fs::create_dir_all(&spill_root).with_context(|| {
+        format!(
+            "E_RBT_BRONZE_SPILL: mkdir {}",
+            spill_root.display()
+        )
+    })?;
+    let safe = format!(
+        "{}__{}.parquet",
+        schema_name.replace('/', "_"),
+        table_name.replace('/', "_")
+    );
+    let spill_path = spill_root.join(safe);
+
+    let opts = crate::materializer::MaterializeWriteOptions::from_config(&config.materialize, true);
+    let stats = scanner
+        .scan_spill_to_parquet(&req, &spill_path, &opts)
+        .with_context(|| {
+            format!(
+                "E_RBT_BRONZE_SPILL: spill to {}",
+                spill_path.display()
+            )
+        })?;
+    tracing::info!(
+        "Bronze {}.{} spilled {} rows ({} batches) → {}",
+        schema_name,
+        table_name,
+        stats.rows,
+        stats.batches,
+        spill_path.display()
+    );
+
+    listing_table_provider(
+        ctx,
+        spill_path.to_str().unwrap_or_default(),
+        SourceFormat::Parquet,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::dag::{Materialization, ModelDag, OutputFormat};
+
+    #[tokio::test]
+    async fn register_arrow_ipc_spills_to_parquet() -> Result<()> {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::ipc::writer::FileWriter;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir()?;
+        let bronze = temp.path().join("lake/bronze/symbol=X/timeframe=1m");
+        std::fs::create_dir_all(&bronze)?;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("v", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["X", "X"])),
+                Arc::new(Int64Array::from(vec![1, 2])),
+            ],
+        )?;
+        let f = std::fs::File::create(bronze.join("chunk.arrow"))?;
+        let mut w = FileWriter::try_new(f, &schema)?;
+        w.write(&batch)?;
+        w.finish()?;
+
+        let sql = r#"---
+source_format: arrow_ipc
+scan_path: "lake/bronze"
+path_glob: "**/*.arrow"
+partition_by: [symbol, timeframe]
+require_partitions:
+  timeframe: "1m"
+inject_source_path: true
+---
+SELECT symbol, timeframe, v FROM {{ source('bronze', 'ohlcv') }}
+"#;
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_ohlcv",
+            sql,
+            Materialization::Table,
+            OutputFormat::Parquet,
+            None,
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let ctx = SessionContext::new();
+        let mut registered = HashSet::new();
+        let cfg = crate::core::project::RbtProjectConfig::default();
+        assert!(cfg.scan.spill_arrow_ipc);
+        let n = register_bronze_sources_for_dag(&ctx, &dag, temp.path(), &mut registered, &cfg)
+            .await?;
+        assert_eq!(n, 1);
+
+        let spill = temp
+            .path()
+            .join(".rbt/bronze_spill/bronze__ohlcv.parquet");
+        assert!(
+            spill.exists(),
+            "expected spill parquet at {}",
+            spill.display()
+        );
+
+        let df = ctx
+            .sql("SELECT COUNT(*) AS c FROM bronze.ohlcv")
+            .await?;
+        let batches = df.collect().await?;
+        // 2 data rows
+        let c = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(c, 2);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn register_jsonl_from_frontmatter() -> Result<()> {

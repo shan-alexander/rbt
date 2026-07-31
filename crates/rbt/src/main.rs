@@ -126,6 +126,44 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
     },
+    /// Static validation: load project, build DAG, bronze paths, layer rules (no execute)
+    Validate {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        #[arg(short = 's', long)]
+        select: Option<String>,
+        #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
+        bronze_check: CliBronzeCheck,
+        /// Emit JSON report to stdout (machine-readable)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Explain a model: compiled SQL, deps, layer, bronze contract, output path
+    Explain {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Model name (required)
+        #[arg(short = 's', long)]
+        select: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Preview model rows: materialize ancestors, run target SQL with LIMIT (no target write)
+    Preview {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Single model name
+        #[arg(short = 's', long)]
+        select: String,
+        #[arg(short, long, default_value = "./target/output")]
+        output_dir: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(short, long, value_enum, default_value_t = CliFormat::Parquet)]
+        format: CliFormat,
+        #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
+        bronze_check: CliBronzeCheck,
+    },
     /// Run micro-benchmarks measuring transformation engine throughput (rows/sec)
     Bench {
         #[arg(short, long, default_value_t = 1000000)]
@@ -333,6 +371,223 @@ async fn main() -> Result<()> {
                 tested, without, summary.total_rows_produced
             );
         }
+        Commands::Validate {
+            project_dir,
+            select,
+            bronze_check,
+            json,
+        } => {
+            let config = RbtProjectConfig::load(&project_dir)?;
+            let full = config.build_dag(&project_dir, None)?;
+            let dag = full.apply_select(select.as_deref(), SelectMode::Exact)?;
+            let tiers = dag.execution_tiers()?;
+            let report = dag.validate_bronze_sources_with_roots(
+                &project_dir,
+                bronze_check.into(),
+                &config.roots,
+            )?;
+
+            let mut issues: Vec<String> = Vec::new();
+            for d in &report.diagnostics {
+                issues.push(d.to_string());
+            }
+            // Layer / ref hygiene: every ref must resolve in full project
+            for node in full.topological_sequence()? {
+                for dep in &node.dependencies {
+                    if let rbt::DependencyRef::Model(name) = dep {
+                        if !full.node_map.contains_key(name) {
+                            issues.push(format!(
+                                "E_RBT_VALIDATE_REF: model '{}' refs unknown model '{}'",
+                                node.name, name
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let ok = !report.has_errors()
+                && !issues.iter().any(|i| i.contains("E_RBT_VALIDATE_REF"));
+
+            if json {
+                let body = serde_json::json!({
+                    "ok": ok,
+                    "project": config.name,
+                    "models": dag.node_map.len(),
+                    "tiers": tiers.len(),
+                    "bronze_errors": report.error_count(),
+                    "bronze_warnings": report.warning_count(),
+                    "issues": issues,
+                    "tier_plan": tiers.iter().map(|t| {
+                        t.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
+                    }).collect::<Vec<_>>(),
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!(
+                    "[rbt] validate project {:?} ({} model(s), {} tier(s))",
+                    project_dir,
+                    dag.node_map.len(),
+                    tiers.len()
+                );
+                for (i, tier) in tiers.iter().enumerate() {
+                    let names: Vec<&str> = tier.iter().map(|m| m.name.as_str()).collect();
+                    println!("  Tier {i}: {names:?}");
+                }
+                for d in &report.diagnostics {
+                    eprintln!("{d}");
+                }
+                for i in &issues {
+                    if i.starts_with("E_RBT_VALIDATE") {
+                        eprintln!("{i}");
+                    }
+                }
+                if ok {
+                    println!(
+                        "[rbt] validate OK (bronze errors={}, warnings={})",
+                        report.error_count(),
+                        report.warning_count()
+                    );
+                } else {
+                    bail!(
+                        "[rbt] validate FAILED (bronze errors={}, issues={})",
+                        report.error_count(),
+                        issues.len()
+                    );
+                }
+            }
+            if !ok && json {
+                std::process::exit(1);
+            }
+        }
+        Commands::Explain {
+            project_dir,
+            select,
+            json,
+        } => {
+            let config = RbtProjectConfig::load(&project_dir)?;
+            let full = config.build_dag(&project_dir, None)?;
+            let name = select.trim();
+            let node = full
+                .topological_sequence()?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| anyhow::anyhow!("E_RBT_EXPLAIN: unknown model '{name}'"))?;
+
+            let deps: Vec<String> = node
+                .dependencies
+                .iter()
+                .map(|d| match d {
+                    rbt::DependencyRef::Model(n) => format!("ref:{n}"),
+                    rbt::DependencyRef::Source {
+                        source_name,
+                        table_name,
+                    } => format!("source:{source_name}.{table_name}"),
+                })
+                .collect();
+            let fm = node.frontmatter.as_ref();
+            if json {
+                let body = serde_json::json!({
+                    "name": node.name,
+                    "layer": format!("{:?}", node.layer),
+                    "materialization": format!("{:?}", node.materialization),
+                    "output_format": format!("{:?}", node.output_format),
+                    "output_path": node.output_path,
+                    "dependencies": deps,
+                    "description": node.description,
+                    "compiled_sql": node.compiled_sql,
+                    "bronze": fm.map(|f| serde_json::json!({
+                        "scan_path": f.scan_path,
+                        "source_format": f.source_format.as_ref().map(|s| s.as_str()),
+                        "path_glob": f.path_glob,
+                        "partition_by": f.partition_by,
+                        "require_partitions": f.require_partitions,
+                    })),
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!("[rbt] explain model '{}'", node.name);
+                println!("  layer:           {:?}", node.layer);
+                println!("  materialization: {:?}", node.materialization);
+                println!("  output_format:   {:?}", node.output_format);
+                if let Some(p) = &node.output_path {
+                    println!("  output_path:     {p}");
+                }
+                println!("  dependencies:    {deps:?}");
+                if let Some(f) = fm {
+                    if let Some(sp) = &f.scan_path {
+                        println!("  bronze.scan_path: {sp}");
+                    }
+                    if let Some(sf) = &f.source_format {
+                        println!("  bronze.format:    {}", sf.as_str());
+                    }
+                    if let Some(g) = &f.path_glob {
+                        println!("  bronze.path_glob: {g:?}");
+                    }
+                }
+                println!("--- compiled SQL ---");
+                println!("{}", node.compiled_sql);
+            }
+        }
+        Commands::Preview {
+            project_dir,
+            select,
+            output_dir,
+            limit,
+            format,
+            bronze_check,
+        } => {
+            let config = RbtProjectConfig::load(&project_dir)?;
+            let full = config.build_dag(&project_dir, Some(format.into()))?;
+            let report = full.validate_bronze_sources_with_roots(
+                &project_dir,
+                bronze_check.into(),
+                &config.roots,
+            )?;
+            for d in &report.diagnostics {
+                eprintln!("{d}");
+            }
+            if report.has_errors() {
+                bail!(
+                    "[rbt] preview aborted: {} bronze error(s)",
+                    report.error_count()
+                );
+            }
+            println!(
+                "[rbt] preview model '{}' (limit={limit}, ancestors materialize if needed)...",
+                select
+            );
+            let engine = TransformationEngine::new();
+            let result = engine
+                .preview_model(&full, &project_dir, &output_dir, select.trim(), limit)
+                .await?;
+            println!(
+                "[rbt] preview '{}': {} row(s) (limit {}), {} ancestor model(s) executed",
+                result.model, result.rows, result.limit, result.ancestors_executed
+            );
+            // Print a simple table: schema + first values
+            if let Some(batch) = result.batches.first() {
+                let schema = batch.schema();
+                let cols: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+                println!("columns: {cols:?}");
+                let n = batch.num_rows().min(limit);
+                for row in 0..n {
+                    let mut cells = Vec::new();
+                    for c in 0..batch.num_columns() {
+                        let arr = batch.column(c);
+                        cells.push(arrow_cell_display(arr, row));
+                    }
+                    println!("  row[{row}]: {}", cells.join(" | "));
+                }
+                if result.batches.len() > 1 {
+                    println!(
+                        "  … {} additional batch(es) not printed",
+                        result.batches.len() - 1
+                    );
+                }
+            } else {
+                println!("  (no rows)");
+            }
+        }
         Commands::Bench { num_rows } => {
             println!(
                 "[rbt BENCHMARK] Generating & transforming {} rows in-memory...",
@@ -361,4 +616,17 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn arrow_cell_display(array: &arrow::array::ArrayRef, row: usize) -> String {
+    use arrow::array::Array;
+    use arrow::util::display::{ArrayFormatter, FormatOptions};
+    if array.is_null(row) {
+        return "NULL".into();
+    }
+    let opts = FormatOptions::default().with_display_error(true);
+    if let Ok(fmt) = ArrayFormatter::try_new(array.as_ref(), &opts) {
+        return fmt.value(row).to_string();
+    }
+    "?".to_string()
 }

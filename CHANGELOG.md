@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.9] — 2026-07-31
+
+### Added (P1 remainder + P2 lite + P3 DX)
+- **Bronze Arrow IPC spill→Parquet** (`scan.spill_arrow_ipc`, default **true**)
+  - Multi-file / hive Arrow IPC streams file-by-file into `.rbt/bronze_spill/{schema}__{table}.parquet`
+  - Registers via DataFusion listing (`BronzeRegistrationMode::ScanSpillParquet`) — peak RAM ≈ one file + encoder
+  - Config: `scan.spill_dir` (default `.rbt/bronze_spill`); set `spill_arrow_ipc: false` for legacy MemTable path
+- **Iceberg FS multi-version metadata** (P2 lite, honest)
+  - Full-refresh data file retained; `v{n}.metadata.json` history + `version-hint.text` increments
+  - **Not** REST/Glue OCC — local snapshot log only
+- **DX verbs (P3):**
+  - `rbt validate` — DAG + bronze + ref hygiene; `--json` for CI
+  - `rbt explain -s <model>` — compiled SQL, deps, bronze contract; `--json`
+  - `rbt preview -s <model> [--limit N]` — ancestors materialize, target `LIMIT` (no target write)
+
+### Tests
+- Arrow IPC spill registration + spill file existence
+- Iceberg stream metadata v1→v2 retention
+
 ## [0.3.8] — 2026-07-31
 
 ### Added (P1 — streaming materialize)

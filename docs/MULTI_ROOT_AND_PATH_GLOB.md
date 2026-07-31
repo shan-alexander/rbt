@@ -147,13 +147,21 @@ by globs + `require_partitions`. Prefer a narrow `scan_path` + globs over pointi
 Default max size for a single protobuf file: **1 GiB**
 (`1024 * 1024 * 1024` bytes).
 
-Override in project config:
+### Arrow IPC bronze spill (0.3.9+)
+
+Hive Arrow IPC trees use the scan path (globs / partitions). By default rbt
+**spills file-by-file to Parquet** under `.rbt/bronze_spill/` then registers a
+listing table — peak RAM is roughly one IPC file + encoder, not the full tree.
 
 ```yaml
 scan:
   # optional; default is 1073741824 (1 GiB)
   protobuf_max_payload_bytes: 1073741824
+  spill_arrow_ipc: true              # default
+  spill_dir: .rbt/bronze_spill       # default; may use $roots
 ```
+
+Set `spill_arrow_ipc: false` only for tiny trees or to force the legacy MemTable path.
 
 Oversized files fail with **`E_RBT_PROTOBUF_TOO_LARGE`** and name the config key to raise.
 
