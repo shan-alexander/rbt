@@ -1,5 +1,10 @@
 # `ref()` registration: lake Parquet vs MemTable
 
+> **0.3.8+:** Model SQL is written with **stream materialize** by default
+> (`materialize.mode: stream`). This page covers only the **downstream `ref()`**
+> backend (MemTable vs lake re-read). See [STREAMING_MATERIALIZE_PLAN.md](STREAMING_MATERIALIZE_PLAN.md)
+> for write-path streaming.
+
 After each model materializes, rbt must expose it so later models can
 `{{ ref('model_name') }}`. Two backends are supported; the default is
 **lake-as-truth Parquet re-read**.

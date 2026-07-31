@@ -8,7 +8,7 @@
 | [../CHANGELOG.md](../CHANGELOG.md) | Release notes |
 | [PUBLISHING.md](PUBLISHING.md) | crates.io publish / yank notes |
 | [CRATES_IO.md](CRATES_IO.md) | Why orphan crates exist; single-package policy |
-| [STREAMING_MATERIALIZE_PLAN.md](STREAMING_MATERIALIZE_PLAN.md) | Plan: stream DF → Parquet, zero-copy bounds, crate research |
+| [STREAMING_MATERIALIZE_PLAN.md](STREAMING_MATERIALIZE_PLAN.md) | Stream materialize — Phases 1–3 shipped in **0.3.8**; further phases planned |
 | [REF_STRATEGY.md](REF_STRATEGY.md) | `ref()` MemTable vs lake re-read config + bench tradeoffs |
 | [MULTI_ROOT_AND_PATH_GLOB.md](MULTI_ROOT_AND_PATH_GLOB.md) | Absolute paths, `$roots`, `path_glob`, protobuf bronze, listing pushdown notes |
 | [../crates/rbt/benches/README.md](../crates/rbt/benches/README.md) | Criterion bench harness |

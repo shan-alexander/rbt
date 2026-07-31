@@ -36,28 +36,70 @@ pub enum RefBackend {
     LakeFile,
 }
 
+/// How model SQL results are written to the lake.
+///
+/// Default is **`stream`**: `execute_stream` → batch write → drop batch (no full
+/// `Vec<RecordBatch>` retention). Use **`collect`** only for debugging / emergency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterializeMode {
+    /// Pull DataFusion stream batch-by-batch; atomic publish; bounded peak RAM.
+    #[default]
+    #[serde(alias = "streaming")]
+    Stream,
+    /// `DataFrame::collect` then write (legacy; holds full result in RAM).
+    #[serde(alias = "batch", alias = "legacy")]
+    Collect,
+}
+
+/// Default Parquet max row-group row count for streaming writers.
+pub const DEFAULT_MAX_ROW_GROUP_ROWS: usize = 1_000_000;
+/// Default Parquet in-progress size threshold before `flush()` (128 MiB).
+pub const DEFAULT_MAX_ROW_GROUP_BYTES: usize = 128 * 1024 * 1024;
+
 /// Optional materialization / `ref()` registration policy (`materialize:` in yml).
 ///
-/// All fields are optional; omitting the whole block keeps lake-as-truth Parquet re-read.
+/// All fields are optional; omitting the whole block keeps lake-as-truth Parquet re-read
+/// and **stream** write mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterializeConfig {
+    /// `stream` (default) | `collect`
+    #[serde(default)]
+    pub mode: MaterializeMode,
     /// `parquet` (default) | `memtable`
     #[serde(default)]
     pub ref_strategy: RefStrategy,
     /// Used only when `ref_strategy: memtable`. Defaults to [`DEFAULT_MEMTABLE_MAX_ROWS`].
     #[serde(default = "default_memtable_max_rows")]
     pub memtable_max_rows: usize,
+    /// Parquet `WriterProperties` max rows per row group (stream + collect writers).
+    #[serde(default = "default_max_row_group_rows")]
+    pub max_row_group_rows: usize,
+    /// Soft flush threshold for Parquet `in_progress_size` (bytes).
+    #[serde(default = "default_max_row_group_bytes")]
+    pub max_row_group_bytes: usize,
 }
 
 fn default_memtable_max_rows() -> usize {
     DEFAULT_MEMTABLE_MAX_ROWS
 }
 
+fn default_max_row_group_rows() -> usize {
+    DEFAULT_MAX_ROW_GROUP_ROWS
+}
+
+fn default_max_row_group_bytes() -> usize {
+    DEFAULT_MAX_ROW_GROUP_BYTES
+}
+
 impl Default for MaterializeConfig {
     fn default() -> Self {
         Self {
+            mode: MaterializeMode::Stream,
             ref_strategy: RefStrategy::Parquet,
             memtable_max_rows: DEFAULT_MEMTABLE_MAX_ROWS,
+            max_row_group_rows: DEFAULT_MAX_ROW_GROUP_ROWS,
+            max_row_group_bytes: DEFAULT_MAX_ROW_GROUP_BYTES,
         }
     }
 }
@@ -88,6 +130,30 @@ impl Default for ScanConfig {
 }
 
 impl MaterializeConfig {
+    /// Resolve write mode: env `RBT_MATERIALIZE_MODE=stream|collect` overrides yml.
+    pub fn effective_mode(&self) -> MaterializeMode {
+        match std::env::var("RBT_MATERIALIZE_MODE")
+            .or_else(|_| std::env::var("RBT_STREAM_MATERIALIZE"))
+            .ok()
+            .as_deref()
+        {
+            // RBT_STREAM_MATERIALIZE=1 / true → stream; 0 / false → collect
+            Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on") => {
+                MaterializeMode::Stream
+            }
+            Some("0") | Some("false") | Some("FALSE") | Some("no") | Some("off") => {
+                MaterializeMode::Collect
+            }
+            Some(s) if s.eq_ignore_ascii_case("stream") || s.eq_ignore_ascii_case("streaming") => {
+                MaterializeMode::Stream
+            }
+            Some(s) if s.eq_ignore_ascii_case("collect") || s.eq_ignore_ascii_case("batch") => {
+                MaterializeMode::Collect
+            }
+            _ => self.mode,
+        }
+    }
+
     /// Decide MemTable vs lake file for a model that produced `row_count` rows.
     pub fn choose_ref_backend(&self, row_count: usize) -> RefBackend {
         match self.ref_strategy {
@@ -437,9 +503,28 @@ mod tests {
     fn materialize_defaults_to_parquet_reread() {
         let cfg = MaterializeConfig::default();
         assert_eq!(cfg.ref_strategy, RefStrategy::Parquet);
+        assert_eq!(cfg.mode, MaterializeMode::Stream);
         assert_eq!(cfg.memtable_max_rows, DEFAULT_MEMTABLE_MAX_ROWS);
+        assert_eq!(cfg.max_row_group_rows, DEFAULT_MAX_ROW_GROUP_ROWS);
         assert_eq!(cfg.choose_ref_backend(0), RefBackend::LakeFile);
         assert_eq!(cfg.choose_ref_backend(1_000_000), RefBackend::LakeFile);
+    }
+
+    #[test]
+    fn materialize_mode_from_yaml() -> Result<()> {
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+materialize:
+  mode: collect
+  max_row_group_rows: 1000
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        assert_eq!(cfg.materialize.mode, MaterializeMode::Collect);
+        assert_eq!(cfg.materialize.max_row_group_rows, 1000);
+        Ok(())
     }
 
     #[test]
@@ -447,6 +532,7 @@ mod tests {
         let cfg = MaterializeConfig {
             ref_strategy: RefStrategy::Memtable,
             memtable_max_rows: 50_000,
+            ..Default::default()
         };
         assert_eq!(cfg.choose_ref_backend(49_999), RefBackend::MemTable);
         assert_eq!(cfg.choose_ref_backend(50_000), RefBackend::LakeFile);

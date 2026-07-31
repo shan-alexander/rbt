@@ -31,7 +31,7 @@ We deliberately ship **primary function before developer verbs**.
 | Priority | Focus | Status (honest) |
 |----------|--------|-----------------|
 | **P0** | Project load → DAG compile → bronze registration → SQL models → materialize silver/gold | **Working** — smoke + full e2e examples |
-| **P1** | Correctness of materialization, bronze contracts, layer rules, fail-fast errors | Ongoing harden |
+| **P1** | Streaming materialize, assertion correctness, atomic publish, fail-fast `E_RBT_*` | **0.3.8** stream default; further harden ongoing |
 | **P2** | Iceberg as real system of record (catalog + snapshot commit), or deliberate pivot | FS layout only today; proof gate open |
 | **P3** | DX verbs: `validate`, `explain`, `preview` | Not shipped (`compile`/`run`/`test`/`--select` exist) |
 | **P4** | Measure packs, incremental strategies, WAP, multi-catalog, Rust models/UDFs | Thesis / later (see ADRs) |

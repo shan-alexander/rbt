@@ -6,7 +6,7 @@ members = [
 # Single package workspace.
 
 [workspace.package]
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["rbt contributors"]
@@ -39,3 +39,5 @@ async-trait = "0.1"
 chrono = "0.4"
 jshift = "0.6.0"
 serde_json = "1"
+futures = "0.3"
+tempfile = "3"

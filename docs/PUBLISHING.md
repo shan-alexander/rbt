@@ -10,7 +10,7 @@ git commit  # cargo publish refuses dirty trees by default
 cargo publish -p rbt-datalake
 ```
 
-Package name on crates.io: **`rbt-datalake`** (currently **0.3.7**). Binary: **`rbt`**. Lib import: **`rbt::`**.
+Package name on crates.io: **`rbt-datalake`** (currently **0.3.8**). Binary: **`rbt`**. Lib import: **`rbt::`**.
 
 Link: https://crates.io/crates/rbt-datalake
 

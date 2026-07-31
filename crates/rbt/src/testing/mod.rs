@@ -233,7 +233,167 @@ impl RecordBatchValidator {
     }
 }
 
-fn array_value_to_key(array: &ArrayRef, row: usize) -> String {
+/// Streaming frontmatter assertion runner (per-batch + global unique state).
+///
+/// Drop each batch after `observe_batch` so peak RAM stays O(unique cardinality)
+/// rather than O(full result).
+#[derive(Debug, Default)]
+pub struct StreamingAssertionRunner {
+    total_rows: usize,
+    /// (column) not-null checks applied every batch
+    not_null: Vec<String>,
+    /// (column, accepted values) checks every batch
+    accepted: Vec<(String, Vec<String>)>,
+    /// Global unique key trackers
+    unique_trackers: Vec<UniqueKeyTracker>,
+    errors: Vec<String>,
+    fail_fast: bool,
+}
+
+impl StreamingAssertionRunner {
+    pub fn new(assertions: &[Assertion], fail_fast: bool) -> Self {
+        let mut not_null = Vec::new();
+        let mut accepted = Vec::new();
+        let mut unique_trackers = Vec::new();
+        for a in assertions {
+            match a {
+                Assertion::NotNull { column } => not_null.push(column.clone()),
+                Assertion::AcceptedValues { column, values } => {
+                    accepted.push((column.clone(), values.clone()))
+                }
+                Assertion::Unique { column } => {
+                    unique_trackers.push(UniqueKeyTracker::new(vec![column.clone()]))
+                }
+                Assertion::UniqueKey { columns } => {
+                    unique_trackers.push(UniqueKeyTracker::new(columns.clone()))
+                }
+            }
+        }
+        Self {
+            total_rows: 0,
+            not_null,
+            accepted,
+            unique_trackers,
+            errors: Vec::new(),
+            fail_fast,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.not_null.is_empty() && self.accepted.is_empty() && self.unique_trackers.is_empty()
+    }
+
+    /// Observe one batch. On fail-fast, returns Err on first violation.
+    pub fn observe_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.total_rows += batch.num_rows();
+        for col in &self.not_null {
+            if let Err(e) = RecordBatchValidator::assert_not_null(batch, col) {
+                self.errors.push(e.to_string());
+                if self.fail_fast {
+                    return Err(anyhow!("{}", self.errors.last().unwrap()));
+                }
+            }
+        }
+        for (col, vals) in &self.accepted {
+            let refs: Vec<&str> = vals.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = RecordBatchValidator::assert_accepted_values(batch, col, &refs) {
+                self.errors.push(e.to_string());
+                if self.fail_fast {
+                    return Err(anyhow!("{}", self.errors.last().unwrap()));
+                }
+            }
+        }
+        for tracker in &mut self.unique_trackers {
+            if let Err(e) = tracker.observe_batch(batch) {
+                self.errors.push(e.to_string());
+                if self.fail_fast {
+                    return Err(anyhow!("{}", self.errors.last().unwrap()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(self) -> ValidationResult {
+        let assertion_count =
+            self.not_null.len() + self.accepted.len() + self.unique_trackers.len();
+        if self.errors.is_empty() {
+            ValidationResult {
+                total_rows: self.total_rows,
+                passed_assertions: assertion_count,
+                failed_assertions: 0,
+                errors: Vec::new(),
+            }
+        } else {
+            // Count distinct error messages as failed assertion signals (fail-fast often = 1).
+            let failed = self.errors.len().min(assertion_count.max(1));
+            ValidationResult {
+                total_rows: self.total_rows,
+                passed_assertions: assertion_count.saturating_sub(failed),
+                failed_assertions: failed,
+                errors: self.errors,
+            }
+        }
+    }
+}
+
+/// Global composite uniqueness tracker for streaming materialize.
+#[derive(Debug)]
+pub struct UniqueKeyTracker {
+    columns: Vec<String>,
+    seen: HashSet<String>,
+    column_idxs: Option<Vec<usize>>,
+}
+
+impl UniqueKeyTracker {
+    pub fn new(columns: Vec<String>) -> Self {
+        Self {
+            columns,
+            seen: HashSet::new(),
+            column_idxs: None,
+        }
+    }
+
+    pub fn observe_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        if self.columns.is_empty() {
+            return Err(anyhow!("unique_key assertion requires at least one column"));
+        }
+        if self.column_idxs.is_none() {
+            let mut idxs = Vec::with_capacity(self.columns.len());
+            for col in &self.columns {
+                let idx = batch.schema().index_of(col).map_err(|_| {
+                    anyhow!("Column '{col}' not found in RecordBatch schema for unique_key")
+                })?;
+                idxs.push(idx);
+            }
+            self.column_idxs = Some(idxs);
+        }
+        let idxs = self.column_idxs.as_ref().unwrap();
+        for row in 0..batch.num_rows() {
+            let mut key = String::new();
+            for (i, &col_idx) in idxs.iter().enumerate() {
+                if i > 0 {
+                    key.push('\u{1f}');
+                }
+                key.push_str(&array_value_to_key(batch.column(col_idx), row));
+            }
+            if !self.seen.insert(key.clone()) {
+                return Err(anyhow!(
+                    "Assertion failed: Duplicate composite key {:?} on columns {:?}",
+                    key.split('\u{1f}').collect::<Vec<_>>(),
+                    self.columns
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn cardinality(&self) -> usize {
+        self.seen.len()
+    }
+}
+
+pub(crate) fn array_value_to_key(array: &ArrayRef, row: usize) -> String {
     if array.is_null(row) {
         return "\u{0}".to_string();
     }
@@ -314,6 +474,38 @@ mod tests {
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    #[test]
+    fn streaming_unique_tracker_cross_batch() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("k", DataType::Utf8, false),
+        ]));
+        let b1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )?;
+        let b2 = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![3, 2])),
+                Arc::new(StringArray::from(vec!["c", "b"])),
+            ],
+        )?;
+        let mut runner = StreamingAssertionRunner::new(
+            &[Assertion::UniqueKey {
+                columns: vec!["id".into()],
+            }],
+            true,
+        );
+        runner.observe_batch(&b1)?;
+        let err = runner.observe_batch(&b2).unwrap_err().to_string();
+        assert!(err.contains("Duplicate"), "got {err}");
+        Ok(())
+    }
 
     #[test]
     fn test_record_batch_assertions() -> Result<()> {

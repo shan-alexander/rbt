@@ -1,6 +1,18 @@
 //! `rbt::materializer`: multi-format writers including filesystem Iceberg-style tables.
+//!
+//! **Streaming materialize** ([`stream`]) is the default engine path: pull a DataFusion
+//! batch stream, write batch-by-batch, drop each batch, atomic-publish the file.
+
+pub mod stream;
+
+pub use stream::{
+    atomic_publish, load_parquet_batches, materialize_stream, partial_path_for,
+    write_empty_parquet, write_parquet_batches_atomic, write_parquet_stream, MaterializeWriteOptions,
+    StreamWriteStats,
+};
 
 use crate::core::dag::OutputFormat;
+use crate::core::project::MaterializeConfig;
 use crate::testing::{Assertion, RecordBatchValidator, ValidationResult};
 use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
@@ -101,17 +113,8 @@ fn write_parquet_file(batches: &[RecordBatch], path: &Path) -> Result<()> {
             );
         }
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    let file = File::create(path).with_context(|| format!("create parquet {}", path.display()))?;
-    let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(file, schema, None)
-        .with_context(|| format!("parquet writer {}", path.display()))?;
-    for batch in batches {
-        writer.write(batch)?;
-    }
-    writer.close()?;
-    Ok(())
+    let opts = MaterializeWriteOptions::from_config(&MaterializeConfig::default(), true);
+    write_parquet_batches_atomic(batches, path, &opts).map(|_| ())
 }
 
 /// Sibling Iceberg table directory for dual-write: `foo.parquet` → `foo.iceberg/`.

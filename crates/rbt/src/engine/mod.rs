@@ -2,12 +2,16 @@
 
 pub mod bronze;
 
-use crate::core::dag::{ModelDag, OutputFormat};
-use crate::core::project::{MaterializeConfig, RbtProjectConfig, RefBackend};
-use crate::materializer::{sibling_iceberg_dir, MultiFormatWriter};
-use crate::testing::{assertions_from_model_tests, RecordBatchValidator};
+use crate::core::dag::{ModelDag, ModelNode, OutputFormat};
+use crate::core::project::{
+    MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
+};
+use crate::materializer::{
+    load_parquet_batches, materialize_stream, sibling_iceberg_dir, MaterializeWriteOptions,
+    MultiFormatWriter, StreamWriteStats,
+};
+use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
 use anyhow::{bail, Context, Result};
-use arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -206,18 +210,6 @@ impl TransformationEngine {
                 register_bronze_for_model(&self.ctx, model, project_dir, &mut registered, config)
                     .await?;
 
-                let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
-                    format!(
-                        "SQL execution failed for model '{}' (compiled: {})",
-                        model.name, model.compiled_sql
-                    )
-                })?;
-                let batches = df
-                    .collect()
-                    .await
-                    .with_context(|| format!("collect failed for model '{}'", model.name))?;
-                let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
-
                 let dest_path = model
                     .output_path
                     .as_ref()
@@ -233,91 +225,73 @@ impl TransformationEngine {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                MultiFormatWriter::write_batches(&batches, &model.output_format, &dest_path)?;
+                let (assertions, fail_on_error) = model_assertions(model);
+                let write_opts =
+                    MaterializeWriteOptions::from_config(materialize, fail_on_error);
+                let mode = materialize.effective_mode();
 
-                // Frontmatter-declared tests (staging grain / not_null / unique_key).
-                if let Some(fm) = model.frontmatter.as_ref() {
-                    if let Some(tests) = fm.tests.as_ref() {
-                        if !tests.is_empty() {
-                            let unique = tests
-                                .unique
-                                .clone()
-                                .or_else(|| fm.unique_key.clone())
-                                .or_else(|| fm.grain.clone());
-                            let assertions = assertions_from_model_tests(
-                                tests.not_null.as_deref(),
-                                unique.as_deref(),
-                                tests.accepted_values.as_ref(),
-                            );
-                            if !assertions.is_empty() {
-                                let result =
-                                    RecordBatchValidator::validate_batches(&batches, &assertions);
-                                if result.failed_assertions > 0 {
-                                    let msg = format!(
-                                        "model '{}' failed {} test(s): {}",
-                                        model.name,
-                                        result.failed_assertions,
-                                        result.errors.join("; ")
-                                    );
-                                    if tests.should_fail_on_error() {
-                                        bail!(msg);
-                                    }
-                                    tracing::warn!("{}", msg);
-                                } else {
-                                    tracing::info!(
-                                        "model '{}': {} assertion(s) passed ({} rows)",
-                                        model.name,
-                                        result.passed_assertions,
-                                        result.total_rows
-                                    );
-                                }
-                            }
-                        }
-                    } else if let Some(uk) = fm
-                        .unique_key
-                        .as_ref()
-                        .or(fm.grain.as_ref())
-                        .filter(|v| !v.is_empty())
-                    {
-                        // Implicit unique_key/grain check when no tests: block declared
-                        let assertions =
-                            assertions_from_model_tests(None, Some(uk.as_slice()), None);
-                        let result = RecordBatchValidator::validate_batches(&batches, &assertions);
-                        if result.failed_assertions > 0 {
-                            bail!(
-                                "model '{}' grain/unique_key violated: {}",
-                                model.name,
-                                result.errors.join("; ")
-                            );
-                        }
+                let row_count = match mode {
+                    MaterializeMode::Stream => {
+                        let stats = execute_model_stream(
+                            &self.ctx,
+                            model,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                            fail_on_error,
+                        )
+                        .await?;
+                        stats.rows
                     }
-                }
+                    MaterializeMode::Collect => {
+                        execute_model_collect(
+                            &self.ctx,
+                            model,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                            fail_on_error,
+                        )
+                        .await?
+                    }
+                };
 
                 // Expose model for downstream {{ ref() }} per project materialize policy.
-                if !batches.is_empty() {
-                    let backend = materialize.choose_ref_backend(row_count);
-                    register_model_for_ref(
-                        &self.ctx,
-                        &model.name,
-                        &model.output_format,
-                        &dest_path,
-                        &batches,
-                        backend,
+                if row_count > 0
+                    || matches!(
+                        model.output_format,
+                        OutputFormat::Parquet
+                            | OutputFormat::Iceberg
+                            | OutputFormat::ParquetAndIceberg
+                            | OutputFormat::ZeroCopyClone
                     )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "register model '{}' for ref() (backend={:?}, rows={})",
-                            model.name, backend, row_count
+                {
+                    // Empty parquet still may exist after stream (schema-only); skip ref if no file.
+                    let backend = materialize.choose_ref_backend(row_count);
+                    if row_count > 0 {
+                        register_model_for_ref(
+                            &self.ctx,
+                            &model.name,
+                            &model.output_format,
+                            &dest_path,
+                            backend,
                         )
-                    })?;
-                    tracing::debug!(
-                        model = %model.name,
-                        rows = row_count,
-                        ?backend,
-                        strategy = ?materialize.ref_strategy,
-                        "registered model for ref()"
-                    );
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_REF_REGISTER: model '{}' (backend={:?}, rows={}, mode={:?})",
+                                model.name, backend, row_count, mode
+                            )
+                        })?;
+                        tracing::debug!(
+                            model = %model.name,
+                            rows = row_count,
+                            ?backend,
+                            ?mode,
+                            strategy = ?materialize.ref_strategy,
+                            "registered model for ref()"
+                        );
+                    }
                 }
 
                 models_executed += 1;
@@ -331,6 +305,163 @@ impl TransformationEngine {
             bronze_sources_registered,
         })
     }
+}
+
+/// Build frontmatter assertion list + fail-on-error policy for a model.
+fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
+    let mut fail_on_error = true;
+    let assertions = if let Some(fm) = model.frontmatter.as_ref() {
+        if let Some(tests) = fm.tests.as_ref() {
+            fail_on_error = tests.should_fail_on_error();
+            if tests.is_empty() {
+                Vec::new()
+            } else {
+                let unique = tests
+                    .unique
+                    .clone()
+                    .or_else(|| fm.unique_key.clone())
+                    .or_else(|| fm.grain.clone());
+                assertions_from_model_tests(
+                    tests.not_null.as_deref(),
+                    unique.as_deref(),
+                    tests.accepted_values.as_ref(),
+                )
+            }
+        } else if let Some(uk) = fm
+            .unique_key
+            .as_ref()
+            .or(fm.grain.as_ref())
+            .filter(|v| !v.is_empty())
+        {
+            fail_on_error = true;
+            assertions_from_model_tests(None, Some(uk.as_slice()), None)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    (assertions, fail_on_error)
+}
+
+async fn execute_model_stream(
+    ctx: &SessionContext,
+    model: &ModelNode,
+    dest_path: &Path,
+    write_opts: &MaterializeWriteOptions,
+    assertions: &[Assertion],
+    fail_on_error: bool,
+) -> Result<StreamWriteStats> {
+    let df = ctx.sql(&model.compiled_sql).await.with_context(|| {
+        format!(
+            "E_RBT_SQL: execution failed for model '{}' (compiled: {})",
+            model.name, model.compiled_sql
+        )
+    })?;
+    let stream = df.execute_stream().await.with_context(|| {
+        format!(
+            "E_RBT_SQL: execute_stream failed for model '{}'",
+            model.name
+        )
+    })?;
+
+    let stats = materialize_stream(
+        stream,
+        &model.output_format,
+        dest_path,
+        write_opts,
+        assertions,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "E_RBT_MATERIALIZE: stream write failed for model '{}' → {}",
+            model.name,
+            dest_path.display()
+        )
+    })?;
+
+    if stats.validation.failed_assertions > 0 {
+        let msg = format!(
+            "model '{}' failed {} test(s): {}",
+            model.name,
+            stats.validation.failed_assertions,
+            stats.validation.errors.join("; ")
+        );
+        if fail_on_error {
+            bail!("{msg}");
+        }
+        tracing::warn!("{msg}");
+    } else if !assertions.is_empty() {
+        tracing::info!(
+            "model '{}': {} assertion(s) passed ({} rows, {} batches, stream)",
+            model.name,
+            stats.validation.passed_assertions,
+            stats.rows,
+            stats.batches
+        );
+    } else {
+        tracing::debug!(
+            model = %model.name,
+            rows = stats.rows,
+            batches = stats.batches,
+            bytes = stats.bytes_written,
+            "stream materialize complete"
+        );
+    }
+    Ok(stats)
+}
+
+async fn execute_model_collect(
+    ctx: &SessionContext,
+    model: &ModelNode,
+    dest_path: &Path,
+    write_opts: &MaterializeWriteOptions,
+    assertions: &[Assertion],
+    fail_on_error: bool,
+) -> Result<usize> {
+    let df = ctx.sql(&model.compiled_sql).await.with_context(|| {
+        format!(
+            "E_RBT_SQL: execution failed for model '{}' (compiled: {})",
+            model.name, model.compiled_sql
+        )
+    })?;
+    let batches = df.collect().await.with_context(|| {
+        format!(
+            "E_RBT_SQL: collect failed for model '{}'",
+            model.name
+        )
+    })?;
+    let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+    MultiFormatWriter::write_batches(&batches, &model.output_format, dest_path)?;
+    // Prefer atomic parquet path for primary formats already handled inside MultiFormatWriter.
+
+    if !assertions.is_empty() {
+        let result = RecordBatchValidator::validate_batches(&batches, assertions);
+        if result.failed_assertions > 0 {
+            let msg = format!(
+                "model '{}' failed {} test(s): {}",
+                model.name,
+                result.failed_assertions,
+                result.errors.join("; ")
+            );
+            if fail_on_error {
+                bail!("{msg}");
+            }
+            tracing::warn!("{msg}");
+        } else {
+            tracing::info!(
+                "model '{}': {} assertion(s) passed ({} rows, collect)",
+                model.name,
+                result.passed_assertions,
+                result.total_rows
+            );
+        }
+    }
+
+    let _ = write_opts; // reserved for collect-path parquet props if we unify further
+    Ok(row_count)
 }
 
 /// Path used to re-read a model from the lake after materialize.
@@ -350,20 +481,55 @@ fn lake_read_path(format: &OutputFormat, dest_path: &Path) -> PathBuf {
 }
 
 /// Register a completed model so later SQL `ref('name')` resolves.
+///
+/// Never requires an in-memory `Vec<RecordBatch>` for the default lake-file backend.
+/// MemTable backend re-reads the written lake path (only used for small tables).
 async fn register_model_for_ref(
     ctx: &SessionContext,
     name: &str,
     format: &OutputFormat,
     dest_path: &Path,
-    batches: &[RecordBatch],
     backend: RefBackend,
 ) -> Result<()> {
     let _ = ctx.deregister_table(name);
 
     match backend {
         RefBackend::MemTable => {
+            let batches = match format {
+                OutputFormat::Parquet
+                | OutputFormat::ZeroCopyClone
+                | OutputFormat::Iceberg
+                | OutputFormat::ParquetAndIceberg => {
+                    let path = resolve_lake_read_path(format, dest_path)?;
+                    load_parquet_batches(&path).with_context(|| {
+                        format!(
+                            "E_RBT_REF_MEMTABLE: load {} for ref('{name}')",
+                            path.display()
+                        )
+                    })?
+                }
+                OutputFormat::Jsonl | OutputFormat::Csv => {
+                    // Register lake file then collect into MemTable (small tables only).
+                    Box::pin(async {
+                        // temporarily use lake registration path then table scan
+                        register_model_for_ref(ctx, name, format, dest_path, RefBackend::LakeFile)
+                            .await?;
+                        let df = ctx.table(name).await.map_err(|e| {
+                            anyhow::anyhow!("E_RBT_REF_MEMTABLE: table '{name}': {e}")
+                        })?;
+                        df.collect().await.map_err(|e| {
+                            anyhow::anyhow!("E_RBT_REF_MEMTABLE: collect '{name}': {e}")
+                        })
+                    })
+                    .await?
+                }
+            };
+            if batches.is_empty() {
+                bail!("E_RBT_REF_MEMTABLE: no batches for ref('{name}')");
+            }
+            let _ = ctx.deregister_table(name);
             let schema = batches[0].schema();
-            let mem_table = MemTable::try_new(schema, vec![batches.to_vec()])
+            let mem_table = MemTable::try_new(schema, vec![batches])
                 .map_err(|e| anyhow::anyhow!("MemTable::try_new: {e}"))?;
             ctx.register_table(name, Arc::new(mem_table))
                 .map_err(|e| anyhow::anyhow!("register_table MemTable: {e}"))?;
@@ -373,27 +539,19 @@ async fn register_model_for_ref(
             | OutputFormat::ZeroCopyClone
             | OutputFormat::Iceberg
             | OutputFormat::ParquetAndIceberg => {
-                let mut path = lake_read_path(format, dest_path);
-                if !path.exists() && matches!(format, OutputFormat::ParquetAndIceberg) {
-                    let alt = sibling_iceberg_dir(dest_path).join("data/part-00000.parquet");
-                    if alt.exists() {
-                        path = alt;
-                    }
-                }
-                if !path.exists() {
-                    bail!(
-                        "lake file missing for ref('{}'): expected {}",
-                        name,
-                        path.display()
-                    );
-                }
+                let path = resolve_lake_read_path(format, dest_path)?;
                 ctx.register_parquet(
                     name,
                     path.to_str().unwrap_or_default(),
                     ParquetReadOptions::default(),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("register_parquet {}: {e}", path.display()))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "E_RBT_REF_REGISTER: register_parquet {} for '{name}': {e}",
+                        path.display()
+                    )
+                })?;
             }
             OutputFormat::Jsonl => {
                 let p = dest_path.to_str().unwrap_or_default();
@@ -404,7 +562,7 @@ async fn register_model_for_ref(
                     tracing::debug!("jsonl register failed ({e}); retry default");
                     ctx.register_json(name, p, JsonReadOptions::default())
                         .await
-                        .map_err(|e| anyhow::anyhow!("register_json: {e}"))?;
+                        .map_err(|e| anyhow::anyhow!("E_RBT_REF_REGISTER: register_json: {e}"))?;
                 }
             }
             OutputFormat::Csv => {
@@ -414,11 +572,28 @@ async fn register_model_for_ref(
                     CsvReadOptions::default(),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("register_csv: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("E_RBT_REF_REGISTER: register_csv: {e}"))?;
             }
         },
     }
     Ok(())
+}
+
+fn resolve_lake_read_path(format: &OutputFormat, dest_path: &Path) -> Result<PathBuf> {
+    let mut path = lake_read_path(format, dest_path);
+    if !path.exists() && matches!(format, OutputFormat::ParquetAndIceberg) {
+        let alt = sibling_iceberg_dir(dest_path).join("data/part-00000.parquet");
+        if alt.exists() {
+            path = alt;
+        }
+    }
+    if !path.exists() {
+        bail!(
+            "E_RBT_REF_MISSING: lake file missing for ref(): expected {}",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -546,6 +721,7 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         let mat = MaterializeConfig {
             ref_strategy: RefStrategy::Parquet,
             memtable_max_rows: 50_000,
+            ..Default::default()
         };
         let engine = TransformationEngine::new();
         let summary = engine
@@ -584,6 +760,7 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         let mat = MaterializeConfig {
             ref_strategy: RefStrategy::Memtable,
             memtable_max_rows: 50_000,
+            ..Default::default()
         };
         let engine = TransformationEngine::new();
         let summary = engine
@@ -622,6 +799,7 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         let mat = MaterializeConfig {
             ref_strategy: RefStrategy::Memtable,
             memtable_max_rows: 1,
+            ..Default::default()
         };
         let engine = TransformationEngine::new();
         let summary = engine

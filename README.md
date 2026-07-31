@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.3.7`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine works (`compile` / `run` / `test` / `--select`). Default materialization is **full Parquet rewrite**; default `ref()` is **lake Parquet re-read**. Multi-root paths, `path_glob`, opaque protobuf bronze. **Filesystem Iceberg-style tables** via `--format iceberg` (data + metadata layout; not multi-catalog OCC).
+> **Status:** **`0.3.8`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine works (`compile` / `run` / `test` / `--select`). Default materialization is **streaming full-refresh Parquet** (no full-result RAM retention); default `ref()` is **lake Parquet re-read**. Multi-root paths, `path_glob`, opaque protobuf bronze. **Filesystem Iceberg-style tables** via `--format iceberg` (data + metadata layout; not multi-catalog OCC).
 
 ## Why rbt
 
@@ -24,7 +24,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.3.7"
+rbt-datalake = "0.3.8"
 ```
 
 ```rust
@@ -116,18 +116,23 @@ my_project/
 Staging frontmatter: `scan_path`, `source_format`, `path_glob`, `partition_by`, `grain`, `tests`, `columns.*.description` / `context`.  
 Multi-root lakes, absolute targets, glob semantics, protobuf bronze, and when `path_glob` disables DataFusion listing pushdown: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md).
 
-### `ref()` after materialize (optional)
+### Materialize + `ref()` (optional)
 
-By default rbt **re-reads the lake file** for downstream `{{ ref() }}` (lake-as-truth; lower peak RSS).  
-Opt into MemTable for small models in `rbt_project.yml`:
+By default rbt **streams** model results to disk (`execute_stream` → atomic Parquet publish) and
+**re-reads the lake file** for downstream `{{ ref() }}` (lake-as-truth; lower peak RSS).
 
 ```yaml
 materialize:
-  ref_strategy: memtable       # default is parquet (omit this block entirely for default)
-  memtable_max_rows: 50000     # MemTable only when rows < cutoff; default 50000
+  mode: stream                 # default; use collect only for emergency/debug
+  # max_row_group_rows: 1000000
+  # max_row_group_bytes: 134217728   # 128 MiB flush hint
+  ref_strategy: parquet        # default lake re-read for ref()
+  # ref_strategy: memtable
+  # memtable_max_rows: 50000
 ```
 
-Bench tradeoffs: [docs/REF_STRATEGY.md](docs/REF_STRATEGY.md).
+Env: `RBT_MATERIALIZE_MODE=collect` forces legacy collect path.  
+Tradeoffs: [docs/REF_STRATEGY.md](docs/REF_STRATEGY.md), [docs/STREAMING_MATERIALIZE_PLAN.md](docs/STREAMING_MATERIALIZE_PLAN.md).
 
 ## Package layout
 

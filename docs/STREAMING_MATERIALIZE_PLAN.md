@@ -1,10 +1,21 @@
 # Implementation Plan: Streaming Materialize
 
-- **Status**: Draft / Planned  
+- **Status**: **Phase 1–3 landed in 0.3.8** (stream write default + streaming assertions + lake-file `ref()`). Phase 4+ (bronze streaming, object store) still planned.  
 - **Date**: 2026-07-31  
 - **Package**: `rbt-datalake` (lib import `rbt::`)  
 - **Related**: [CONTRIBUTING.md](../CONTRIBUTING.md) (stream write priority), [thesis.md](../thesis.md), [adr/ADR_001_PROJECT_STRUCTURE.md](adr/ADR_001_PROJECT_STRUCTURE.md)  
 - **Goal**: End-to-end model execution that **never holds a full model result in RAM as `Vec<RecordBatch>`**, while preserving correctness of frontmatter tests, full-refresh Parquet (and FS Iceberg layout), and downstream `ref()` resolution.
+
+### Shipped (0.3.8)
+
+| Item | Location |
+|------|----------|
+| `materialize_stream` / `write_parquet_stream` | [`crates/rbt/src/materializer/stream.rs`](../crates/rbt/src/materializer/stream.rs) |
+| Atomic `.rbt-partial` → rename | `atomic_publish` |
+| `StreamingAssertionRunner` | [`crates/rbt/src/testing/mod.rs`](../crates/rbt/src/testing/mod.rs) |
+| Engine `MaterializeMode::Stream` default | [`crates/rbt/src/engine/mod.rs`](../crates/rbt/src/engine/mod.rs) |
+| Config `materialize.mode` / row-group knobs | [`MaterializeConfig`](../crates/rbt/src/core/project.rs) |
+| `collect` fallback | `materialize.mode: collect` or env `RBT_MATERIALIZE_MODE=collect` |
 
 ---
 

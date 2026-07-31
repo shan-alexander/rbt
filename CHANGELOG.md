@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.8] — 2026-07-31
+
+### Added (P1 — streaming materialize)
+- **Default write path is stream**: `DataFrame::execute_stream` → batch write → drop batch → atomic publish
+  - No full-result `Vec<RecordBatch>` retained for Parquet / JSONL / CSV / Iceberg FS
+  - Atomic publish via `.name.ext.rbt-partial` → `rename` (same filesystem)
+  - Partial artifacts deleted on stream/assert failure; last good dest retained until successful replace
+- **`materialize.mode`**: `stream` (default) | `collect` (legacy emergency)
+  - Env override: `RBT_MATERIALIZE_MODE=stream|collect` or `RBT_STREAM_MATERIALIZE=0|1`
+- **`materialize.max_row_group_rows`** (default 1_000_000) and **`max_row_group_bytes`** (default 128 MiB) for Parquet flush
+- **`StreamingAssertionRunner` / `UniqueKeyTracker`**: not_null, accepted_values, unique/grain across batches without holding all batches
+- **`ref()` registration without in-memory result**: lake file path only; MemTable opt-in re-reads small files from lake
+- Structured errors: `E_RBT_MATERIALIZE_*`, `E_RBT_REF_*`, `E_RBT_SQL`
+- Docs: streaming plan status updated; [docs/STREAMING_MATERIALIZE_PLAN.md](docs/STREAMING_MATERIALIZE_PLAN.md)
+
+### Tests
+- Multi-batch stream Parquet write + unique fail cleans partial
+- Streaming unique tracker cross-batch
+- `materialize.mode` YAML parse
+
 ## [0.3.7] — 2026-07-31
 
 ### Added
