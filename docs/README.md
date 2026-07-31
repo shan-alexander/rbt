@@ -8,6 +8,7 @@
 | [../CHANGELOG.md](../CHANGELOG.md) | Release notes |
 | [PUBLISHING.md](PUBLISHING.md) | crates.io publish / yank notes |
 | [CRATES_IO.md](CRATES_IO.md) | Why orphan crates exist; single-package policy |
+| [STREAMING_MATERIALIZE_PLAN.md](STREAMING_MATERIALIZE_PLAN.md) | Plan: stream DF → Parquet, zero-copy bounds, crate research |
 
 ## ADRs (active)
 
