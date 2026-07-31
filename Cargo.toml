@@ -1,19 +1,12 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rbt-core",
-    "crates/rbt-scan",
-    "crates/rbt-json",
-    "crates/rbt-catalog",
-    "crates/rbt-engine",
-    "crates/rbt-materializer",
-    "crates/rbt-models",
-    "crates/rbt-testing",
-    "crates/rbt-cli",
+    "crates/rbt",
 ]
+# Single package workspace.
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["rbt contributors"]
@@ -45,12 +38,4 @@ thiserror = "1.0"
 async-trait = "0.1"
 chrono = "0.4"
 jshift = "0.6.0"
-rbt-core = { path = "crates/rbt-core", version = "0.0.1" }
-rbt-scan = { path = "crates/rbt-scan", version = "0.0.1" }
-rbt-json = { path = "crates/rbt-json", version = "0.0.1" }
-rbt-catalog = { path = "crates/rbt-catalog", version = "0.0.1" }
-rbt-engine = { path = "crates/rbt-engine", version = "0.0.1" }
-rbt-materializer = { path = "crates/rbt-materializer", version = "0.0.1" }
-rbt-models = { path = "crates/rbt-models", version = "0.0.1" }
-rbt-testing = { path = "crates/rbt-testing", version = "0.0.1" }
 serde_json = "1"

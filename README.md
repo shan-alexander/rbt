@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.0.1` experimental.** The spine works (`compile` / `run` / `test` / `--select`). Default materialization is **full Parquet rewrite**. **Filesystem Iceberg-style tables** are supported via `--format iceberg` (data + metadata layout; not a full multi-catalog OCC product yet). APIs may break between `0.0.x` releases.
+> **Status:** **`0.0.2` experimental.** One package: **library + CLI binary `rbt`**. Spine works (`compile` / `run` / `test` / `--select`). Default materialization is **full Parquet rewrite**. **Filesystem Iceberg-style tables** via `--format iceberg` (data + metadata layout; not multi-catalog OCC). APIs may break between `0.0.x` releases.
 
 ## Why rbt
 
@@ -13,21 +13,35 @@
 | **UX** | Models, `ref` / `source`, frontmatter tests, CLI select |
 | **Claim** | Replace ad-hoc scripts / Spark for team-scale medallion jobs |
 
-## Install / build
+## Install
 
 ```bash
-git clone <repo> && cd rbt
-cargo build -p rbt-cli --release
+# Recommended until/unless our package lands under an available crates.io name
+cargo install --git https://github.com/shan-alexander/rbt --locked
+rbt --help
+```
+
+**From this repo:**
+
+```bash
+git clone https://github.com/shan-alexander/rbt && cd rbt
+cargo build -p rbt --release
 # binary: ./target/release/rbt
 ```
 
 Requires a matching `rustc`/`cargo` pair (see `rust-toolchain.toml`).
+
+> **crates.io notes**
+>
+> - The name [`rbt`](https://crates.io/crates/rbt) is already taken by an **unrelated** project (“Rust bot toolkit”). Our monorepo package is still named `rbt` locally; crates.io publish may use a different package name with binary still `rbt` — see [docs/CRATES_IO.md](docs/CRATES_IO.md).
+> - Early `0.0.1` internals (`rbt-core`, `rbt-engine`, …) are **orphaned**. Each has a **0.0.2 deprecation stub** README pointing here. **Do not depend on them.**
 
 ## Quick start (smoke fixture)
 
 Tiny JSONL bronze → staging → dim:
 
 ```bash
+cargo build -p rbt --release
 ./target/release/rbt compile -p examples/smoke_fixture --bronze-check fail
 ./target/release/rbt run -p examples/smoke_fixture --select dim_ticker --format parquet
 ./target/release/rbt test -p examples/smoke_fixture --select dim_ticker
@@ -83,25 +97,18 @@ my_project/
   lake/gold/…
 ```
 
-Staging frontmatter example: `scan_path`, `source_format`, `grain`, `tests`, `columns.*.description/context`.
+Staging frontmatter: `scan_path`, `source_format`, `grain`, `tests`, `columns.*.description` / `context`.
 
-## Workspace crates
+## Package layout
 
-| Crate | Role |
-|-------|------|
-| `rbt-cli` | Binary `rbt` |
-| `rbt-core` | Project, frontmatter, DAG, select |
-| `rbt-engine` | DataFusion + bronze registration + run |
-| `rbt-scan` / `rbt-json` | Bronze multi-format / jshift |
-| `rbt-materializer` | Parquet / Iceberg-FS / JSONL / CSV writers |
-| `rbt-testing` | Arrow assertions |
-| `rbt-catalog` / `rbt-models` | Thin / evolving |
+Single workspace member: [`crates/rbt`](crates/rbt) — lib modules (`core`, `engine`, `scan`, `json`, `materializer`, `testing`) + bin `rbt`.
 
 ## Docs
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — priorities and positioning  
 - [thesis.md](thesis.md) — product thesis  
-- [docs/ADR_003_UDF_RSMODELS.md](docs/ADR_003_UDF_RSMODELS.md) — polyglot roadmap  
+- [docs/README.md](docs/README.md) — ADR index, archive, publishing  
+- [docs/adr/ADR_003_UDF_RSMODELS.md](docs/adr/ADR_003_UDF_RSMODELS.md) — polyglot roadmap  
 
 ## CI
 
@@ -113,8 +120,7 @@ GitHub Actions: [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## Version / publish
 
-See [CHANGELOG.md](CHANGELOG.md) and [PUBLISHING.md](PUBLISHING.md).  
-crates.io: set a real `repository` URL in root `Cargo.toml`, then publish in dependency order at `0.0.1`.
+See [CHANGELOG.md](CHANGELOG.md) and [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## License
 

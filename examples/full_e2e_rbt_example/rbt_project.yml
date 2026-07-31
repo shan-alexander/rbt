@@ -8,7 +8,7 @@
 # Iceberg remains the long-term SoR for multi-writer / time-travel lakes, but
 # is not required here (and not faked).
 #
-# Runtime v0 keys (models_dir + layers.*) are loaded by rbt-core today.
+# Runtime v0 keys (models_dir + layers.*) are loaded by rbt today.
 # =============================================================================
 
 name: market_bars

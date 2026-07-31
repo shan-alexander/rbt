@@ -1,0 +1,22 @@
+# Documentation index
+
+| Doc | Role |
+|-----|------|
+| [../README.md](../README.md) | Install, CLI, project shape |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Priorities, Iceberg SoR policy, how to contribute |
+| [../thesis.md](../thesis.md) | Product north star (wins over essays if they disagree) |
+| [../CHANGELOG.md](../CHANGELOG.md) | Release notes |
+| [PUBLISHING.md](PUBLISHING.md) | crates.io publish / yank notes |
+| [CRATES_IO.md](CRATES_IO.md) | Why orphan crates exist; single-package policy |
+
+## ADRs (active)
+
+| ADR | Topic |
+|-----|--------|
+| [adr/ADR_001_PROJECT_STRUCTURE.md](adr/ADR_001_PROJECT_STRUCTURE.md) | Layers, prefixes, frontmatter, zero-copy clone (planned) |
+| [adr/ADR_002_THESIS_ALIGNMENT.md](adr/ADR_002_THESIS_ALIGNMENT.md) | Bronze edge, diagnostics, DX loop, star schema |
+| [adr/ADR_003_UDF_RSMODELS.md](adr/ADR_003_UDF_RSMODELS.md) | SQL + UDFs and first-class Rust models (planned) |
+
+## Archive
+
+Historical / aspirational essays under [archive/](archive/). They may describe multi-crate layouts, WAP theater, or features not shipped. **Do not treat archive docs as current API.** Prefer thesis + CONTRIBUTING + code.

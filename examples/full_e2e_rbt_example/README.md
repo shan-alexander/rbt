@@ -31,8 +31,8 @@ stg_ohlcv_1d ─┬─► tf_bar_metrics_1d ► fact_1d_bars ┘
 
 ```bash
 cd /path/to/rbt
-cargo build -p rbt-cli --release
-# binary: ./target/release/rbt-cli
+cargo build -p rbt --release
+# binary: ./target/release/rbt
 ```
 
 3. **Bronze data present** under:
@@ -235,7 +235,7 @@ All commands from the **repository root** (`rbt/`), unless noted.
 ### 1. Compile (DAG + bronze path checks)
 
 ```bash
-./target/release/rbt-cli compile \
+./target/release/rbt compile \
   -p examples/full_e2e_rbt_example \
   --bronze-check fail
 ```
@@ -249,7 +249,7 @@ Expect:
 ### 2. Run (materialize silver + gold)
 
 ```bash
-./target/release/rbt-cli run \
+./target/release/rbt run \
   -p examples/full_e2e_rbt_example \
   --format parquet \
   --bronze-check fail
@@ -324,7 +324,7 @@ Note: some symbols (e.g. NVDA in this dump) may have **1m only** and no `timefra
 ```bash
 rm -rf examples/full_e2e_rbt_example/lake/silver \
        examples/full_e2e_rbt_example/lake/gold
-./target/release/rbt-cli run -p examples/full_e2e_rbt_example --format parquet
+./target/release/rbt run -p examples/full_e2e_rbt_example --format parquet
 ```
 
 Bronze is never deleted by rbt.
@@ -366,7 +366,7 @@ The 1d model is the same pattern with `timeframe: "1d"` and `ohlcv_1d`.
 | `fact_1m_bars` / `fact_1d_bars` | Gold facts | Grain `(symbol, bar_time)` + dim attributes |
 | `obt_symbol_summary` | Gold OBT | One row per symbol for dashboards / APIs |
 
-No UDFs or Rust models are required for this path (see `docs/ADR_003_UDF_RSMODELS.md` for future escape hatches).
+No UDFs or Rust models are required for this path (see `docs/adr/ADR_003_UDF_RSMODELS.md` for future escape hatches).
 
 ---
 
@@ -377,8 +377,8 @@ No UDFs or Rust models are required for this path (see `docs/ADR_003_UDF_RSMODEL
 3. Add staging SQL with frontmatter `scan_path` + `require_partitions` for each grain you own.  
 4. Add silver transforms (`ref` staging only).  
 5. Add gold dims/facts (`ref` silver; facts may `ref` dims).  
-6. `rbt-cli compile --bronze-check fail` until the DAG and paths are clean.  
-7. `rbt-cli run --format parquet` and validate row counts / sample symbols.  
+6. `rbt compile --bronze-check fail` until the DAG and paths are clean.  
+7. `rbt run --format parquet` and validate row counts / sample symbols.  
 
 ---
 
@@ -408,7 +408,7 @@ No UDFs or Rust models are required for this path (see `docs/ADR_003_UDF_RSMODEL
 - Parquet materialization to layer target paths  
 - Dim ∩ fact joins and OBT summary  
 
-**Not yet claimed:** Iceberg snapshot commits, `validate`/`preview`/`--select`, WAP, Rust models/UDFs.
+**Not yet claimed:** real Iceberg catalog snapshot commits, `validate`/`preview`/`explain`, WAP, Rust models/UDFs. (`--select` and frontmatter `test` work.)
 
 ---
 
@@ -416,5 +416,5 @@ No UDFs or Rust models are required for this path (see `docs/ADR_003_UDF_RSMODEL
 
 - [thesis.md](../../thesis.md) — product positioning  
 - [CONTRIBUTING.md](../../CONTRIBUTING.md) — priorities and lake vs code  
-- [docs/ADR_003_UDF_RSMODELS.md](../../docs/ADR_003_UDF_RSMODELS.md) — polyglot extensions (later)  
-- Smaller smoke example: [../sample_rbt_project_stockmarket](../sample_rbt_project_stockmarket)
+- [docs/adr/ADR_003_UDF_RSMODELS.md](../../docs/adr/ADR_003_UDF_RSMODELS.md) — polyglot extensions (later)  
+- Smaller smoke example: [../smoke_fixture](../smoke_fixture)

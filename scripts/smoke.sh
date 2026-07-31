@@ -8,7 +8,7 @@ cd "$ROOT"
 BIN="${RBT_BIN:-./target/release/rbt}"
 if [[ ! -x "$BIN" ]]; then
   echo "[smoke] building rbt CLI..."
-  cargo build -p rbt-cli --release
+  cargo build -p rbt --release
   BIN=./target/release/rbt
 fi
 

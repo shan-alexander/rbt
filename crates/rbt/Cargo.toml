@@ -1,0 +1,57 @@
+[package]
+name = "rbt"
+version = "0.0.2"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Medallion SQL DAG engine for lakehouse transforms — library + `rbt` CLI"
+readme = "../../README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "rbt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rbt"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+# async / runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# data stack
+arrow = { workspace = true }
+parquet = { workspace = true }
+datafusion = { workspace = true }
+iceberg = { workspace = true }
+iceberg-datafusion = { workspace = true }
+jshift = { workspace = true }
+
+# project / DAG
+petgraph = { workspace = true }
+minijinja = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+regex = "1.13"
+sqlparser = "0.47"
+walkdir = "2"
+toml = "0.8"
+
+# cli
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -3162,131 +3162,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "rbt-catalog"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "iceberg",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rbt-cli"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "rbt-core",
- "rbt-engine",
- "rbt-materializer",
- "rbt-testing",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "rbt-core"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "minijinja",
- "petgraph 0.6.5",
- "regex",
- "serde",
- "serde_yaml",
- "sqlparser 0.47.0",
- "thiserror 1.0.69",
- "tracing",
- "walkdir",
-]
-
-[[package]]
-name = "rbt-engine"
-version = "0.0.1"
+name = "rbt"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "arrow",
  "async-trait",
+ "chrono",
+ "clap",
  "datafusion",
  "iceberg",
  "iceberg-datafusion",
- "rbt-core",
- "rbt-materializer",
- "rbt-scan",
- "rbt-testing",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rbt-json"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arrow",
  "jshift",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "rbt-materializer"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arrow",
- "iceberg",
+ "minijinja",
  "parquet",
- "rbt-core",
- "rbt-testing",
+ "petgraph 0.6.5",
+ "regex",
+ "serde",
  "serde_json",
+ "serde_yaml",
+ "sqlparser 0.47.0",
  "tempfile",
  "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rbt-models"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "serde",
- "serde_yaml",
- "tracing",
-]
-
-[[package]]
-name = "rbt-scan"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arrow",
- "parquet",
- "rbt-core",
- "rbt-json",
- "serde",
- "serde_json",
- "tempfile",
  "tokio",
  "toml",
  "tracing",
-]
-
-[[package]]
-name = "rbt-testing"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arrow",
- "thiserror 1.0.69",
- "tracing",
+ "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]
