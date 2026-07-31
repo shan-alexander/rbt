@@ -268,7 +268,10 @@ impl StagingFrontmatter {
     }
 
     pub fn has_scan_contract(&self) -> bool {
-        self.scan_path.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+        self.scan_path
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -387,10 +390,19 @@ mod tests {
 
     #[test]
     fn format_from_extension_and_parse() {
-        assert_eq!(SourceFormat::from_extension("jsonl"), Some(SourceFormat::Jsonl));
-        assert_eq!(SourceFormat::from_extension("toml"), Some(SourceFormat::Toml));
+        assert_eq!(
+            SourceFormat::from_extension("jsonl"),
+            Some(SourceFormat::Jsonl)
+        );
+        assert_eq!(
+            SourceFormat::from_extension("toml"),
+            Some(SourceFormat::Toml)
+        );
         assert_eq!(SourceFormat::from_extension("log"), Some(SourceFormat::Log));
-        assert_eq!(SourceFormat::parse("arrow-ipc").unwrap(), SourceFormat::ArrowIpc);
+        assert_eq!(
+            SourceFormat::parse("arrow-ipc").unwrap(),
+            SourceFormat::ArrowIpc
+        );
         assert_eq!(SourceFormat::parse("ndjson").unwrap(), SourceFormat::Jsonl);
     }
 
@@ -405,6 +417,9 @@ mod tests {
 
     #[test]
     fn remote_uri_exists_for_compile() {
-        assert!(scan_path_exists(Path::new("/tmp"), "s3://bucket/bronze/x.jsonl"));
+        assert!(scan_path_exists(
+            Path::new("/tmp"),
+            "s3://bucket/bronze/x.jsonl"
+        ));
     }
 }

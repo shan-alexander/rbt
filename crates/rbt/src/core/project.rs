@@ -152,7 +152,7 @@ impl RbtProjectConfig {
         let mut model_count = 0;
         for entry in WalkDir::new(&models_dir).into_iter().filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.is_file() && path.extension().map_or(false, |ext| ext == "sql") {
+            if path.is_file() && path.extension().is_some_and(|ext| ext == "sql") {
                 let stem = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -236,14 +236,32 @@ mod tests {
         let config = RbtProjectConfig::default();
         let project_dir = Path::new("/tmp/test_project");
 
-        let stg_path = config.resolve_model_target_path(project_dir, "stg_trades", ModelLayer::Staging, "parquet");
+        let stg_path = config.resolve_model_target_path(
+            project_dir,
+            "stg_trades",
+            ModelLayer::Staging,
+            "parquet",
+        );
         assert_eq!(stg_path, project_dir.join("lake/silver/stg_trades.parquet"));
 
-        let tf_path = config.resolve_model_target_path(project_dir, "tf_1m_bars", ModelLayer::Transform, "parquet");
+        let tf_path = config.resolve_model_target_path(
+            project_dir,
+            "tf_1m_bars",
+            ModelLayer::Transform,
+            "parquet",
+        );
         assert_eq!(tf_path, project_dir.join("lake/gold/tf_1m_bars.parquet"));
 
-        let mart_path = config.resolve_model_target_path(project_dir, "fact_1d_bars", ModelLayer::Mart, "parquet");
-        assert_eq!(mart_path, project_dir.join("lake/gold/fact_1d_bars.parquet"));
+        let mart_path = config.resolve_model_target_path(
+            project_dir,
+            "fact_1d_bars",
+            ModelLayer::Mart,
+            "parquet",
+        );
+        assert_eq!(
+            mart_path,
+            project_dir.join("lake/gold/fact_1d_bars.parquet")
+        );
 
         Ok(())
     }

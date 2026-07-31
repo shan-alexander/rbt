@@ -24,7 +24,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.0.2"
+rbt-datalake = "0.0.3"
 ```
 
 ```rust

@@ -2,15 +2,15 @@
 
 pub mod bronze;
 
+use crate::core::dag::{ModelDag, OutputFormat};
+use crate::materializer::MultiFormatWriter;
+use crate::testing::{assertions_from_model_tests, RecordBatchValidator};
 use anyhow::{Context, Result};
 use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use iceberg::Catalog;
 use iceberg_datafusion::IcebergCatalogProvider;
-use crate::core::dag::{ModelDag, OutputFormat};
-use crate::materializer::MultiFormatWriter;
-use crate::testing::{assertions_from_model_tests, RecordBatchValidator};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -131,34 +131,30 @@ impl TransformationEngine {
                 tracing::info!("Executing model '{}'...", model.name);
 
                 // Late-bind: if this model carries frontmatter not registered yet
-                register_bronze_for_model(&self.ctx, model, project_dir, &mut registered)
-                    .await?;
+                register_bronze_for_model(&self.ctx, model, project_dir, &mut registered).await?;
 
-                let df = self
-                    .ctx
-                    .sql(&model.compiled_sql)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "SQL execution failed for model '{}' (compiled: {})",
-                            model.name, model.compiled_sql
-                        )
-                    })?;
-                let batches = df.collect().await.with_context(|| {
-                    format!("collect failed for model '{}'", model.name)
+                let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                    format!(
+                        "SQL execution failed for model '{}' (compiled: {})",
+                        model.name, model.compiled_sql
+                    )
                 })?;
+                let batches = df
+                    .collect()
+                    .await
+                    .with_context(|| format!("collect failed for model '{}'", model.name))?;
                 let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
 
-                let dest_path = model.output_path.as_ref().map(PathBuf::from).unwrap_or_else(
-                    || match model.output_format {
+                let dest_path = model
+                    .output_path
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| match model.output_format {
                         OutputFormat::Iceberg => output_base.join(&model.name),
-                        OutputFormat::Jsonl => {
-                            output_base.join(format!("{}.jsonl", model.name))
-                        }
+                        OutputFormat::Jsonl => output_base.join(format!("{}.jsonl", model.name)),
                         OutputFormat::Csv => output_base.join(format!("{}.csv", model.name)),
                         _ => output_base.join(format!("{}.parquet", model.name)),
-                    },
-                );
+                    });
 
                 if let Some(parent) = dest_path.parent() {
                     std::fs::create_dir_all(parent)?;
@@ -211,9 +207,9 @@ impl TransformationEngine {
                         .filter(|v| !v.is_empty())
                     {
                         // Implicit unique_key/grain check when no tests: block declared
-                        let assertions = assertions_from_model_tests(None, Some(uk.as_slice()), None);
-                        let result =
-                            RecordBatchValidator::validate_batches(&batches, &assertions);
+                        let assertions =
+                            assertions_from_model_tests(None, Some(uk.as_slice()), None);
+                        let result = RecordBatchValidator::validate_batches(&batches, &assertions);
                         if result.failed_assertions > 0 {
                             anyhow::bail!(
                                 "model '{}' grain/unique_key violated: {}",
@@ -331,7 +327,9 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         dag.build_graph()?;
 
         let engine = TransformationEngine::new();
-        let summary = engine.execute_dag(&dag, temp.path(), temp.path().join("out")).await?;
+        let summary = engine
+            .execute_dag(&dag, temp.path(), temp.path().join("out"))
+            .await?;
         assert_eq!(summary.bronze_sources_registered, 1);
         assert_eq!(summary.models_executed, 1);
         assert_eq!(summary.total_rows_produced, 2);

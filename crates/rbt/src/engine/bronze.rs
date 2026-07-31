@@ -12,22 +12,22 @@
 //! [`BronzeTableProvider`] is intentionally thin: it delegates scan/schema to the
 //! inner provider and carries bronze metadata for lineage / debugging.
 
+use crate::core::dag::{ModelDag, ModelNode};
+use crate::core::frontmatter::{resolve_scan_path, SourceFormat, StagingFrontmatter};
+use crate::scan::{LakeScanner, ScanRequest};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
 use datafusion::catalog::TableProvider;
+use datafusion::common::TableReference;
 use datafusion::datasource::MemTable;
 use datafusion::error::Result as DFResult;
 use datafusion::execution::context::SessionContext;
+use datafusion::execution::options::ArrowReadOptions;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::ExecutionPlan;
-use datafusion::common::TableReference;
-use datafusion::execution::options::ArrowReadOptions;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
-use crate::core::dag::{ModelDag, ModelNode};
-use crate::core::frontmatter::{resolve_scan_path, SourceFormat, StagingFrontmatter};
-use crate::scan::{LakeScanner, ScanRequest};
 use std::any::Any;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -155,12 +155,13 @@ pub async fn register_bronze_for_model(
 
     ensure_schema(ctx, &schema_name).await?;
 
-    let format = fm.resolve_format().with_context(|| {
-        format!("model '{}': cannot resolve source_format", node.name)
-    })?;
+    let format = fm
+        .resolve_format()
+        .with_context(|| format!("model '{}': cannot resolve source_format", node.name))?;
 
     let resolved = resolve_scan_path(project_dir, fm.scan_path.as_deref().unwrap());
-    if !resolved.exists() && !crate::core::frontmatter::is_remote_uri(fm.scan_path.as_deref().unwrap())
+    if !resolved.exists()
+        && !crate::core::frontmatter::is_remote_uri(fm.scan_path.as_deref().unwrap())
     {
         bail!(
             "model '{}': bronze scan_path does not exist: {} (resolved {})",
@@ -258,7 +259,10 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
 
 async fn ensure_schema(ctx: &SessionContext, schema_name: &str) -> Result<()> {
     // DataFusion accepts CREATE SCHEMA via SQL
-    let sql = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema_name.replace('"', ""));
+    let sql = format!(
+        "CREATE SCHEMA IF NOT EXISTS \"{}\"",
+        schema_name.replace('"', "")
+    );
     ctx.sql(&sql)
         .await
         .with_context(|| format!("CREATE SCHEMA {}", schema_name))?
@@ -384,9 +388,8 @@ SELECT ticker, price FROM {{{{ source('bronze', 'raw_trades') }}}}
 
         let engine_ctx = SessionContext::new();
         let mut registered = HashSet::new();
-        let n =
-            register_bronze_sources_for_dag(&engine_ctx, &dag, temp.path(), &mut registered)
-                .await?;
+        let n = register_bronze_sources_for_dag(&engine_ctx, &dag, temp.path(), &mut registered)
+            .await?;
         assert_eq!(n, 1);
 
         let df = engine_ctx

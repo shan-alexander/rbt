@@ -15,7 +15,10 @@ pub use super::frontmatter::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DependencyRef {
     Model(String),
-    Source { source_name: String, table_name: String },
+    Source {
+        source_name: String,
+        table_name: String,
+    },
 }
 
 /// Fast-path SQL Model template parser extracting `{{ ref(...) }}` and `{{ source(...) }}` references.
@@ -53,12 +56,13 @@ impl SqlModelParser {
             return Ok((Some(StagingFrontmatter::default()), sql_content));
         }
 
-        let frontmatter: StagingFrontmatter = serde_yaml::from_str(yaml_str).with_context(|| {
-            format!(
-                "Invalid frontmatter YAML (between --- delimiters):\n{}",
-                yaml_str.trim()
-            )
-        })?;
+        let frontmatter: StagingFrontmatter =
+            serde_yaml::from_str(yaml_str).with_context(|| {
+                format!(
+                    "Invalid frontmatter YAML (between --- delimiters):\n{}",
+                    yaml_str.trim()
+                )
+            })?;
         Ok((Some(frontmatter), sql_content))
     }
 
@@ -222,10 +226,7 @@ mod tests {
         );
 
         let compiled_local = SqlModelParser::compile_sql(sql, "")?;
-        assert_eq!(
-            compiled_local,
-            "SELECT * FROM stg_orders JOIN raw.users"
-        );
+        assert_eq!(compiled_local, "SELECT * FROM stg_orders JOIN raw.users");
         Ok(())
     }
 
@@ -281,7 +282,9 @@ SELECT * FROM {{ source('raw', 'events') }}
     fn test_invalid_frontmatter_is_error() {
         let raw = "---\nsource_format: [not, valid, for, enum\n---\nSELECT 1";
         let err = SqlModelParser::parse_frontmatter(raw).unwrap_err();
-        assert!(err.to_string().contains("Invalid frontmatter") || err.to_string().contains("YAML"));
+        assert!(
+            err.to_string().contains("Invalid frontmatter") || err.to_string().contains("YAML")
+        );
     }
 
     #[test]

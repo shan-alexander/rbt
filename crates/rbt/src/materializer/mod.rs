@@ -1,9 +1,9 @@
 //! `rbt::materializer`: multi-format writers including filesystem Iceberg-style tables.
 
-use anyhow::{Context, Result};
-use arrow::record_batch::RecordBatch;
 use crate::core::dag::OutputFormat;
 use crate::testing::{Assertion, RecordBatchValidator, ValidationResult};
+use anyhow::{Context, Result};
+use arrow::record_batch::RecordBatch;
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::Write;
@@ -69,13 +69,12 @@ impl MultiFormatWriter {
                 write_iceberg_fs_table(batches, destination_path)?;
             }
             OutputFormat::ParquetAndIceberg => {
-                let parquet_path = if destination_path.extension().and_then(|e| e.to_str())
-                    == Some("parquet")
-                {
-                    destination_path.to_path_buf()
-                } else {
-                    destination_path.with_extension("parquet")
-                };
+                let parquet_path =
+                    if destination_path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                        destination_path.to_path_buf()
+                    } else {
+                        destination_path.with_extension("parquet")
+                    };
                 write_parquet_file(batches, &parquet_path)?;
                 write_iceberg_fs_table(batches, &sibling_iceberg_dir(&parquet_path))?;
             }
@@ -87,7 +86,10 @@ impl MultiFormatWriter {
 
 fn write_parquet_file(batches: &[RecordBatch], path: &Path) -> Result<()> {
     if batches.is_empty() {
-        anyhow::bail!("write_parquet_file: empty batch list for {}", path.display());
+        anyhow::bail!(
+            "write_parquet_file: empty batch list for {}",
+            path.display()
+        );
     }
     let schema = batches[0].schema();
     for (i, b) in batches.iter().enumerate().skip(1) {
@@ -223,11 +225,7 @@ pub fn write_iceberg_fs_table(batches: &[RecordBatch], table_root: &Path) -> Res
 
     let meta_path = meta_dir.join("v1.metadata.json");
     let mut meta_file = File::create(&meta_path)?;
-    writeln!(
-        meta_file,
-        "{}",
-        serde_json::to_string_pretty(&metadata)?
-    )?;
+    writeln!(meta_file, "{}", serde_json::to_string_pretty(&metadata)?)?;
 
     let mut hint = File::create(meta_dir.join("version-hint.text"))?;
     writeln!(hint, "1")?;
@@ -362,15 +360,21 @@ mod tests {
         let batch = sample_batch();
 
         let parquet_file = temp_dir.path().join("output.parquet");
-        let rows =
-            MultiFormatWriter::write_batches(&[batch.clone()], &OutputFormat::Parquet, &parquet_file)?;
+        let rows = MultiFormatWriter::write_batches(
+            &[batch.clone()],
+            &OutputFormat::Parquet,
+            &parquet_file,
+        )?;
         assert_eq!(rows, 3);
         assert!(parquet_file.exists());
         assert!(parquet_file.metadata()?.len() > 0);
 
         let iceberg_dir = temp_dir.path().join("tbl");
-        let irows =
-            MultiFormatWriter::write_batches(&[batch.clone()], &OutputFormat::Iceberg, &iceberg_dir)?;
+        let irows = MultiFormatWriter::write_batches(
+            &[batch.clone()],
+            &OutputFormat::Iceberg,
+            &iceberg_dir,
+        )?;
         assert_eq!(irows, 3);
         assert!(iceberg_dir.join("data/part-00000.parquet").exists());
         assert!(iceberg_dir.join("metadata/v1.metadata.json").exists());

@@ -8,12 +8,21 @@ use std::collections::HashSet;
 /// Individual column assertion types for dbt-compatible model testing.
 #[derive(Debug, Clone)]
 pub enum Assertion {
-    NotNull { column: String },
+    NotNull {
+        column: String,
+    },
     /// Single Utf8 column uniqueness (legacy; prefer UniqueKey for multi-type).
-    Unique { column: String },
+    Unique {
+        column: String,
+    },
     /// Composite uniqueness across one or more columns (global over all batches).
-    UniqueKey { columns: Vec<String> },
-    AcceptedValues { column: String, values: Vec<String> },
+    UniqueKey {
+        columns: Vec<String>,
+    },
+    AcceptedValues {
+        column: String,
+        values: Vec<String>,
+    },
 }
 
 /// Validation result summary for a tested model.
@@ -60,7 +69,12 @@ impl RecordBatchValidator {
         let string_array = array
             .as_any()
             .downcast_ref::<StringArray>()
-            .ok_or_else(|| anyhow!("Column '{}' must be Utf8 type for unique validation", column))?;
+            .ok_or_else(|| {
+                anyhow!(
+                    "Column '{}' must be Utf8 type for unique validation",
+                    column
+                )
+            })?;
 
         let mut seen = HashSet::new();
         for i in 0..string_array.len() {
@@ -134,12 +148,15 @@ impl RecordBatchValidator {
             .map_err(|_| anyhow!("Column '{}' not found in RecordBatch schema", column))?;
 
         let array = batch.column(column_idx);
-        let string_array = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            anyhow!(
-                "Column '{}' must be Utf8 type for accepted_values validation",
-                column
-            )
-        })?;
+        let string_array = array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                anyhow!(
+                    "Column '{}' must be Utf8 type for accepted_values validation",
+                    column
+                )
+            })?;
 
         let valid_set: HashSet<&str> = accepted_values.iter().copied().collect();
         for i in 0..string_array.len() {
@@ -182,7 +199,7 @@ impl RecordBatchValidator {
                 }
                 Assertion::Unique { column } => {
                     // Global unique for single column via UniqueKey path
-                    Self::assert_unique_key(batches, &[column.clone()])
+                    Self::assert_unique_key(batches, std::slice::from_ref(column))
                 }
                 Assertion::UniqueKey { columns } => Self::assert_unique_key(batches, columns),
                 Assertion::AcceptedValues { column, values } => {
@@ -259,11 +276,7 @@ pub fn assertions_from_model_tests(
         }
     }
     if let Some(cols) = unique {
-        if cols.len() == 1 {
-            out.push(Assertion::UniqueKey {
-                columns: cols.to_vec(),
-            });
-        } else if cols.len() > 1 {
+        if !cols.is_empty() {
             out.push(Assertion::UniqueKey {
                 columns: cols.to_vec(),
             });

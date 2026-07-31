@@ -230,9 +230,7 @@ async fn main() -> Result<()> {
             );
 
             let engine = TransformationEngine::new();
-            let summary = engine
-                .execute_dag(&dag, &project_dir, &output_dir)
-                .await?;
+            let summary = engine.execute_dag(&dag, &project_dir, &output_dir).await?;
             let duration = start.elapsed();
 
             println!(
@@ -300,9 +298,7 @@ async fn main() -> Result<()> {
 
             let engine = TransformationEngine::new();
             // execute_dag already runs frontmatter tests and fails hard on error
-            let summary = engine
-                .execute_dag(&dag, &project_dir, &output_dir)
-                .await?;
+            let summary = engine.execute_dag(&dag, &project_dir, &output_dir).await?;
 
             // Summarize which models had tests (already enforced during materialize)
             let mut tested = 0usize;

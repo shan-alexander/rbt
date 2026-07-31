@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.0.3] — 2026-07-31
+
+### Fixed
+- Clippy clean under `-D warnings` (CI)
+- Full e2e example README aligned to real 9-model DAG (`tf_bar_metrics*`, `tf_symbol`)
+- Smoke fixture README: package name, select flags, output table
+
+### Verified
+- `cargo test -p rbt-datalake --lib` (41 tests)
+- `bash scripts/smoke.sh`
+- Full e2e: 9 models, ~3.1M 1m bars, 83 symbols, ~25s on workstation bronze snapshot
+
 ## [0.0.2] — 2026-07-31
 
 ### Changed

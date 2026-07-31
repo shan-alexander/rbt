@@ -86,10 +86,7 @@ pub fn model_has_test_contract(node: &ModelNode) -> bool {
     node.frontmatter
         .as_ref()
         .map(|fm| {
-            fm.tests
-                .as_ref()
-                .map(|t| !t.is_empty())
-                .unwrap_or(false)
+            fm.tests.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
                 || fm
                     .unique_key
                     .as_ref()
@@ -102,7 +99,11 @@ pub fn model_has_test_contract(node: &ModelNode) -> bool {
 
 impl ModelDag {
     /// Resolve which model names are in the selection.
-    pub fn resolve_select(&self, select: Option<&str>, mode: SelectMode) -> Result<HashSet<String>> {
+    pub fn resolve_select(
+        &self,
+        select: Option<&str>,
+        mode: SelectMode,
+    ) -> Result<HashSet<String>> {
         let Some(spec) = select.map(str::trim).filter(|s| !s.is_empty()) else {
             return Ok(self.node_map.keys().cloned().collect());
         };

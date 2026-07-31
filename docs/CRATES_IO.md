@@ -4,7 +4,7 @@
 
 | Package | Install / use |
 |---------|----------------|
-| [`rbt-datalake`](https://crates.io/crates/rbt-datalake) | `cargo install rbt-datalake` → binary **`rbt`** · dep `rbt-datalake = "0.0.2"` · `use rbt::…` |
+| [`rbt-datalake`](https://crates.io/crates/rbt-datalake) | `cargo install rbt-datalake` → binary **`rbt`** · dep `rbt-datalake = "0.0.3"` · `use rbt::…` |
 
 The short name [`rbt`](https://crates.io/crates/rbt) is taken by an unrelated project (“Rust bot toolkit”, owner `a7g4`). Our package is therefore **`rbt-datalake`**, with `[[bin]] name = "rbt"` and `[lib] name = "rbt"`.
 

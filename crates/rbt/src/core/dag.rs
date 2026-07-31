@@ -22,9 +22,10 @@ pub enum Materialization {
 }
 
 /// Configurable model output format supported by the engine.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputFormat {
     /// Output directly as Parquet file(s)
+    #[default]
     Parquet,
     /// Output as JSONL (jshift zero-copy compatible)
     Jsonl,
@@ -37,13 +38,6 @@ pub enum OutputFormat {
     /// Native zero-copy metadata pointer clone
     ZeroCopyClone,
 }
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        Self::Parquet
-    }
-}
-
 
 /// DAG Layer classification following project architecture conventions.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,7 +53,11 @@ impl ModelLayer {
             Self::Staging
         } else if name.starts_with("tf_") || name.starts_with("int_") {
             Self::Transform
-        } else if name.starts_with("dim_") || name.starts_with("fact_") || name.starts_with("obt_") || name.starts_with("fct_") {
+        } else if name.starts_with("dim_")
+            || name.starts_with("fact_")
+            || name.starts_with("obt_")
+            || name.starts_with("fct_")
+        {
             Self::Mart
         } else {
             Self::Transform
@@ -128,9 +126,7 @@ impl ModelDag {
         let dependencies = SqlModelParser::extract_dependencies(&pure_sql)?;
         let compiled_sql = SqlModelParser::compile_sql(&pure_sql, catalog_prefix)?;
         let layer = ModelLayer::from_name(&name);
-        let description = frontmatter
-            .as_ref()
-            .and_then(|f| f.description.clone());
+        let description = frontmatter.as_ref().and_then(|f| f.description.clone());
 
         let node = ModelNode {
             name: name.clone(),
@@ -162,7 +158,8 @@ impl ModelDag {
                         let dep_node = &self.graph[dep_idx];
 
                         // Enforce Layer Boundary Rule: Transform models cannot depend on Mart models
-                        if node.layer == ModelLayer::Transform && dep_node.layer == ModelLayer::Mart {
+                        if node.layer == ModelLayer::Transform && dep_node.layer == ModelLayer::Mart
+                        {
                             bail!(
                                 "Illegal DAG Layer Boundary: Transform model '{}' (tf_) cannot depend on Mart model '{}' (dim_/fact_/obt_)",
                                 node.name,
@@ -234,8 +231,10 @@ impl ModelDag {
         let mut visited = HashSet::new();
 
         while !current_tier.is_empty() {
-            let tier_nodes: Vec<ModelNode> =
-                current_tier.iter().map(|&i| self.graph[i].clone()).collect();
+            let tier_nodes: Vec<ModelNode> = current_tier
+                .iter()
+                .map(|&i| self.graph[i].clone())
+                .collect();
             tiers.push(tier_nodes);
 
             for &node_idx in &current_tier {
@@ -288,10 +287,7 @@ impl ModelDag {
             }
             if fm.has_scan_contract() {
                 // Fall back to model name under schema "bronze"
-                let table = fm
-                    .source_table
-                    .clone()
-                    .unwrap_or_else(|| node.name.clone());
+                let table = fm.source_table.clone().unwrap_or_else(|| node.name.clone());
                 let source = fm
                     .source_name
                     .clone()
@@ -340,10 +336,10 @@ impl ModelDag {
                         model: node.name.clone(),
                         severity,
                         code: "E_RBT_BRONZE_SCAN_PATH_MISSING",
-                        message: format!(
+                        message:
                             "staging model references source() but has no frontmatter scan_path; \
                              add YAML frontmatter with scan_path (and source_format)"
-                        ),
+                                .to_string(),
                     });
                     continue;
                 }
@@ -470,7 +466,8 @@ mod tests {
 
         // Tier 0 has 2 parallel models with formats Jsonl and ParquetAndIceberg
         assert_eq!(tiers[0].len(), 2);
-        let tier0_formats: Vec<OutputFormat> = tiers[0].iter().map(|m| m.output_format.clone()).collect();
+        let tier0_formats: Vec<OutputFormat> =
+            tiers[0].iter().map(|m| m.output_format.clone()).collect();
         assert!(tier0_formats.contains(&OutputFormat::Jsonl));
         assert!(tier0_formats.contains(&OutputFormat::ParquetAndIceberg));
 
@@ -523,7 +520,10 @@ mod tests {
 
         let res = dag.build_graph();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Illegal DAG Layer Boundary"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Illegal DAG Layer Boundary"));
 
         Ok(())
     }

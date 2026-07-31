@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.0.2"
+//! rbt-datalake = "0.0.3"
 //! ```
 //!
 //! ## Quick start (library)
@@ -30,7 +30,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt/0.0.2")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.0.3")]
 
 pub mod core;
 pub mod engine;
@@ -44,9 +44,9 @@ pub mod testing;
 pub use core::{
     model_has_test_contract, parse_select_spec, resolve_scan_path, scan_path_exists,
     BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DependencyRef,
-    DiagnosticSeverity, Materialization, ModelDag, ModelLayer, ModelNode, ModelTests,
-    OutputFormat, RbtProjectConfig, RbtTemplateEngine, SelectMode, SelectToken, SourceFormat,
-    SqlModelParser, StagingFrontmatter,
+    DiagnosticSeverity, Materialization, ModelDag, ModelLayer, ModelNode, ModelTests, OutputFormat,
+    RbtProjectConfig, RbtTemplateEngine, SelectMode, SelectToken, SourceFormat, SqlModelParser,
+    StagingFrontmatter,
 };
 
 pub use engine::{
@@ -59,12 +59,10 @@ pub use materializer::{
     sibling_iceberg_dir, write_iceberg_fs_table, MultiFormatWriter, WapMaterializer, WapStatus,
 };
 
-pub use scan::{parse_hive_partitions, LakeScanner, ScanRequest};
 pub use json::{JShiftExtractor, JsonExtractSpec};
+pub use scan::{parse_hive_partitions, LakeScanner, ScanRequest};
 
-pub use testing::{
-    assertions_from_model_tests, Assertion, RecordBatchValidator, ValidationResult,
-};
+pub use testing::{assertions_from_model_tests, Assertion, RecordBatchValidator, ValidationResult};
 
 /// Package version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

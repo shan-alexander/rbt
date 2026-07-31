@@ -2,11 +2,11 @@
 //!
 //! Formats: JSONL (jshift), JSON, Parquet, CSV, Arrow IPC (file/stream), log, txt, TOML.
 
+use crate::core::frontmatter::{resolve_scan_path, SourceFormat, StagingFrontmatter};
 use anyhow::{anyhow, bail, Context, Result};
 use arrow::array::{ArrayRef, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use crate::core::frontmatter::{resolve_scan_path, SourceFormat, StagingFrontmatter};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -187,14 +187,9 @@ impl LakeScanner {
                 }
             }
             // Real lakes often write stream IPC with a `.arrow` extension.
-            SourceFormat::ArrowIpc | SourceFormat::ArrowIpcStream => {
-                read_arrow_ipc_auto(file_path)
-            }
+            SourceFormat::ArrowIpc | SourceFormat::ArrowIpcStream => read_arrow_ipc_auto(file_path),
             SourceFormat::Log | SourceFormat::Txt => Ok(vec![read_line_oriented(file_path)?]),
-            SourceFormat::Toml => Ok(vec![read_toml(
-                file_path,
-                req.toml_rows_key.as_deref(),
-            )?]),
+            SourceFormat::Toml => Ok(vec![read_toml(file_path, req.toml_rows_key.as_deref())?]),
         }
     }
 }
@@ -209,8 +204,8 @@ fn utf8_schema_from_paths(paths: &[String]) -> SchemaRef {
 }
 
 fn expand_json_document_to_jsonl(bytes: &[u8]) -> Result<Vec<u8>> {
-    let v: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| anyhow!("Invalid JSON document: {}", e))?;
+    let v: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| anyhow!("Invalid JSON document: {}", e))?;
     match v {
         serde_json::Value::Array(items) => {
             let mut out = Vec::new();
@@ -249,7 +244,10 @@ fn extension_matches(format: SourceFormat, ext: &str) -> bool {
         SourceFormat::Csv => matches!(ext.as_str(), "csv" | "tsv"),
         SourceFormat::ArrowIpc => matches!(ext.as_str(), "arrow" | "arrows" | "ipc" | "feather"),
         SourceFormat::ArrowIpcStream => {
-            matches!(ext.as_str(), "arrow" | "arrows" | "ipc" | "arrows_stream" | "ipc_stream")
+            matches!(
+                ext.as_str(),
+                "arrow" | "arrows" | "ipc" | "arrows_stream" | "ipc_stream"
+            )
         }
         SourceFormat::Log => ext == "log",
         SourceFormat::Txt => matches!(ext.as_str(), "txt" | "text" | "md"),
@@ -279,7 +277,10 @@ fn collect_files_for_format(
         // still allow extensionless? Skip for now.
         return Ok(());
     }
-    bail!("scan path is neither file nor directory: {}", path.display());
+    bail!(
+        "scan path is neither file nor directory: {}",
+        path.display()
+    );
 }
 
 fn read_parquet(path: &Path, projection: Option<SchemaRef>) -> Result<Vec<RecordBatch>> {
@@ -392,7 +393,10 @@ fn read_arrow_ipc_auto(path: &Path) -> Result<Vec<RecordBatch>> {
 }
 
 /// Parse `key=value` segments from `file` relative to `root`.
-pub fn parse_hive_partitions(file: &Path, root: &Path) -> std::collections::HashMap<String, String> {
+pub fn parse_hive_partitions(
+    file: &Path,
+    root: &Path,
+) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let rel = file.strip_prefix(root).unwrap_or(file);
     for comp in rel.components() {
@@ -417,7 +421,9 @@ fn path_matches_require_partitions(
         return true;
     }
     let parts = parse_hive_partitions(file, root);
-    require.iter().all(|(k, v)| parts.get(k).map(|pv| pv == v).unwrap_or(false))
+    require
+        .iter()
+        .all(|(k, v)| parts.get(k).map(|pv| pv == v).unwrap_or(false))
 }
 
 /// Append hive partition columns (Utf8) for keys in `partition_by` that are not already present.
@@ -432,8 +438,12 @@ fn inject_hive_partitions(
     }
     let parts = parse_hive_partitions(file, root);
     let n = batch.num_rows();
-    let mut fields: Vec<arrow::datatypes::Field> =
-        batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut fields: Vec<arrow::datatypes::Field> = batch
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
     let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
 
     for key in partition_by {
@@ -477,7 +487,10 @@ fn inject_source_path_column(batch: RecordBatch, file: &Path) -> Result<RecordBa
     fields.push(Field::new("_source_path", DataType::Utf8, false));
     let mut columns = batch.columns().to_vec();
     columns.push(Arc::new(b.finish()) as ArrayRef);
-    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?)
+    Ok(RecordBatch::try_new(
+        Arc::new(Schema::new(fields)),
+        columns,
+    )?)
 }
 
 /// Line-oriented bronze: `.log`, `.txt`, llms.txt-style docs.
@@ -509,7 +522,9 @@ fn read_line_oriented(path: &Path) -> Result<RecordBatch> {
 
 fn read_toml(path: &Path, rows_key: Option<&str>) -> Result<RecordBatch> {
     let text = std::fs::read_to_string(path)?;
-    let value: toml::Value = text.parse().with_context(|| format!("Invalid TOML: {}", path.display()))?;
+    let value: toml::Value = text
+        .parse()
+        .with_context(|| format!("Invalid TOML: {}", path.display()))?;
 
     let rows: Vec<toml::map::Map<String, toml::Value>> = match &value {
         toml::Value::Table(table) => {
@@ -538,7 +553,10 @@ fn read_toml(path: &Path, rows_key: Option<&str>) -> Result<RecordBatch> {
 
     if rows.is_empty() {
         let schema = Arc::new(Schema::new(vec![Field::new("empty", DataType::Utf8, true)]));
-        return Ok(RecordBatch::try_new(schema, vec![Arc::new(StringBuilder::new().finish()) as ArrayRef])?);
+        return Ok(RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringBuilder::new().finish()) as ArrayRef],
+        )?);
     }
 
     // Column union
@@ -551,8 +569,10 @@ fn read_toml(path: &Path, rows_key: Option<&str>) -> Result<RecordBatch> {
         }
     }
 
-    let mut builders: Vec<StringBuilder> =
-        col_names.iter().map(|_| StringBuilder::with_capacity(rows.len(), rows.len() * 16)).collect();
+    let mut builders: Vec<StringBuilder> = col_names
+        .iter()
+        .map(|_| StringBuilder::with_capacity(rows.len(), rows.len() * 16))
+        .collect();
 
     for row in &rows {
         for (i, col) in col_names.iter().enumerate() {
@@ -580,7 +600,11 @@ fn array_of_tables(arr: &[toml::Value]) -> Result<Vec<toml::map::Map<String, tom
     for (i, item) in arr.iter().enumerate() {
         match item {
             toml::Value::Table(t) => rows.push(t.clone()),
-            other => bail!("TOML array element {} is not a table (got {})", i, other.type_str()),
+            other => bail!(
+                "TOML array element {} is not a table (got {})",
+                i,
+                other.type_str()
+            ),
         }
     }
     Ok(rows)
@@ -685,7 +709,11 @@ name = "toml_b"
         let dir = root.join("symbol=NVDA").join("timeframe=1m");
         std::fs::create_dir_all(&dir)?;
         // minimal IPC stream with one utf8 column
-        let schema = Arc::new(Schema::new(vec![Field::new("close", DataType::Float64, true)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "close",
+            DataType::Float64,
+            true,
+        )]));
         let batch = RecordBatch::try_new(
             schema,
             vec![Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0])) as ArrayRef],

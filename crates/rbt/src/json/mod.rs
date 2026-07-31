@@ -1,9 +1,7 @@
 //! `rbt::json`: `jshift` parse-avoiding JSONL path projection, field stamping, and filter kernels.
 
 use anyhow::{anyhow, Result};
-use arrow::array::{
-    ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder,
-};
+use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 
@@ -27,7 +25,7 @@ impl JShiftExtractor {
     pub fn extract_jsonl(&self, jsonl_bytes: &[u8], schema: SchemaRef) -> Result<RecordBatch> {
         let lines: Vec<&[u8]> = jsonl_bytes
             .split(|&b| b == b'\n')
-            .map(|line| trim_bytes(line)) // Remove trailing \r or whitespaces
+            .map(trim_bytes) // Remove trailing \r or whitespaces
             .filter(|line| !line.is_empty())
             .collect();
 
@@ -49,12 +47,19 @@ impl JShiftExtractor {
         for field in schema.fields() {
             match field.data_type() {
                 DataType::Int64 => builders.push(Box::new(Int64Builder::with_capacity(num_rows))),
-                DataType::Float64 => builders.push(Box::new(Float64Builder::with_capacity(num_rows))),
-                DataType::Boolean => builders.push(Box::new(BooleanBuilder::with_capacity(num_rows))),
-                DataType::Utf8 | DataType::LargeUtf8 => {
-                    builders.push(Box::new(StringBuilder::with_capacity(num_rows, num_rows * 16)))
+                DataType::Float64 => {
+                    builders.push(Box::new(Float64Builder::with_capacity(num_rows)))
                 }
-                other => anyhow::bail!("Unsupported target Arrow data type for JSON extraction: {:?}", other),
+                DataType::Boolean => {
+                    builders.push(Box::new(BooleanBuilder::with_capacity(num_rows)))
+                }
+                DataType::Utf8 | DataType::LargeUtf8 => builders.push(Box::new(
+                    StringBuilder::with_capacity(num_rows, num_rows * 16),
+                )),
+                other => anyhow::bail!(
+                    "Unsupported target Arrow data type for JSON extraction: {:?}",
+                    other
+                ),
             }
         }
 
@@ -98,7 +103,12 @@ fn trim_bytes(mut s: &[u8]) -> &[u8] {
     while !s.is_empty() && (s[0] == b' ' || s[0] == b'\t' || s[0] == b'\r' || s[0] == b'\n') {
         s = &s[1..];
     }
-    while !s.is_empty() && (s[s.len() - 1] == b' ' || s[s.len() - 1] == b'\t' || s[s.len() - 1] == b'\r' || s[s.len() - 1] == b'\n') {
+    while !s.is_empty()
+        && (s[s.len() - 1] == b' '
+            || s[s.len() - 1] == b'\t'
+            || s[s.len() - 1] == b'\r'
+            || s[s.len() - 1] == b'\n')
+    {
         s = &s[..s.len() - 1];
     }
     s
@@ -265,7 +275,8 @@ mod tests {
         assert_eq!(batch.num_columns(), 4);
 
         // Verify values
-        let id_array = batch.column(0)
+        let id_array = batch
+            .column(0)
             .as_any()
             .downcast_ref::<arrow::array::Int64Array>()
             .unwrap();
@@ -273,7 +284,8 @@ mod tests {
         assert_eq!(id_array.value(1), 2);
         assert_eq!(id_array.value(2), 3);
 
-        let name_array = batch.column(1)
+        let name_array = batch
+            .column(1)
             .as_any()
             .downcast_ref::<arrow::array::StringArray>()
             .unwrap();
@@ -281,7 +293,8 @@ mod tests {
         assert_eq!(name_array.value(1), "Bob");
         assert_eq!(name_array.value(2), "Charlie");
 
-        let active_array = batch.column(2)
+        let active_array = batch
+            .column(2)
             .as_any()
             .downcast_ref::<arrow::array::BooleanArray>()
             .unwrap();
@@ -289,7 +302,8 @@ mod tests {
         assert_eq!(active_array.value(1), false);
         assert_eq!(active_array.value(2), true);
 
-        let score_array = batch.column(3)
+        let score_array = batch
+            .column(3)
             .as_any()
             .downcast_ref::<arrow::array::Float64Array>()
             .unwrap();

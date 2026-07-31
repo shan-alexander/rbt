@@ -33,6 +33,7 @@ stg_ohlcv_1d ─┬─► tf_bar_metrics_1d ► fact_1d_bars ┘
 cd /path/to/rbt
 cargo build -p rbt-datalake --release
 # binary: ./target/release/rbt
+# or: cargo install rbt-datalake
 ```
 
 3. **Bronze data present** under:
@@ -209,19 +210,22 @@ mkdir -p my_project/models/{staging,transforms,marts}
 
 ## DAG (what will run)
 
+**9 models / 5 tiers** (matches `rbt compile` output):
+
 ```text
 Tier 0  stg_ohlcv_1m ──┐
         stg_ohlcv_1d ──┼── (bronze sources registered once each)
                        │
-Tier 1  tf_1m_bars_clean ← stg_ohlcv_1m
-        tf_1d_bars_clean ← stg_ohlcv_1d
+Tier 1  tf_bar_metrics    ← stg_ohlcv_1m
+        tf_bar_metrics_1d ← stg_ohlcv_1d
+        tf_symbol         ← stg_ohlcv_1m (+ optional 1d coverage)
                        │
-Tier 2  dim_symbol ← tf_1m_bars_clean
+Tier 2  dim_symbol ← tf_symbol
                        │
-Tier 3  fact_1m_bars ← tf_1m_bars_clean ⋈ dim_symbol
-        fact_1d_bars ← tf_1d_bars_clean ⋈ dim_symbol
+Tier 3  fact_1m_bars ← tf_bar_metrics    ⋈ dim_symbol
+        fact_1d_bars ← tf_bar_metrics_1d ⋈ dim_symbol
                        │
-Tier 4  obt_symbol_summary ← dim_symbol ⟕ fact_1d_bars
+Tier 4  obt_symbol_summary ← dim_symbol ⟕ fact_1d_bars (+ latest daily metrics)
 ```
 
 Layer rules: staging only reads `source()`; transforms do not depend on marts; gold can join silver + gold.
@@ -242,7 +246,7 @@ All commands from the **repository root** (`rbt/`), unless noted.
 
 Expect:
 
-- 5 execution tiers, 8 models  
+- 5 execution tiers, **9 models**  
 - `compile succeeded (bronze sources ok)`  
 - Failures if `lake/bronze` is missing or frontmatter paths are wrong  
 
@@ -258,12 +262,10 @@ Expect:
 Expect logs similar to:
 
 ```text
-Bronze scan: 73 file(s) … (1d)
-Bronze scan: 2638 file(s) … (1m)
 Registered bronze source bronze.ohlcv_1d …
 Registered bronze source bronze.ohlcv_1m …
 Executing DAG Tier 0 … Tier 4 …
-Completed 8 models (… rows, 2 bronze sources) in ~8–30s
+Completed 9 models (… rows, 2 bronze sources) in ~tens of seconds (machine-dependent)
 ```
 
 Outputs (paths relative to the example project):
@@ -272,8 +274,9 @@ Outputs (paths relative to the example project):
 |-------|------|
 | `stg_ohlcv_1m` | `lake/silver/stg_ohlcv_1m.parquet` |
 | `stg_ohlcv_1d` | `lake/silver/stg_ohlcv_1d.parquet` |
-| `tf_1m_bars_clean` | `lake/silver/tf_1m_bars_clean.parquet` |
-| `tf_1d_bars_clean` | `lake/silver/tf_1d_bars_clean.parquet` |
+| `tf_bar_metrics` | `lake/silver/tf_bar_metrics.parquet` |
+| `tf_bar_metrics_1d` | `lake/silver/tf_bar_metrics_1d.parquet` |
+| `tf_symbol` | `lake/silver/tf_symbol.parquet` |
 | `dim_symbol` | `lake/gold/dim_symbol.parquet` |
 | `fact_1m_bars` | `lake/gold/fact_1m_bars.parquet` |
 | `fact_1d_bars` | `lake/gold/fact_1d_bars.parquet` |
@@ -286,7 +289,8 @@ cd examples/full_e2e_rbt_example
 
 duckdb -c "
 SELECT 'stg_1m' t, count(*) c FROM read_parquet('lake/silver/stg_ohlcv_1m.parquet')
-UNION ALL SELECT 'tf_1m', count(*) FROM read_parquet('lake/silver/tf_1m_bars_clean.parquet')
+UNION ALL SELECT 'tf_metrics_1m', count(*) FROM read_parquet('lake/silver/tf_bar_metrics.parquet')
+UNION ALL SELECT 'tf_symbol', count(*) FROM read_parquet('lake/silver/tf_symbol.parquet')
 UNION ALL SELECT 'dim', count(*) FROM read_parquet('lake/gold/dim_symbol.parquet')
 UNION ALL SELECT 'fact_1m', count(*) FROM read_parquet('lake/gold/fact_1m_bars.parquet')
 UNION ALL SELECT 'obt', count(*) FROM read_parquet('lake/gold/obt_symbol_summary.parquet');
@@ -309,13 +313,13 @@ LIMIT 5;
 
 **Illustrative counts** (this bronze snapshot; your lake may differ):
 
-| Table | ~rows |
+| Table | Rows (this bronze snapshot) |
 |-------|------:|
-| `stg_ohlcv_1m` | 4.5M |
-| `stg_ohlcv_1d` | 36k |
-| `tf_1m_bars_clean` / `fact_1m_bars` | 3.1M |
-| `tf_1d_bars_clean` / `fact_1d_bars` | 35k |
-| `dim_symbol` / `obt_symbol_summary` | ~80 symbols |
+| `stg_ohlcv_1m` / `tf_bar_metrics` / `fact_1m_bars` | 3,110,044 |
+| `stg_ohlcv_1d` / `tf_bar_metrics_1d` / `fact_1d_bars` | 35,093 |
+| `tf_symbol` / `dim_symbol` / `obt_symbol_summary` | 83 |
+
+Wall time for full DAG on a typical workstation: ~25s (collect + Parquet rewrite; not a benchmark claim).
 
 Note: some symbols (e.g. NVDA in this dump) may have **1m only** and no `timeframe=1d` files; `obt_symbol_summary` uses a left join so they still appear with null daily metrics.
 
@@ -360,10 +364,11 @@ The 1d model is the same pattern with `timeframe: "1d"` and `ohlcv_1d`.
 
 | Model | Layer | Intent |
 |-------|-------|--------|
-| `stg_ohlcv_*` | Bronze edge → silver files | Absorb external files; light null filters |
-| `tf_*_bars_clean` | Silver | `timestamp_ns` → bar time; exact-key dedupe |
-| `dim_symbol` | Gold dim | Instrument dimension from 1m coverage |
-| `fact_1m_bars` / `fact_1d_bars` | Gold facts | Grain `(symbol, bar_time)` + dim attributes |
+| `stg_ohlcv_1m` / `stg_ohlcv_1d` | Bronze edge → silver | Absorb external Arrow IPC; type/filter; latest-path dedupe |
+| `tf_bar_metrics` / `tf_bar_metrics_1d` | Silver transforms | Windowed returns, SMAs, MACD-SMA proxy, RVOL, RSI proxy |
+| `tf_symbol` | Silver transforms | Per-symbol rollups for the dimension |
+| `dim_symbol` | Gold dim | Instrument dimension from `tf_symbol` |
+| `fact_1m_bars` / `fact_1d_bars` | Gold facts | Grain `(symbol, bar_time)` + indicators + dim attrs |
 | `obt_symbol_summary` | Gold OBT | One row per symbol for dashboards / APIs |
 
 No UDFs or Rust models are required for this path (see `docs/adr/ADR_003_UDF_RSMODELS.md` for future escape hatches).
