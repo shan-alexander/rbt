@@ -50,7 +50,7 @@ Requires a matching `rustc`/`cargo` pair (see `rust-toolchain.toml`).
 > **crates.io notes**
 >
 > - **Package name:** [`rbt-datalake`](https://crates.io/crates/rbt-datalake) (the short name [`rbt`](https://crates.io/crates/rbt) is an unrelated “Rust bot toolkit”). Binary and lib import path remain **`rbt`**.
-> - Early `0.0.1` internals (`rbt-core`, `rbt-engine`, …) are **orphaned**. Each has a **0.0.2 deprecation stub** README pointing here. **Do not depend on them.**
+> - Early `0.0.1` internals (`rbt-core`, `rbt-engine`, …) are **orphaned**. Each has a **0.0.3 deprecation stub** README pointing here. **Do not depend on them.**
 
 ## Quick start (smoke fixture)
 
