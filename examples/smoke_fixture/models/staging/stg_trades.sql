@@ -1,7 +1,7 @@
 ---
 description: Smoke staging trades with latest-wins on id
 source_format: jsonl
-scan_path: "lake/bronze/trades.jsonl"
+scan_path: "$lake/bronze/trades.jsonl"
 source_name: bronze
 source_table: trades
 grain: [id]

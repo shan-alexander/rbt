@@ -16,6 +16,14 @@ All notable changes to this project are documented in this file.
 - **`scan.protobuf_max_payload_bytes`** — default **1 GiB** (`1024³`); optional override under `scan:` in `rbt_project.yml`
 - Docs: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md) — multi-root, globs, protobuf cap, **DF listing pushdown disabled when `path_glob` is set**
 
+### Changed
+- Examples (`smoke_fixture`, `full_e2e_rbt_example`) use **`roots:` + `$lake/...`**, document `path_glob` / partition best practices for 0.3.7
+- `RbtProjectConfig::load` errors use **`E_RBT_PROJECT_LOAD`** with parse hints
+
+### Tests
+- Workspace example project load + DAG build unit test
+- Glob literal-separator / protobuf payload cap coverage
+
 ## [0.3.6] — 2026-07-31
 
 ### Added

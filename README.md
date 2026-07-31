@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.0.2` experimental.** One package: **library + CLI binary `rbt`**. Spine works (`compile` / `run` / `test` / `--select`). Default materialization is **full Parquet rewrite**. **Filesystem Iceberg-style tables** via `--format iceberg` (data + metadata layout; not multi-catalog OCC). APIs may break between `0.0.x` releases.
+> **Status:** **`0.3.7`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine works (`compile` / `run` / `test` / `--select`). Default materialization is **full Parquet rewrite**; default `ref()` is **lake Parquet re-read**. Multi-root paths, `path_glob`, opaque protobuf bronze. **Filesystem Iceberg-style tables** via `--format iceberg` (data + metadata layout; not multi-catalog OCC).
 
 ## Why rbt
 
@@ -50,7 +50,7 @@ Requires a matching `rustc`/`cargo` pair (see `rust-toolchain.toml`).
 > **crates.io notes**
 >
 > - **Package name:** [`rbt-datalake`](https://crates.io/crates/rbt-datalake) (the short name [`rbt`](https://crates.io/crates/rbt) is an unrelated “Rust bot toolkit”). Binary and lib import path remain **`rbt`**.
-> - Early `0.0.1` internals (`rbt-core`, `rbt-engine`, …) are **orphaned**. Each has a **0.0.3 deprecation stub** README pointing here. **Do not depend on them.**
+> - Early `0.0.1` internals (`rbt-core`, `rbt-engine`, …) are **orphaned**. Each has a **0.0.4 deprecation stub** README pointing here. **Do not depend on them.**
 
 ## Quick start (smoke fixture)
 

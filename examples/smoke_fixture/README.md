@@ -2,7 +2,9 @@
 
 Tiny JSONL bronze project for CI and local smoke tests.
 
-Package on crates.io: **`rbt-datalake`**. Binary name: **`rbt`**.
+Compatible with **rbt-datalake 0.3.7+**. Package: **`rbt-datalake`**. Binary / lib: **`rbt`**.
+
+Uses `roots.lake` + `$lake/...` targets (same multi-root pattern as the full e2e example, at toy scale).
 
 ```bash
 # from repository root

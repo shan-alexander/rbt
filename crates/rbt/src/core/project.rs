@@ -174,9 +174,20 @@ impl RbtProjectConfig {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let project_file = project_dir.join("rbt_project.yml");
         if project_file.exists() {
-            let content = fs::read_to_string(&project_file)?;
-            let mut config: RbtProjectConfig = serde_yaml::from_str(&content)
-                .with_context(|| format!("Failed to parse {}", project_file.display()))?;
+            let content = fs::read_to_string(&project_file).with_context(|| {
+                format!(
+                    "E_RBT_PROJECT_LOAD: cannot read project file {}",
+                    project_file.display()
+                )
+            })?;
+            let mut config: RbtProjectConfig = serde_yaml::from_str(&content).with_context(|| {
+                format!(
+                    "E_RBT_PROJECT_LOAD: failed to parse {}. \
+                     Check required keys (name, version, models_dir, target_path) and \
+                     optional materialize:/scan:/roots:/layers blocks.",
+                    project_file.display()
+                )
+            })?;
 
             let defaults = Self::default();
             for (key, val) in defaults.layers {
@@ -603,6 +614,51 @@ target_path: lake/gold
             cfg2.scan.protobuf_max_payload_bytes,
             DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
         );
+        Ok(())
+    }
+
+    /// Workspace examples stay loadable / 0.3.7-shaped (roots + defaults).
+    #[test]
+    fn load_workspace_example_projects() -> Result<()> {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo = manifest.join("../..");
+        for (rel, name, expect_root) in [
+            ("examples/smoke_fixture", "smoke_fixture", "lake"),
+            ("examples/full_e2e_rbt_example", "market_bars", "lake"),
+        ] {
+            let dir = repo.join(rel);
+            if !dir.join("rbt_project.yml").is_file() {
+                // crates.io source package may omit large e2e bronze; skip if missing
+                continue;
+            }
+            let cfg = RbtProjectConfig::load(&dir)?;
+            assert_eq!(cfg.name, name, "example {rel}");
+            assert_eq!(
+                cfg.roots.get("lake").map(String::as_str),
+                Some(expect_root),
+                "example {rel} should declare roots.lake"
+            );
+            assert_eq!(cfg.materialize.ref_strategy, RefStrategy::Parquet);
+            assert_eq!(
+                cfg.scan.protobuf_max_payload_bytes,
+                DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
+            );
+            let silver = cfg.resolve_layer_target_dir(&dir, ModelLayer::Staging)?;
+            assert!(
+                silver.ends_with("lake/silver") || silver.ends_with("lake\\silver"),
+                "staging target for {rel}: {}",
+                silver.display()
+            );
+            // DAG builds for smoke always; e2e only if models present
+            if dir.join("models").is_dir() {
+                let dag = cfg.build_dag(&dir, None)?;
+                assert!(
+                    dag.graph.node_count() >= 3,
+                    "example {rel} expected ≥3 models, got {}",
+                    dag.graph.node_count()
+                );
+            }
+        }
         Ok(())
     }
 }

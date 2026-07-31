@@ -1,22 +1,30 @@
+# Compatible with rbt-datalake 0.3.7+. Tiny CI / smoke project.
 name: smoke_fixture
-version: "0.0.1"
+version: "0.0.2"
 models_dir: models
-target_path: lake/gold
+target_path: $lake/gold
+
+roots:
+  lake: lake
+
 # materialize:                        # optional — omit for lake-as-truth default
 #   ref_strategy: parquet             # default: re-read written files for {{ ref() }}
 #   # ref_strategy: memtable          # opt-in: MemTable when rows < memtable_max_rows
-#   # memtable_max_rows: 50000        # default cutoff when strategy is memtable
-# See docs/REF_STRATEGY.md for bench tradeoffs.
+#   # memtable_max_rows: 50000
+# scan:
+#   protobuf_max_payload_bytes: 1073741824   # default 1 GiB; only needed for protobuf bronze
+# See docs/REF_STRATEGY.md and docs/MULTI_ROOT_AND_PATH_GLOB.md.
+
 layers:
   staging:
     path: models/staging
-    target_path: lake/silver
+    target_path: $lake/silver
     default_format: parquet
   transforms:
     path: models/transforms
-    target_path: lake/silver
+    target_path: $lake/silver
     default_format: parquet
   marts:
     path: models/marts
-    target_path: lake/gold
+    target_path: $lake/gold
     default_format: parquet

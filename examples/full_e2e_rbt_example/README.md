@@ -1,8 +1,23 @@
 # Full E2E example: external bronze → silver → gold with `rbt`
 
+Compatible with **rbt-datalake 0.3.7+** (package `rbt-datalake`, binary / lib import `rbt`).
+
 This example shows how **`rbt` sits between a data lake landing zone and analytics-ready tables**.
 
 Another system already wrote real equity OHLCV bars into a hive-partitioned bronze zone (Arrow IPC streams). You do **not** re-ingest with rbt. You declare models, compile a DAG, and materialize **silver** and **gold** Parquet tables under the same lake root.
+
+### 0.3.7 practices used here
+
+| Practice | Where |
+|----------|--------|
+| Named **`roots:`** + `$lake/...` templates | [`rbt_project.yml`](rbt_project.yml) |
+| Lake-as-truth **`ref()`** (default parquet re-read) | omit `materialize:` (default) |
+| **`path_glob: "**/*.arrow"`** on staging | isolate artifacts under hive trees |
+| **`partition_by` + `require_partitions`** | grain filter (`1m` / `1d`) without scanning other timeframes |
+| **`inject_source_path`** | latest-path dedupe lineage |
+| Scan→MemTable bronze path | forced by globs + partitions (DF listing pushdown off by design) |
+
+See [docs/MULTI_ROOT_AND_PATH_GLOB.md](../../docs/MULTI_ROOT_AND_PATH_GLOB.md) and [docs/REF_STRATEGY.md](../../docs/REF_STRATEGY.md).
 
 | Layer | Owner | Role in this example |
 |-------|--------|----------------------|
@@ -338,22 +353,28 @@ Bronze is never deleted by rbt.
 ## How staging frontmatter maps to the lake
 
 ```yaml
-# models/staging/stg_ohlcv_1m.sql (header)
+# models/staging/stg_ohlcv_1m.sql (header) + roots from rbt_project.yml
+# roots:
+#   lake: lake
 source_format: arrow_ipc
-scan_path: "lake/bronze"
+scan_path: "$lake/bronze"
+path_glob: "**/*.arrow"          # strong glob: * = one segment, ** = recursive
 partition_by: [symbol, timeframe]
 require_partitions:
   timeframe: "1m"
+inject_source_path: true
 source_name: bronze
 source_table: ohlcv_1m
 ```
 
 | Key | Behavior |
 |-----|----------|
-| `scan_path` | Root of the external bronze tree (project-relative) |
+| `scan_path` | Root of the external bronze tree (`$lake` → `roots.lake`) |
+| `path_glob` | Keep only matching files (OR list allowed); disables DF listing pushdown for this source |
 | `source_format` | `arrow_ipc` (auto file/stream) |
 | `partition_by` | Inject Utf8 columns from `key=value` path segments when missing in the file |
 | `require_partitions` | Only read files under matching hive segments (here: 1m bars only) |
+| `inject_source_path` | Adds `_source_path` for latest-wins dedupe |
 | `source()` | Registers `bronze.ohlcv_1m` for SQL |
 
 The 1d model is the same pattern with `timeframe: "1d"` and `ohlcv_1d`.
@@ -394,8 +415,10 @@ No UDFs or Rust models are required for this path (see `docs/adr/ADR_003_UDF_RSM
 | `E_RBT_BRONZE_SCAN_PATH_NOT_FOUND` | Wrong cwd or missing bronze | Run from repo root; check `lake/bronze` |
 | `No arrow_ipc files found (after partition filters)` | No `timeframe=1m` (or 1d) dirs | Inspect hive layout; adjust `require_partitions` |
 | Arrow footer / parse errors | Stream IPC labeled `.arrow` | Use current rbt (auto file→stream); upgrade CLI |
-| OOM on huge lakes | Full MemTable bronze load | Narrow `require_partitions`, or future stream path |
+| OOM on huge lakes | Full collect + bronze MemTable path | Narrow `require_partitions` / `path_glob`; see streaming materialize plan |
 | Empty gold join rows | Dim built from 1m but fact from empty 1d | Check bronze coverage per symbol |
+| `E_RBT_ROOT_UNKNOWN` | `$name` not in `roots:` | Define the root in `rbt_project.yml` |
+| `E_RBT_PATH_GLOB_INVALID` | Bad glob syntax | Use globset syntax; `*` is single-segment, `**` recursive |
 | `cargo` / `check-cfg` build errors | Mismatched cargo vs rustc | Use rustup’s matching `cargo`+`rustc` pair |
 
 ---
@@ -405,15 +428,18 @@ No UDFs or Rust models are required for this path (see `docs/adr/ADR_003_UDF_RSM
 - Project discovery + multi-tier DAG  
 - Layer boundary conventions (`stg_` / `tf_` / `dim_` / `fact_` / `obt_`)  
 - Frontmatter bronze contracts on **external** lake data  
-- Nested hive directory scan  
+- **`roots:`** templates for scan + layer targets  
+- Nested hive directory scan with **`path_glob`** + partition filters  
 - Arrow IPC stream + file auto-detect  
 - Hive `partition_by` injection + `require_partitions` filters  
 - Dual bronze sources in one project (`ohlcv_1m`, `ohlcv_1d`)  
+- Default lake-as-truth **`ref()`** (Parquet re-read after materialize)  
 - SQL `ref` / `source` compilation  
 - Parquet materialization to layer target paths  
+- Frontmatter tests on materialize  
 - Dim ∩ fact joins and OBT summary  
 
-**Not yet claimed:** real Iceberg catalog snapshot commits, `validate`/`preview`/`explain`, WAP, Rust models/UDFs. (`--select` and frontmatter `test` work.)
+**Not yet claimed:** real Iceberg catalog snapshot commits, `validate`/`preview`/`explain`, WAP, Rust models/UDFs, streaming materialize. (`--select` and frontmatter `test` work.)
 
 ---
 
@@ -421,5 +447,7 @@ No UDFs or Rust models are required for this path (see `docs/adr/ADR_003_UDF_RSM
 
 - [thesis.md](../../thesis.md) — product positioning  
 - [CONTRIBUTING.md](../../CONTRIBUTING.md) — priorities and lake vs code  
+- [docs/MULTI_ROOT_AND_PATH_GLOB.md](../../docs/MULTI_ROOT_AND_PATH_GLOB.md) — roots, globs, protobuf, listing pushdown  
+- [docs/REF_STRATEGY.md](../../docs/REF_STRATEGY.md) — MemTable vs lake re-read  
 - [docs/adr/ADR_003_UDF_RSMODELS.md](../../docs/adr/ADR_003_UDF_RSMODELS.md) — polyglot extensions (later)  
 - Smaller smoke example: [../smoke_fixture](../smoke_fixture)

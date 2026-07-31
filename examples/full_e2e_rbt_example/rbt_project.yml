@@ -1,48 +1,59 @@
 # =============================================================================
 # full_e2e_rbt_example — bronze → silver → gold (full Parquet rewrite DAG)
 # =============================================================================
-# Intentional choice for this sample: FULL PARQUET REWRITES each `rbt run`.
+# Compatible with rbt-datalake 0.3.7+.
+#
+# Intentional sample policy: FULL PARQUET REWRITE each `rbt run`.
 # That is a first-class DAG option for small/medium projects that want:
 #   - dbt-shaped models, refs, tests, frontmatter
 #   - medallion cleansing without Iceberg/catalog ops
-# Iceberg remains the long-term SoR for multi-writer / time-travel lakes, but
-# is not required here (and not faked).
 #
-# Runtime v0 keys (models_dir + layers.*) are loaded by rbt today.
+# Keys below are the runtime surface loaded by rbt today. Extra keys are ignored;
+# prefer only documented fields so this file stays a faithful template.
 #
-# materialize.ref_strategy (optional):
-#   parquet (default) — lake-as-truth re-read for {{ ref() }}  [recommended]
-#   memtable          — keep MemTable when rows < memtable_max_rows (default 50000)
-# See docs/REF_STRATEGY.md (includes Criterion wall-time vs RSS tradeoffs).
+# Optional blocks (defaults are fine for this example):
+#   materialize:   ref() backend after materialize — see docs/REF_STRATEGY.md
+#   scan:          bronze limits (e.g. protobuf payload cap)
+#   roots:         named path prefixes for multi-root / absolute lakes
+#                  (see docs/MULTI_ROOT_AND_PATH_GLOB.md)
 # =============================================================================
 
 name: market_bars
-version: "1.1.0"
-profile: medallion_kimball
-
-lake_root: ./lake
-namespace: market_bars
-env: dev
+version: "1.2.0"
 
 models_dir: models
-target_path: lake/gold
+target_path: $lake/gold
 
+# Named roots: templates expand before absolute/relative resolve.
+# Here `lake` is project-relative (joins to the example project dir).
+# For multi-env lakes, point roots at absolute paths instead, e.g.:
+#   nonprod_lake: /mnt/datalake/acme/nonprod/lake_us/lake
+roots:
+  lake: lake
+
+# Default ref strategy is parquet (lake re-read). Uncomment to opt into MemTable
+# for small models only (row count < memtable_max_rows):
 # materialize:
-#   ref_strategy: parquet
-#   memtable_max_rows: 50000
+#   ref_strategy: parquet          # default — omit entire block for same effect
+#   # ref_strategy: memtable
+#   # memtable_max_rows: 50000
+
+# Optional bronze scan limits (protobuf opaque payloads default to 1 GiB):
+# scan:
+#   protobuf_max_payload_bytes: 1073741824
 
 layers:
   staging:
     path: models/staging
-    target_path: lake/silver
-    default_format: parquet   # full rewrite of staging tables
+    target_path: $lake/silver
+    default_format: parquet
 
   transforms:
     path: models/transforms
-    target_path: lake/silver
-    default_format: parquet   # tf_symbol, tf_bar_metrics*
+    target_path: $lake/silver
+    default_format: parquet
 
   marts:
     path: models/marts
-    target_path: lake/gold
-    default_format: parquet   # dim / fact / obt
+    target_path: $lake/gold
+    default_format: parquet

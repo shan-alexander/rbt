@@ -5,7 +5,11 @@ context: >
   dedupe. Used by tf_symbol coverage stats and fact_1d_bars (daily indicators).
 
 source_format: arrow_ipc
-scan_path: "lake/bronze"
+# $lake expands from rbt_project.yml roots: (project-relative lake/ here)
+scan_path: "$lake/bronze"
+# Artifact isolation under a mixed hive tree (strong glob: * is single-segment; ** recursive).
+# Non-empty path_glob + partition filters force the scan→MemTable path (no DF listing pushdown).
+path_glob: "**/*.arrow"
 partition_by: [symbol, timeframe]
 require_partitions:
   timeframe: "1d"
