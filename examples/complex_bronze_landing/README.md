@@ -1,60 +1,61 @@
-# Complex bronze landing → silver stage
+# Complex bronze landing → silver → gold star
 
-Demonstrates **P5a/P5b** primitives for multi-artifact Hive-ish bronze trees:
+Kimball-aligned demo for multi-artifact Hive-ish bronze and a thin gold star.
 
-| Concern | How |
-|---------|-----|
-| Multi-artifact families | `path_glob: plan.jsonl` / `scrape.jsonl` / … |
-| Hive partitions | `partition_by: [domain, report_date, run_id]` |
-| Run scope | `--var domain=… --var report_date=… --var run_id=…` |
-| Optional artifacts | `on_missing: empty` + `columns.*.dtype` |
-| Outer reconciliation | `tf_unit_status` LEFT JOINs plan ⟕ scrape ⟕ failures |
-| Receipts / skip | `.rbt/runs/*.json` + `--skip-if-match` |
+| Layer | Role | Path |
+|-------|------|------|
+| **Bronze** | External multi-file landing | `lake/lz/runs/domain=…/report_date=…/run_id=…/` |
+| **Silver stage** (`stg_*`) | Per-artifact contracts | `lake/silver/stage/` |
+| **Silver transform** (`tf_*`) | Outer recon → `row_status` | `lake/silver/tf/` |
+| **Gold marts** | `dim_site` (SK + Unknown), `fact_units` (thin + SK FK) | `lake/gold/` |
 
-## Layout
+Guidelines: [docs/GOLD_DEFAULT.md](../../docs/GOLD_DEFAULT.md),
+[docs/concepts/star-schema-data-modeling-rules.md](../../docs/concepts/star-schema-data-modeling-rules.md).
+
+## Bronze layout
 
 ```text
 lake/lz/runs/domain=…/report_date=…/run_id=…/
   plan.jsonl       # required inventory
   scrape.jsonl     # optional successes
   failures.jsonl   # optional failure ledger
-  siteinfo.jsonl   # optional (absent in sample)
+  siteinfo.jsonl   # optional (absent in sample → on_missing: empty)
 ```
+
+## DAG
+
+```text
+stg_plan, stg_scrape, stg_failures, stg_siteinfo
+        │
+        ▼
+  tf_unit_status     (silver/tf — plan ⟕ scrape ⟕ failures)
+        │
+        ├──────────────► dim_site   (from stg_plan; SK + Unknown −1)
+        │                     │
+        └─────────────────────┴──► fact_units  (SK FK + flags/measures)
+```
+
+- **Silver/tf is intentional** for reconciliation (not “wrong gold”).
+- **Dim** reads **silver stage** (`stg_plan`), not `tf_*`.
+- **Fact** reads silver transform for row payload + dim for **site_sk** (never NULL; Unknown −1).
+- Do **not** `source()` upstream transforms; only bronze/published endpoints.
 
 ## Run
 
 ```bash
 cargo build -p rbt-datalake --release
+./target/release/rbt validate -p examples/complex_bronze_landing --bronze-check fail
 ./target/release/rbt run -p examples/complex_bronze_landing --format parquet \
   --var domain=acme.com \
   --var report_date=2026-07-29 \
-  --var run_id=r1 \
-  --skip-if-match
+  --var run_id=r1
 
-# Second identical invoke should skip when bronze unchanged:
-./target/release/rbt run -p examples/complex_bronze_landing --format parquet \
-  --var domain=acme.com --var report_date=2026-07-29 --var run_id=r1 \
-  --skip-if-match
-```
-
-Silver outputs under `lake/silver/stage/` and `lake/silver/tf/`.  
-Gold: `dim_site`, `fact_units` (lineage stamps + relationship test) under `lake/gold/`.
-
-```bash
-# Gold subgraph only (ancestors included)
+# Gold subgraph (ancestors included)
 ./target/release/rbt run -p examples/complex_bronze_landing -s fact_units --format parquet \
   --var domain=acme.com --var report_date=2026-07-29 --var run_id=r1
 ```
 
-## Stage modes (author intent)
+## Stage modes / P5
 
-Frontmatter `stage_mode` is a **documentation / future-engine hint**:
-
-| Mode | Intent |
-|------|--------|
-| `full_refresh` | Silver is a consolidated rewrite of the scoped bronze slice (this example) |
-| `latest_only` | Keep newest landing only (use `inject_source_path` + SQL window / QUALIFY) |
-| `append` | Prefer `materialization: incremental_append` |
-| `mirror_bronze` | Thin 1:1 projection of one artifact family |
-
-MoR/CoW Iceberg write modes remain under project `materialize.iceberg` when using `--format iceberg`.
+See [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](../../docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md) for
+`--var`, `on_missing: empty`, receipts, `--skip-if-match`.

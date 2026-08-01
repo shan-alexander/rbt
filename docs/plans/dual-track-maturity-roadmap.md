@@ -77,11 +77,13 @@ Analysis backbone: [[Bronze-to-silver maturity gap matrix]].
 - [x] Completeness filter patterns documented (G2) in GOLD_DEFAULT.md
 - [x] Env roots cookbook (G10) in GOLD_DEFAULT.md
 
-### P7 — Merge / SCD
+### P7 — Merge / SCD / OBT
 
 - [ ] Honest `incremental_merge` or Iceberg MERGE path — G4
+- [ ] **SCD2 dimensions** (valid_from/to, is_active, open-end 2099-12-31, Unknown −1) — first-class
 - [ ] As-of / snapshot filters by business date (+ optional run id) — G5
-- [ ] Align with [[Star schema data modeling rules]] SCD2 defaults when implementing
+- [ ] First-class **OBT** layer rules (from dim+fact only; not core star bypass)
+- [ ] Align with [[Star schema data modeling rules]]
 
 ### P8 — Remote SoR & petabyte *workers*
 

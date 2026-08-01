@@ -477,7 +477,141 @@ impl ModelDag {
             }
         }
 
+        // Kimball / gold hygiene (warnings; does not fail bronze_check alone).
+        self.append_modeling_hygiene_diagnostics(&mut report);
         Ok(report)
+    }
+
+    /// Star-schema and layer hygiene warnings (grain/unique, parts on marts, source(tf_*)).
+    pub fn modeling_hygiene_diagnostics(&self) -> Vec<BronzeDiagnostic> {
+        let mut report = BronzeValidationReport::default();
+        self.append_modeling_hygiene_diagnostics(&mut report);
+        report.diagnostics
+    }
+
+    fn append_modeling_hygiene_diagnostics(&self, report: &mut BronzeValidationReport) {
+        for idx in self.graph.node_indices() {
+            let node = &self.graph[idx];
+            let fm = node.frontmatter.as_ref();
+
+            // source() must not name an upstream transform-like table (private, unstable).
+            for dep in &node.dependencies {
+                if let DependencyRef::Source {
+                    source_name: _,
+                    table_name,
+                } = dep
+                {
+                    let t = table_name.as_str();
+                    if t.starts_with("tf_") || t.starts_with("int_") {
+                        report.diagnostics.push(BronzeDiagnostic {
+                            model: node.name.clone(),
+                            severity: DiagnosticSeverity::Warning,
+                            code: "W_RBT_SOURCE_UPSTREAM_TRANSFORM",
+                            message: format!(
+                                "source(..., '{table_name}') looks like a transform endpoint; \
+                                 prefer published stage (stg_*) or dim/fact contracts, not private tf_*"
+                            ),
+                        });
+                    }
+                }
+            }
+
+            // Gold transforms (tf under mart naming is rare): if transform refs another transform,
+            // that is fine for silver/tf chains. Flag marts that scan parts without ref-only.
+            if matches!(node.layer, ModelLayer::Mart) {
+                if let Some(fm) = fm {
+                    if fm.wants_parts_source() || fm.has_scan_contract() {
+                        report.diagnostics.push(BronzeDiagnostic {
+                            model: node.name.clone(),
+                            severity: DiagnosticSeverity::Warning,
+                            code: "W_RBT_MART_SCAN_CONTRACT",
+                            message: "mart (dim_/fact_/obt_) declares a bronze scan/parts contract; \
+                                 prefer scan on stg_*, business prep on tf_*, thin marts via ref()"
+                                .into(),
+                        });
+                    }
+                }
+            }
+
+            let Some(fm) = fm else {
+                continue;
+            };
+
+            // Grain without unique coverage
+            if let Some(grain) = fm.grain.as_ref().filter(|g| !g.is_empty()) {
+                let unique_cols: Option<Vec<String>> = fm
+                    .tests
+                    .as_ref()
+                    .and_then(|t| t.unique.clone())
+                    .or_else(|| fm.unique_key.clone());
+                match unique_cols {
+                    None => {
+                        report.diagnostics.push(BronzeDiagnostic {
+                            model: node.name.clone(),
+                            severity: DiagnosticSeverity::Warning,
+                            code: "W_RBT_GRAIN_NO_UNIQUE",
+                            message: format!(
+                                "grain {:?} declared but no tests.unique / unique_key; \
+                                 grain should be testable for uniqueness",
+                                grain
+                            ),
+                        });
+                    }
+                    Some(u) if u != *grain && u.len() != 1 => {
+                        // Allow unique_key = [sk] while grain is natural keys
+                        if !(u.len() == 1
+                            && (u[0].ends_with("_sk") || u[0].ends_with("_key") || u[0] == "sk"))
+                        {
+                            report.diagnostics.push(BronzeDiagnostic {
+                                model: node.name.clone(),
+                                severity: DiagnosticSeverity::Warning,
+                                code: "W_RBT_GRAIN_UNIQUE_MISMATCH",
+                                message: format!(
+                                    "grain {:?} differs from unique {:?}; ensure SK vs NK is intentional",
+                                    grain, u
+                                ),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Fact-like models: recommend relationship tests when none
+            if node.name.starts_with("fact_") || node.name.starts_with("fct_") {
+                let has_rel = fm
+                    .tests
+                    .as_ref()
+                    .and_then(|t| t.relationships.as_ref())
+                    .map(|r| !r.is_empty())
+                    .unwrap_or(false);
+                if !has_rel {
+                    report.diagnostics.push(BronzeDiagnostic {
+                        model: node.name.clone(),
+                        severity: DiagnosticSeverity::Warning,
+                        code: "W_RBT_FACT_NO_RELATIONSHIP",
+                        message: "fact model has no tests.relationships; \
+                             prefer SK FK checks to dim_* (Unknown member -1)"
+                            .into(),
+                    });
+                }
+            }
+
+            // Dim: soft note if no unknown convention in description (optional noise) — skip
+
+            // Lineage columns in grain
+            if let Some(grain) = &fm.grain {
+                if grain.iter().any(|c| c.starts_with("_rbt_")) {
+                    report.diagnostics.push(BronzeDiagnostic {
+                        model: node.name.clone(),
+                        severity: DiagnosticSeverity::Warning,
+                        code: "W_RBT_LINEAGE_IN_GRAIN",
+                        message: "grain includes _rbt_* lineage columns; keep lineage out of business grain"
+                            .into(),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -559,6 +693,55 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Circular dependency"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn modeling_hygiene_flags_source_tf_and_grain() -> Result<()> {
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_ok",
+            "---\ngrain: [id]\n---\nSELECT 1 AS id FROM {{ source('raw', 'x') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            None,
+            "db",
+        )?;
+        dag.add_model_with_format(
+            "stg_bad_source",
+            "SELECT * FROM {{ source('upstream', 'tf_secret') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            None,
+            "db",
+        )?;
+        dag.add_model_with_format(
+            "fact_sales",
+            "---\ngrain: [id]\ntests:\n  unique: [id]\n---\nSELECT 1 AS id",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            None,
+            "db",
+        )?;
+        dag.build_graph()?;
+        let diags = dag.modeling_hygiene_diagnostics();
+        assert!(
+            diags.iter().any(|d| d.code == "W_RBT_GRAIN_NO_UNIQUE"),
+            "expected grain warning, got {:?}",
+            diags
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "W_RBT_SOURCE_UPSTREAM_TRANSFORM"),
+            "expected source(tf_*) warning, got {:?}",
+            diags
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "W_RBT_FACT_NO_RELATIONSHIP"),
+            "expected fact relationship warning, got {:?}",
+            diags
+        );
         Ok(())
     }
 

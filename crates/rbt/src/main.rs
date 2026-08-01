@@ -503,6 +503,10 @@ async fn main() -> Result<()> {
                     "bronze_errors": report.error_count(),
                     "bronze_warnings": report.warning_count(),
                     "issues": issues,
+                    "modeling_warnings": report.diagnostics.iter()
+                        .filter(|d| d.code.starts_with("W_RBT_"))
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>(),
                     "tier_plan": tiers.iter().map(|t| {
                         t.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
                     }).collect::<Vec<_>>(),

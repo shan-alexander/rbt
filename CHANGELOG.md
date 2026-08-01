@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed / docs (Kimball gold hygiene)
+
+- Rewrite [docs/GOLD_DEFAULT.md](docs/GOLD_DEFAULT.md): silver/`tf` allowed; gold transforms only touch silver **stage**; no `source()` of upstream `tf_*`
+- Example `complex_bronze_landing`: `dim_site` SK + Unknown (−1); thin `fact_units` with `site_sk` FK + relationship on SK
+- `rbt validate` modeling warnings: grain/unique, mart scan contracts, `source(tf_*)`, fact without relationships
+
 ## [0.7.0] — 2026-08-01
 
 ### Added (P6 — gold default surface)

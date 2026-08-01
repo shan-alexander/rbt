@@ -1,24 +1,28 @@
 ---
-description: Gold fact — successful and failed units with lineage; FK to dim_site.
+description: >
+  one row per planned url per report_date per run_id. Thin fact: site_sk FK + measures/flags
+  from silver transform tf_unit_status; no multi-source recon here.
 lineage_stamp: true
 grain: [url, report_date, run_id]
 tests:
-  not_null: [url, domain, row_status]
+  not_null: [url, site_sk, row_status]
   unique: [url, report_date, run_id]
   accepted_values:
     row_status: [success, failed, planned_only]
   relationships:
-    - column: domain
+    - column: site_sk
       to_model: dim_site
-      to_column: domain
+      to_column: site_sk
 ---
 SELECT
+  COALESCE(d.site_sk, CAST(-1 AS BIGINT)) AS site_sk,
   u.url,
-  u.domain,
   u.report_date,
   u.run_id,
-  u.title,
   u.score,
-  u.error,
   u.row_status
 FROM {{ ref('tf_unit_status') }} u
+LEFT JOIN {{ ref('dim_site') }} d
+  ON u.domain = d.domain
+ AND u.report_date = d.report_date
+ AND COALESCE(d.is_unknown, false) = false
