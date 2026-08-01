@@ -14,8 +14,8 @@ pub use dag::{
 };
 pub use frontmatter::{
     parse_logical_dtype, resolve_scan_path, scan_path_exists, BronzeCheckMode, BronzeDiagnostic,
-    BronzeValidationReport, ColumnMeta, DiagnosticSeverity, ModelTests, SourceFormat,
-    StagingFrontmatter,
+    BronzeValidationReport, ColumnMeta, DiagnosticSeverity, ModelTests, RelationshipTest,
+    SourceFormat, StagingFrontmatter,
 };
 pub use parser::{DependencyRef, RbtTemplateEngine, SqlModelParser};
 pub use paths::PathGlobSet;

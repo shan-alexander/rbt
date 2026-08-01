@@ -246,6 +246,39 @@ pub async fn register_bronze_for_model_scoped(
     }
 
     let path_str = resolved.to_string_lossy().to_string();
+
+    // P6: multi-part parquet directories (manifest-aware).
+    let parts_mode = fm.wants_parts_source()
+        || crate::scan::parts::is_parts_directory(&resolved)
+        || matches!(format, SourceFormat::Parquet)
+            && resolved.is_dir()
+            && crate::scan::parts::manifest_path(&resolved).is_file();
+
+    if parts_mode {
+        let provider = register_parts_parquet(ctx, &resolved)
+            .await
+            .with_context(|| {
+                format!(
+                    "model '{}': parts parquet registration failed for {}",
+                    node.name,
+                    resolved.display()
+                )
+            })?;
+        return finish_register(
+            ctx,
+            registered,
+            key,
+            schema_name,
+            table_name,
+            node,
+            SourceFormat::Parquet,
+            resolved,
+            provider,
+            BronzeRegistrationMode::DataFusionListing,
+        )
+        .await;
+    }
+
     let use_scan = should_use_scan_path(fm, format);
 
     let (inner, mode) = if use_scan {
@@ -435,6 +468,32 @@ async fn ensure_schema(ctx: &SessionContext, schema_name: &str) -> Result<()> {
         .await
         .with_context(|| format!("CREATE SCHEMA {} collect", schema_name))?;
     Ok(())
+}
+
+/// Register a multi-file parquet parts directory as one table provider.
+async fn register_parts_parquet(
+    ctx: &SessionContext,
+    parts_dir: &Path,
+) -> Result<Arc<dyn TableProvider>> {
+    let files = crate::scan::parts::list_part_files(parts_dir)?;
+    tracing::info!(
+        "Parts source: {} file(s) under {} (manifest_rows={:?})",
+        files.len(),
+        parts_dir.display(),
+        crate::scan::parts::manifest_total_rows(parts_dir)
+    );
+    // DataFusion lists directories recursively; registering the directory is enough when
+    // only part-*.parquet files live there. Prefer directory registration for pushdown.
+    let path_str = parts_dir.to_string_lossy().to_string();
+    listing_table_provider(ctx, &path_str, SourceFormat::Parquet)
+        .await
+        .with_context(|| {
+            format!(
+                "E_RBT_PARTS: register_parquet on parts dir {} ({} files)",
+                parts_dir.display(),
+                files.len()
+            )
+        })
 }
 
 /// Path A: materialize a DF listing provider, then return it for wrapping.

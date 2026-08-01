@@ -14,8 +14,8 @@ use crate::core::receipt::{
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
     incremental_ref_path, load_parquet_batches, materialize_incremental_append_stream,
-    materialize_stream, new_wap_run_id, sibling_iceberg_dir, wap_publish, MaterializeWriteOptions,
-    MultiFormatWriter, StreamWriteStats, WapModelPaths,
+    materialize_stream, new_wap_run_id, sibling_iceberg_dir, stamp_batch, wap_publish,
+    LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
 };
 use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
@@ -475,8 +475,21 @@ impl TransformationEngine {
                 }
 
                 let (assertions, fail_on_error) = model_assertions(model);
-                let write_opts =
+                let mut write_opts =
                     MaterializeWriteOptions::from_config(materialize, fail_on_error);
+                if model
+                    .frontmatter
+                    .as_ref()
+                    .map(|f| f.wants_lineage_stamp())
+                    .unwrap_or(false)
+                {
+                    write_opts = write_opts.with_lineage(LineageStamp {
+                        run_id: run_id.clone(),
+                        contract_version: contract.clone(),
+                        model: model.name.clone(),
+                        bronze_fingerprint: Some(fp.clone()),
+                    });
+                }
                 let mode = materialize.effective_mode();
 
                 // WAP: write to stage path first; publish only after audit.
@@ -624,6 +637,23 @@ impl TransformationEngine {
                             mat = ?model.materialization,
                             "registered model for ref()"
                         );
+                    }
+                }
+
+                // Relationship tests after model is registered for ref() (parent dims must exist).
+                if let Some(fm) = model.frontmatter.as_ref() {
+                    if let Some(tests) = fm.tests.as_ref() {
+                        if let Some(rels) = tests.relationships.as_ref() {
+                            if !rels.is_empty() {
+                                check_relationships(
+                                    &self.ctx,
+                                    &model.name,
+                                    rels,
+                                    tests.should_fail_on_error(),
+                                )
+                                .await?;
+                            }
+                        }
                     }
                 }
 
@@ -825,12 +855,18 @@ async fn execute_model_collect(
             model.name, model.compiled_sql
         )
     })?;
-    let batches = df.collect().await.with_context(|| {
+    let mut batches = df.collect().await.with_context(|| {
         format!(
             "E_RBT_SQL: collect failed for model '{}'",
             model.name
         )
     })?;
+    if let Some(ref lin) = write_opts.lineage {
+        batches = batches
+            .iter()
+            .map(|b| stamp_batch(b, lin))
+            .collect::<Result<Vec<_>>>()?;
+    }
     let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
 
     MultiFormatWriter::write_batches(&batches, &model.output_format, dest_path)?;
@@ -859,8 +895,78 @@ async fn execute_model_collect(
         }
     }
 
-    let _ = write_opts; // reserved for collect-path parquet props if we unify further
     Ok(row_count)
+}
+
+/// FK-ish relationship checks: orphan child keys vs parent model table.
+async fn check_relationships(
+    ctx: &SessionContext,
+    child_model: &str,
+    rels: &[crate::core::frontmatter::RelationshipTest],
+    fail_on_error: bool,
+) -> Result<()> {
+    for rel in rels {
+        let parent_col = rel.parent_column();
+        // Escape double-quotes in identifiers lightly (model names are [a-z0-9_]).
+        let sql = format!(
+            r#"SELECT COUNT(*) AS orphan_cnt FROM "{child}" c
+WHERE c."{child_col}" IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM "{parent}" p WHERE p."{parent_col}" = c."{child_col}"
+  )"#,
+            child = child_model.replace('"', ""),
+            child_col = rel.column.replace('"', ""),
+            parent = rel.to_model.replace('"', ""),
+            parent_col = parent_col.replace('"', ""),
+        );
+        let df = ctx.sql(&sql).await.with_context(|| {
+            format!(
+                "E_RBT_RELATIONSHIP: SQL failed for {}.{} → {}.{}: {sql}",
+                child_model, rel.column, rel.to_model, parent_col
+            )
+        })?;
+        let batches = df.collect().await?;
+        use arrow::array::Array;
+        let orphans = batches
+            .first()
+            .map(|b| {
+                let col = b.column(0);
+                if col.len() == 0 || col.is_null(0) {
+                    return 0i64;
+                }
+                if let Some(a) = col.as_any().downcast_ref::<arrow::array::Int64Array>() {
+                    return a.value(0);
+                }
+                if let Some(a) = col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
+                    return a.value(0) as i64;
+                }
+                if let Some(a) = col.as_any().downcast_ref::<arrow::array::Int32Array>() {
+                    return i64::from(a.value(0));
+                }
+                0
+            })
+            .unwrap_or(0);
+        if orphans > 0 {
+            let msg = format!(
+                "E_RBT_RELATIONSHIP: model '{child_model}' column '{}' has {orphans} value(s) \
+                 not found in {}.{}",
+                rel.column, rel.to_model, parent_col
+            );
+            if fail_on_error {
+                bail!("{msg}");
+            }
+            tracing::warn!("{msg}");
+        } else {
+            tracing::info!(
+                "model '{}': relationship {} → {}.{} ok",
+                child_model,
+                rel.column,
+                rel.to_model,
+                parent_col
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Path used to re-read a model from the lake after materialize.

@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.0] — 2026-08-01
+
+### Added (P6 — gold default surface)
+
+- **Parts sources (G1):** `parts: true` / auto-detect `.parts` dirs and `_rbt_manifest.json`; multi-file parquet registration
+- **Lineage stamps (G8):** frontmatter `lineage_stamp: true` → `_rbt_run_id`, `_rbt_contract_version`, `_rbt_model`, `_rbt_bronze_fingerprint`
+- **Relationship tests (G6):** `tests.relationships` FK-ish checks vs already-materialised models
+- Docs: [docs/GOLD_DEFAULT.md](docs/GOLD_DEFAULT.md) (parts, completeness filters, lineage, tests, env roots)
+- Example gold models on `complex_bronze_landing`: `dim_site`, `fact_units`
+
 ## [0.6.0] — 2026-08-01
 
 ### Added (P5a — scoped lakes & optional bronze)

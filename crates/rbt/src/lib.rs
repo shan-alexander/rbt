@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.6.0"
+//! rbt-datalake = "0.7.0"
 //! ```
 //!
 //! ## Quick start (library)
@@ -33,7 +33,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.6.0")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.7.0")]
 
 pub mod core;
 pub mod engine;
@@ -52,8 +52,9 @@ pub use core::{
     DependencyRef, DiagnosticSeverity, IcebergConfig, IcebergWriteMode, Materialization,
     MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult,
     ModelTests, OnMissing, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
-    RefBackend, RefStrategy, RunReceipt, RunScope, RunStatus, ScanConfig, SelectMode, SelectToken,
-    SourceFormat, SqlModelParser, StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES,
+    RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
+    SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
+    DEFAULT_MAX_ROW_GROUP_BYTES,
     DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 
@@ -67,11 +68,13 @@ pub use engine::udf::{register_builtin_udfs, register_scalar_udf, BUILTIN_UDF_NA
 
 pub use materializer::{
     clear_incremental_parts, incremental_ref_path, materialize_incremental_append_stream,
-    materialize_stream, new_wap_run_id, sibling_iceberg_dir, verify_iceberg_catalog_table,
+    materialize_stream, new_wap_run_id, sibling_iceberg_dir, stamp_batch, verify_iceberg_catalog_table,
     wap_publish, write_iceberg_catalog_batches, write_iceberg_fs_table, write_parquet_stream,
-    IcebergCatalogOptions, IcebergCatalogWriteStats, MaterializeWriteOptions, MultiFormatWriter,
-    StreamWriteStats, WapAuditLog, WapMaterializer, WapModelPaths, WapPhase, WapStatus,
+    IcebergCatalogOptions, IcebergCatalogWriteStats, LineageStamp, MaterializeWriteOptions,
+    MultiFormatWriter, StreamWriteStats, WapAuditLog, WapMaterializer, WapModelPaths, WapPhase,
+    WapStatus,
 };
+pub use scan::parts::{is_parts_directory, list_part_files, PartsManifest};
 pub use measure::{
     default_report_path, list_scenarios, run_measure_scenario, write_measure_report, MeasureReport,
     ModeCompare, SCENARIO_COMPLEX_BRONZE, SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE,
@@ -81,6 +84,7 @@ pub use measure::{
 
 pub use json::{JShiftExtractor, JsonExtractSpec};
 pub use scan::{parse_hive_partitions, LakeScanner, ScanRequest};
+// parts re-exported above
 
 pub use testing::{
     assertions_from_model_tests, Assertion, RecordBatchValidator, StreamingAssertionRunner,

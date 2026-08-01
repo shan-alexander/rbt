@@ -71,11 +71,11 @@ Analysis backbone: [[Bronze-to-silver maturity gap matrix]].
 
 ### P6 — Gold default
 
-- [ ] External **parts-dir sources** (+ optional manifest awareness) — G1
-- [ ] Lineage stamp helpers (run id / fingerprint / model version columns or metadata) — G8
-- [ ] Stronger grain / FK-ish / not_null test tiers as CI story — G6
-- [ ] Completeness filter patterns documented (G2) without product-specific status enums in core
-- [ ] Env roots cookbook (G10 already works — document)
+- [x] External **parts-dir sources** (+ optional manifest awareness) — G1
+- [x] Lineage stamp helpers (`lineage_stamp: true`) — G8
+- [x] Stronger grain / FK-ish / not_null test tiers (`tests.relationships`) — G6
+- [x] Completeness filter patterns documented (G2) in GOLD_DEFAULT.md
+- [x] Env roots cookbook (G10) in GOLD_DEFAULT.md
 
 ### P7 — Merge / SCD
 
@@ -109,7 +109,7 @@ Analysis backbone: [[Bronze-to-silver maturity gap matrix]].
 
 ## In Progress
 
-- [/] P6 gold default surface (external parts, lineage stamps)
+- [/] P7 merge / SCD (Iceberg-backed upsert)
 
 ## QA
 
@@ -126,6 +126,7 @@ Analysis backbone: [[Bronze-to-silver maturity gap matrix]].
 - [x] Gap matrix analysis + dual-track plan + [[Complex bronze landing zones]] goal
 - [x] P5a + P5b shipped in **0.6.0** (run scope, empty sources, receipts, skip-if-match)
 - [x] P5c measure packs (`stream_vs_collect`, `whale_synthetic`, `complex_bronze`)
+- [x] P6 gold default (**0.7.0**): parts sources, lineage stamps, relationships
 
 ## Cancelled
 

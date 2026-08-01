@@ -7,6 +7,7 @@ use crate::core::dag::OutputFormat;
 use crate::core::project::{
     MaterializeConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
 };
+use crate::materializer::lineage::{stamp_batch, stamped_schema, LineageStamp};
 use crate::testing::{Assertion, StreamingAssertionRunner, ValidationResult};
 use anyhow::{bail, Context, Result};
 use arrow::datatypes::SchemaRef;
@@ -40,6 +41,8 @@ pub struct MaterializeWriteOptions {
     /// Iceberg write backend for `OutputFormat::Iceberg`.
     pub iceberg_mode: crate::core::project::IcebergWriteMode,
     pub iceberg_namespace: String,
+    /// When set, stamp lineage columns onto each batch before write (P6).
+    pub lineage: Option<LineageStamp>,
 }
 
 impl Default for MaterializeWriteOptions {
@@ -50,6 +53,7 @@ impl Default for MaterializeWriteOptions {
             fail_fast_assertions: true,
             iceberg_mode: crate::core::project::IcebergWriteMode::Catalog,
             iceberg_namespace: "rbt".into(),
+            lineage: None,
         }
     }
 }
@@ -62,7 +66,13 @@ impl MaterializeWriteOptions {
             fail_fast_assertions,
             iceberg_mode: cfg.iceberg.mode,
             iceberg_namespace: cfg.iceberg.namespace.clone(),
+            lineage: None,
         }
+    }
+
+    pub fn with_lineage(mut self, stamp: LineageStamp) -> Self {
+        self.lineage = Some(stamp);
+        self
     }
 }
 
@@ -195,7 +205,12 @@ pub async fn write_parquet_stream(
     opts: &MaterializeWriteOptions,
     assertions: &[Assertion],
 ) -> Result<StreamWriteStats> {
-    let schema = stream.schema();
+    let base_schema = stream.schema();
+    let schema: SchemaRef = if let Some(ref lin) = opts.lineage {
+        stamped_schema(base_schema.as_ref(), lin)
+    } else {
+        base_schema.clone()
+    };
     let partial = partial_path_for(destination_path);
     remove_if_exists(&partial);
     if let Some(parent) = partial.parent() {
@@ -223,11 +238,14 @@ pub async fn write_parquet_stream(
     let mut batches = 0usize;
     let result = async {
         while let Some(item) = stream.next().await {
-            let batch = item.map_err(|e| {
+            let mut batch = item.map_err(|e| {
                 anyhow::anyhow!("E_RBT_MATERIALIZE_STREAM: DataFusion stream error: {e}")
             })?;
             if batch.num_rows() == 0 && batch.num_columns() == 0 {
                 continue;
+            }
+            if let Some(ref lin) = opts.lineage {
+                batch = stamp_batch(&batch, lin)?;
             }
             if !runner.is_empty() {
                 runner.observe_batch(&batch).map_err(|e| {

@@ -5,6 +5,7 @@
 
 pub mod iceberg_catalog;
 pub mod incremental;
+pub mod lineage;
 pub mod stream;
 pub mod wap;
 
@@ -16,6 +17,7 @@ pub use incremental::{
     clear_incremental_parts, incremental_ref_path, load_manifest, materialize_incremental_append_stream,
     parts_dir_for_parquet, IncrementalManifest,
 };
+pub use lineage::{stamp_batch, stamped_schema, LineageStamp};
 pub use stream::{
     atomic_publish, load_parquet_batches, materialize_stream, partial_path_for,
     write_empty_parquet, write_parquet_batches_atomic, write_parquet_stream, MaterializeWriteOptions,

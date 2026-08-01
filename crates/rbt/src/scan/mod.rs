@@ -1,6 +1,9 @@
 //! `rbt::scan`: Multi-format bronze lake scanners producing Arrow `RecordBatch`es.
 //!
 //! Formats: JSONL (jshift), JSON, Parquet, CSV, Arrow IPC (file/stream), log, txt, TOML.
+//! Parts directories: [`parts`] for multi-file parquet tables (P6).
+
+pub mod parts;
 
 use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
 use crate::core::paths::{resolve_project_path, validate_glob_patterns, PathGlobSet};

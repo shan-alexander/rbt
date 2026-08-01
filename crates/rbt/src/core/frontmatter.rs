@@ -134,6 +134,26 @@ impl fmt::Display for SourceFormat {
     }
 }
 
+/// FK-style relationship check: every non-null value in `column` must exist in
+/// `to_model.to_column` (parent must already be materialised / registered).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelationshipTest {
+    /// Child column on this model.
+    pub column: String,
+    /// Parent model name (same DAG; must be registered for `ref()`).
+    #[serde(alias = "to", alias = "ref")]
+    pub to_model: String,
+    /// Parent column (defaults to same name as `column` when omitted).
+    #[serde(default, alias = "field")]
+    pub to_column: Option<String>,
+}
+
+impl RelationshipTest {
+    pub fn parent_column(&self) -> &str {
+        self.to_column.as_deref().unwrap_or(self.column.as_str())
+    }
+}
+
 /// Declared data-quality tests for a model (run after materialization when present).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ModelTests {
@@ -146,6 +166,9 @@ pub struct ModelTests {
     /// Map of column → allowed string values.
     #[serde(default)]
     pub accepted_values: Option<std::collections::HashMap<String, Vec<String>>>,
+    /// FK-ish checks against already-materialised models (P6 / G6).
+    #[serde(default)]
+    pub relationships: Option<Vec<RelationshipTest>>,
     /// When true (default), failed tests abort `rbt run` for that model.
     #[serde(default)]
     pub fail_on_error: Option<bool>,
@@ -159,6 +182,11 @@ impl ModelTests {
                 .accepted_values
                 .as_ref()
                 .map(|m| m.is_empty())
+                .unwrap_or(true)
+            && self
+                .relationships
+                .as_ref()
+                .map(|r| r.is_empty())
                 .unwrap_or(true)
     }
 
@@ -255,6 +283,14 @@ pub struct StagingFrontmatter {
     /// semantics in the model; rbt may use this for materialization defaults later.
     #[serde(default)]
     pub stage_mode: Option<String>,
+    /// When true, scan_path is a multi-part parquet directory (`*.parts` / `_rbt_manifest.json`).
+    /// Also auto-detected when the resolved path is a parts directory.
+    #[serde(default)]
+    pub parts: Option<bool>,
+    /// Stamp `_rbt_run_id`, `_rbt_contract_version`, `_rbt_model` (+ optional fingerprint)
+    /// onto each output row at materialize time (P6 lineage).
+    #[serde(default)]
+    pub lineage_stamp: Option<bool>,
 
     /// Logical grain of the model (e.g. `[symbol, timestamp_ns]`).
     #[serde(default)]
@@ -310,6 +346,14 @@ impl StagingFrontmatter {
 
     pub fn on_missing_policy(&self) -> OnMissing {
         self.on_missing.unwrap_or(OnMissing::Error)
+    }
+
+    pub fn wants_lineage_stamp(&self) -> bool {
+        self.lineage_stamp.unwrap_or(false)
+    }
+
+    pub fn wants_parts_source(&self) -> bool {
+        self.parts.unwrap_or(false)
     }
 
     /// Build Arrow schema for empty bronze frames (`on_missing: empty`).

@@ -37,7 +37,14 @@ cargo build -p rbt-datalake --release
   --skip-if-match
 ```
 
-Silver outputs under `lake/silver/stage/` and `lake/silver/tf/`.
+Silver outputs under `lake/silver/stage/` and `lake/silver/tf/`.  
+Gold: `dim_site`, `fact_units` (lineage stamps + relationship test) under `lake/gold/`.
+
+```bash
+# Gold subgraph only (ancestors included)
+./target/release/rbt run -p examples/complex_bronze_landing -s fact_units --format parquet \
+  --var domain=acme.com --var report_date=2026-07-29 --var run_id=r1
+```
 
 ## Stage modes (author intent)
 
