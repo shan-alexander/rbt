@@ -1,8 +1,7 @@
-# Complex multi-artifact bronze → silver stage/tf → gold star (Kimball-aligned).
-# Generic Hive-ish landing zone: domain= / report_date= / run_id= + artifact families.
+# Multi-artifact bronze → silver stage endpoints → gold transforms → gold marts.
 name: complex_bronze_landing
-version: "0.2.0"
-contract_version: "p6-gold-v1"
+version: "0.3.0"
+contract_version: "topology-v1"
 models_dir: models
 target_path: $lake/gold
 
@@ -14,9 +13,10 @@ layers:
     path: models/staging
     target_path: $lake/silver/stage
     default_format: parquet
+  # Gold transforms: ref stg_* only (silver endpoints). Never silver/tf after stg.
   transforms:
     path: models/transforms
-    target_path: $lake/silver/tf
+    target_path: $lake/gold/tf
     default_format: parquet
   marts:
     path: models/marts

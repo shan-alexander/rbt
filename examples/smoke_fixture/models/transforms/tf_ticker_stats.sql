@@ -1,5 +1,7 @@
 ---
-description: Per-ticker rollup for smoke dim
+description: >
+  Gold transform: per-ticker rollup from silver stage endpoint stg_trades.
+  Writes under gold/tf (not silver/tf).
 grain: [ticker]
 unique_key: [ticker]
 tests:
@@ -11,7 +13,7 @@ columns:
     context: Prep for dim
   trade_count:
     description: Count of trades
-    context: From staging
+    context: From silver stage
   avg_price:
     description: Average price
     context: Simple metric

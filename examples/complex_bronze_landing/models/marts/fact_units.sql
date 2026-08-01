@@ -1,7 +1,7 @@
 ---
 description: >
-  one row per planned url per report_date per run_id. Thin fact: site_sk FK + measures/flags
-  from silver transform tf_unit_status; no multi-source recon here.
+  one row per planned url per report_date per run_id. Thin gold fact: site_sk FK +
+  measures/flags from gold transform tf_unit_status (which only ref'd silver stg_*).
 lineage_stamp: true
 grain: [url, report_date, run_id]
 tests:

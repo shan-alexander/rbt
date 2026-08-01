@@ -56,12 +56,15 @@ my_rbt_project/
 
 ### Decision 2: Strict layer dependency boundary enforcement
 
-1. **Staging (`stg_`)**: May reference external lake sources (`source()`). Cannot reference `tf_` or mart tables.
-2. **Transforms (`tf_`)**: May only reference `stg_` or sibling `tf_`. **Cannot** reference mart tables (`dim_`, `fact_`, `obt_`).
-3. **Marts (`dim_`, `fact_`, `obt_`)**: May reference `tf_` or upstream marts (e.g. `obt_` → `dim_` / `fact_`).
+Medallion topology (see [GOLD_DEFAULT.md](../GOLD_DEFAULT.md)):
+
+1. **Staging (`stg_`)**: Silver **endpoints**. May `source()` bronze and/or `ref()` silver prep transforms. Cannot ref other `stg_*` or marts.
+2. **Transforms (`tf_`)**: Either **silver prep** (ref bronze/`tf_*` only → then stg lands) or **gold prep** (ref **`stg_*` only**). A single `tf_*` cannot ref both `stg_*` and `tf_*` (`E_RBT_LAYER_TRANSFORM_BAND`). Cannot ref marts.
+3. **Marts (`dim_`, `fact_`, `obt_`)**: Gold endpoints. May ref gold transforms and other marts (e.g. fact→dim, obt→dim/fact). Prefer not to scan bronze/parts directly.
+
+Default example paths: `silver/stage` (stg), `gold/tf` (gold transforms), `gold` (marts).
 
 Violations fail at `rbt compile` / `rbt run`.
-
 ### Decision 3: Staging SQL frontmatter YAML
 
 Staging models support YAML frontmatter on `.sql` files for lake scan parameters:

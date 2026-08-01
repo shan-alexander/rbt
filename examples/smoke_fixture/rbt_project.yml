@@ -18,11 +18,12 @@ roots:
 layers:
   staging:
     path: models/staging
-    target_path: $lake/silver
+    target_path: $lake/silver/stage
     default_format: parquet
+  # Gold transforms: ref stg_* only (silver endpoints)
   transforms:
     path: models/transforms
-    target_path: $lake/silver
+    target_path: $lake/gold/tf
     default_format: parquet
   marts:
     path: models/marts

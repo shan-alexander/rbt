@@ -271,7 +271,8 @@ impl Default for RbtProjectConfig {
             "staging".to_string(),
             LayerConfig {
                 path: PathBuf::from("models/staging"),
-                target_path: PathBuf::from("lake/silver"),
+                // Silver endpoints (stg_*)
+                target_path: PathBuf::from("lake/silver/stage"),
                 default_format: Some("parquet".to_string()),
             },
         );
@@ -279,7 +280,8 @@ impl Default for RbtProjectConfig {
             "transforms".to_string(),
             LayerConfig {
                 path: PathBuf::from("models/transforms"),
-                target_path: PathBuf::from("lake/gold"),
+                // Gold transforms (ref stg_* only)
+                target_path: PathBuf::from("lake/gold/tf"),
                 default_format: Some("parquet".to_string()),
             },
         );
@@ -546,7 +548,10 @@ mod tests {
             ModelLayer::Staging,
             "parquet",
         )?;
-        assert_eq!(stg_path, project_dir.join("lake/silver/stg_trades.parquet"));
+        assert_eq!(
+            stg_path,
+            project_dir.join("lake/silver/stage/stg_trades.parquet")
+        );
 
         let tf_path = config.resolve_model_target_path(
             project_dir,
@@ -554,7 +559,10 @@ mod tests {
             ModelLayer::Transform,
             "parquet",
         )?;
-        assert_eq!(tf_path, project_dir.join("lake/gold/tf_1m_bars.parquet"));
+        assert_eq!(
+            tf_path,
+            project_dir.join("lake/gold/tf/tf_1m_bars.parquet")
+        );
 
         let mart_path = config.resolve_model_target_path(
             project_dir,
@@ -801,10 +809,10 @@ target_path: lake/gold
                 DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
             );
             let silver = cfg.resolve_layer_target_dir(&dir, ModelLayer::Staging)?;
+            let silver_s = silver.to_string_lossy();
             assert!(
-                silver.ends_with("lake/silver") || silver.ends_with("lake\\silver"),
-                "staging target for {rel}: {}",
-                silver.display()
+                silver_s.contains("lake/silver") || silver_s.contains("lake\\silver"),
+                "staging target for {rel}: {silver_s}"
             );
             // DAG builds for smoke always; e2e only if models present
             if dir.join("models").is_dir() {

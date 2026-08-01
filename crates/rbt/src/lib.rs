@@ -13,7 +13,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.7.1"
+//! rbt-datalake = "0.7.2"
 //! ```
 //!
 //! ## Quick start (library)
@@ -33,7 +33,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.7.1")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.7.2")]
 
 pub mod core;
 pub mod engine;

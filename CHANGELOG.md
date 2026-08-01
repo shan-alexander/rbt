@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.2] — 2026-08-01
+
+### Fixed (medallion topology)
+
+- **Silver endpoints are `stg_*` only.** Never `stg_*` → silver/`tf_*` → gold.
+- **Gold transforms** (`models/transforms` → `gold/tf`) may **only `ref` `stg_*`**.
+- **Silver prep transforms** may only ref bronze/`tf_*`, then land `stg_*` (optional).
+- Engine: `E_RBT_LAYER_TRANSFORM_BAND` if a `tf_*` refs both `stg_*` and `tf_*`.
+- Staging may `ref` silver prep transforms; cannot ref other `stg_*` or marts.
+- Examples (smoke, full_e2e, complex_bronze) use `silver/stage` + `gold/tf` + `gold`.
+- Docs: [GOLD_DEFAULT.md](docs/GOLD_DEFAULT.md), ADR-001 layer decision updated.
+
 ## [0.7.1] — 2026-08-01
 
 ### Fixed / docs (Kimball gold hygiene)

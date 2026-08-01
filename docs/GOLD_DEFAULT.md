@@ -1,253 +1,166 @@
-# Gold default surface (P6+)
+# Medallion + gold star topology (P6+)
 
-How rbt supports **silver stage → gold star** work, aligned with Kimball layer
-placement ([star-schema-data-modeling-rules](concepts/star-schema-data-modeling-rules.md)).
-
-Modeling is guidelines that keep lakes scalable and misstatement risk low — not
-religion. When a consumer needs correct data, structure still matters for ops and
-review. This doc is the **contract** for gold work in rbt.
+rbt models follow a **silver endpoint / gold construction** topology. This matches
+Kimball layering ([star-schema-data-modeling-rules](concepts/star-schema-data-modeling-rules.md))
+and keeps complexity scalable.
 
 ---
 
-## 1. Two axes: medallion paths vs model layers
-
-| Axis | What it is | rbt knobs |
-|------|------------|-----------|
-| **Medallion (physical)** | Where files live on the lake | `layers.*.target_path` (`silver/stage`, `silver/tf`, `gold`, …) |
-| **Kimball / rbt layers (logical)** | What role a model plays | name prefix → `stg_` / `tf_` / `dim_` / `fact_` / `obt_` |
+## 1. Canonical flow
 
 ```text
 Bronze (external files)
-    │  source() + scan frontmatter
-    ▼
-stg_*     silver/stage     technical landing, contracts, light types
-    │  ref()
-    ▼
-tf_*      silver/tf        silver transforms (recon, cleanse, status) — OK and common
-    │  ref()
-    ▼
-dim_*/fact_*/obt_*   gold    star marts (SK/NK dims, thin facts, OBT from star)
-
-Optional later (same project or downstream mart):
-  gold tf_*   only refs/sources silver **stage** (stg_*), not silver/tf
-              then feeds gold dim/fact — for multi-mart or “gold prep only from stage”
+        │  source() + scan frontmatter
+        ▼
+┌─────────────────────── SILVER ───────────────────────┐
+│  optional silver prep transforms (tf_*)                │
+│     • ref bronze (source) and/or other silver tf_*     │
+│     • never ref stg_*                                  │
+│                        │                               │
+│                        ▼                               │
+│  stg_*  ──────── SILVER ENDPOINTS ────────             │
+│     • 1:1 bronze→stg when logic is simple              │
+│     • or ref(tf_base_*) when prep is shared/complex    │
+│     • never feed another silver tf_* after stg_*       │
+└────────────────────────┬──────────────────────────────┘
+                         │  ref(stg_*) only
+                         ▼
+┌─────────────────────── GOLD ─────────────────────────┐
+│  gold transforms (tf_*)                                │
+│     • ref only silver stage endpoints (stg_*)          │
+│     • never ref silver tf_* or other gold bands wrongly│
+│     • physical path typically $lake/gold/tf            │
+│                        │                               │
+│                        ▼                               │
+│  dim_* / fact_* / obt_*  ── GOLD ENDPOINTS             │
+│     • thin facts (SK FKs + measures + carried flags)   │
+│     • dims: SK + NK + attributes + Unknown (−1)        │
+│     • obt from dim+fact only (P7)                      │
+└────────────────────────────────────────────────────────┘
 ```
 
-### Rules of thumb (rbt)
+### Never
 
-| Do | Don’t |
-|----|--------|
-| Put multi-source outer joins, status, controlled dedup in **`tf_*`** | Put that logic on a **fact** |
-| Keep **facts thin**: dim SK FKs + measures + flags already on the transform | `DISTINCT` a fan-out away on a dim or fact |
-| Dims: surrogate key, natural key, attributes, **Unknown (−1)** | Dims as `SELECT DISTINCT` from stage with no SK |
-| Fact FK: join dim on NK → take SK, `COALESCE(..., -1)` | NULL surrogate keys on facts |
-| `source()` external **bronze or published stage/dim/fact endpoints** | `source()` an upstream project’s **`tf_*`** (private, unstable) |
-| Silver/`tf_*` under `silver/tf` when it is still silver prep | Pretend every `tf_*` is “gold” just because it is relational |
-| Gold transforms (if you use them): **`ref`/`source` only silver stage (`stg_*`)** | Gold transforms depending on silver/`tf_*` |
+| Anti-pattern | Why |
+|--------------|-----|
+| `stg_*` → silver `tf_*` → gold | **`stg_*` is the silver endpoint**; do not hang more silver tf after it |
+| `stg_*` → silver `tf_*` → gold `tf_*` | Same; gold tf should read **stg_** only |
+| `source()` an upstream project’s `tf_*` | Private, unstable; use published stg/dim/fact contracts |
+| Gold `tf_*` that refs both `stg_*` and `tf_*` | Engine error `E_RBT_LAYER_TRANSFORM_BAND` |
 
-Silver transforms (`models/transforms` → `silver/tf`) are **allowed and correct** when
-they prepare stage data for marts. Gold transforms (optional second prep band) should
-**not** depend on silver transforms — only on silver stage (or published dim/fact
-endpoints in multi-mart setups).
+### When to use a silver prep transform
+
+| Situation | Prefer |
+|-----------|--------|
+| Bronze → stage is **1:1**, light cleanse | Logic **in `stg_*`** (no intermediate tf) |
+| Prep **reused** by multiple stg tables, or heavy multi-bronze collapse | `tf_base_*` (silver) → `stg_*` |
+| Multi-stg recon / status for **gold** | Gold `tf_*` that `ref`s **stg_*** only |
 
 ---
 
-## 2. Recommended same-project DAG
+## 2. Project layout (recommended)
 
-```text
-bronze files
-  → stg_*          (scan contracts; optional on_missing: empty)
-  → tf_*           (silver transforms: grain, recon, status)
-  → dim_* / fact_* (gold: SK dims, thin facts, relationships on SKs)
-  → obt_*          (from dim+fact only; separate from core star — P7+)
+```yaml
+layers:
+  staging:
+    path: models/staging
+    target_path: $lake/silver/stage      # silver endpoints
+    default_format: parquet
+  transforms:
+    path: models/transforms
+    target_path: $lake/gold/tf           # gold transforms (ref stg_* only)
+    default_format: parquet
+  # Optional: silver prep before stage (ref bronze / other silver tf only)
+  # silver_transforms:
+  #   path: models/silver_transforms
+  #   target_path: $lake/silver/tf
+  marts:
+    path: models/marts
+    target_path: $lake/gold              # dim / fact / obt
+    default_format: parquet
 ```
 
-Cross-project / multi-mart:
-
-```text
-upstream published dim/fact  →  source() into this project’s stg_ or gold-prep tf_
-                             →  this mart’s dim/fact/obt
-Never: source() upstream tf_* or stg internals as a permanent contract.
-```
+`models/transforms` is the **gold transform** band in the default examples. Put rare
+pre-stage silver prep under a separate directory/config when you need bronze→tf→stg.
 
 ---
 
-## 3. External parts directories (engine capability)
+## 3. Engine enforcement
 
-Incremental silver may land as:
+| Rule | Enforcement |
+|------|-------------|
+| `tf_*` cannot ref `dim_`/`fact_`/`obt_` | Hard error (layer boundary) |
+| `stg_*` cannot ref marts or other `stg_*` | Hard error |
+| `stg_*` **may** ref `tf_*` (silver prep → stage endpoint) | Allowed |
+| One `tf_*` cannot ref **both** `stg_*` and `tf_*` | Hard error `E_RBT_LAYER_TRANSFORM_BAND` |
+| `source(..., 'tf_*')` | Validate warning `W_RBT_SOURCE_UPSTREAM_TRANSFORM` |
+| Mart with scan/parts contract | Validate warning `W_RBT_MART_SCAN_CONTRACT` |
 
-```text
-$lake/silver/stage/stg_units.parts/
-  part-*.parquet
-  _rbt_manifest.json
-```
+---
 
-**Prefer** registering parts on a **staging** model (or a silver transform that only
-reads that stage), then `ref()` into transforms and marts:
+## 4. Parts, lineage, tests (engine capabilities)
+
+### External multi-part silver endpoints
+
+Prefer scan on **staging** (silver endpoint), then gold tf / marts `ref` that stg:
 
 ```sql
 ---
-# models/staging/stg_units.sql  — silver stage over published parts
+# models/staging/stg_units.sql
 source_format: parquet
 scan_path: $lake/silver/stage/stg_units.parts
 parts: true
-grain: [unit_id, report_date]
-tests:
-  not_null: [unit_id]
-  unique: [unit_id, report_date]
 ---
 SELECT * FROM {{ source('silver', 'stg_units') }}
 ```
 
 ```sql
 ---
-# models/transforms/tf_units_ready.sql  — silver tf: completeness filter, cleanse
+# models/transforms/tf_units_ready.sql  — gold transform
 ---
 SELECT * FROM {{ ref('stg_units') }}
-WHERE row_status = 'success'   -- project-defined status; not hardcoded in rbt
+WHERE row_status = 'success'
 ```
 
-```sql
----
-# models/marts/fact_units.sql  — gold fact: thin, SK FKs
-lineage_stamp: true
-grain: [unit_id, report_date]
-tests:
-  relationships:
-    - column: site_sk
-      to_model: dim_site
-      to_column: site_sk
----
-SELECT
-  COALESCE(d.site_sk, CAST(-1 AS BIGINT)) AS site_sk,
-  t.unit_id,
-  t.report_date,
-  t.amount
-FROM {{ ref('tf_units_ready') }} t
-LEFT JOIN {{ ref('dim_site') }} d
-  ON t.site_nk = d.site_nk AND COALESCE(d.is_unknown, false) = false
-```
+### Lineage stamps
 
-| Engine behavior | Detail |
-|-----------------|--------|
-| Manifest present | File list + order from `_rbt_manifest.json` |
-| No manifest | `*.parquet` under dir (skip `_` names), sorted |
-| `parts: true` on **marts** | Allowed but discouraged — `rbt validate` warns |
+`lineage_stamp: true` adds `_rbt_run_id`, `_rbt_contract_version`, `_rbt_model`,
+`_rbt_bronze_fingerprint`. Keep out of business grain.
 
-Same layout is written by `materialization: incremental_append`.
+### Relationships
+
+Prefer **SK → SK** on facts after Unknown-aware dim join (`COALESCE(fk, -1)`).
 
 ---
 
-## 4. Completeness filters
+## 5. Examples
 
-Do **not** hardcode product status enums in the engine. Define status on **stage or
-silver transform**, test with `accepted_values`, and let **gold facts carry flags
-through**, not re-derive multi-source status.
-
-```sql
--- on silver tf or stage
-WHERE row_status IN ('success')
-```
+| Project | Topology |
+|---------|----------|
+| [complex_bronze_landing](../examples/complex_bronze_landing/) | Multi-artifact bronze → `stg_*` endpoints → gold `tf_unit_status` → dim/fact |
+| [smoke_fixture](../examples/smoke_fixture/) | bronze → `stg_trades` → gold `tf_ticker_stats` → `dim_ticker` |
+| [full_e2e_rbt_example](../examples/full_e2e_rbt_example/) | bronze → `stg_ohlcv_*` → gold `tf_*` → dim/fact/obt |
 
 ---
 
-## 5. Lineage stamps (technical, not grain)
+## 6. Env roots & select
 
-```yaml
-lineage_stamp: true
-```
-
-| Column | Value |
-|--------|--------|
-| `_rbt_run_id` | Run id |
-| `_rbt_contract_version` | Contract version |
-| `_rbt_model` | Model name |
-| `_rbt_bronze_fingerprint` | Run bronze fingerprint when available |
-
-**Do not** put `_rbt_*` columns in business `grain` / `unique` keys.
+See [MULTI_ROOT_AND_PATH_GLOB.md](MULTI_ROOT_AND_PATH_GLOB.md).  
+Selective rebuild: `rbt run -s fact_units` includes ancestors.
 
 ---
 
-## 6. Tests: grain, unique, relationships
-
-```yaml
-description: "one row per ticker per bar timestamp"
-grain: [ticker, bar_ts]
-unique_key: [ticker, bar_ts]   # optional if tests.unique covers grain
-tests:
-  not_null: [ticker, bar_ts]
-  unique: [ticker, bar_ts]
-  accepted_values:
-    side: [B, S]
-  relationships:
-    - column: ticker_sk          # prefer SK, not natural key alone
-      to_model: dim_ticker
-      to_column: ticker_sk
-  fail_on_error: true
-```
-
-- **Grain** must be one sentence in `description` (human + agents).
-- **Relationships** run after the child model is registered; parents must be
-  ancestors (dims before facts). Prefer **SK → SK**.
-- Unknown member: include `site_sk = -1` (or project convention) on every dim;
-  facts use `COALESCE(fk, -1)`.
-
-`rbt validate` emits **warnings** when grain is set without a matching unique
-contract, when marts use `parts: true`, or when `source()` targets a `tf_*` /
-`int_*` name (upstream transform smell).
-
----
-
-## 7. Environment roots
-
-```yaml
-roots:
-  nonprod: /mnt/datalake/acme/nonprod/lake_us/lake
-  prod: /mnt/datalake/acme/prod/lake_us/lake
-layers:
-  staging:
-    target_path: $nonprod/silver/stage
-  transforms:
-    target_path: $nonprod/silver/tf
-  marts:
-    target_path: $nonprod/gold
-```
-
-See [MULTI_ROOT_AND_PATH_GLOB.md](MULTI_ROOT_AND_PATH_GLOB.md).
-
----
-
-## 8. Selective rebuild
-
-```bash
-rbt run -p my_project -s dim_site+ --var report_date=2026-07-29
-rbt run -p my_project -s fact_orders   # ancestors included on execute
-```
-
----
-
-## 9. Example
-
-[examples/complex_bronze_landing](../examples/complex_bronze_landing/): multi-artifact
-bronze → silver stage → silver `tf_unit_status` → gold `dim_site` (SK + Unknown) +
-`fact_units` (thin fact, SK FK, relationship on `site_sk`).
-
----
-
-## 10. Roadmap touchpoints
+## 7. Roadmap
 
 | Item | Status |
 |------|--------|
-| Parts / lineage / relationships | Shipped (0.7.x) |
-| SCD2 dimensions + merge | **P7** (Type-1 snapshots only until then) |
-| First-class OBT layer rules | **P7** |
-| REST / remote Iceberg SoR | P8 |
-
----
+| Topology + band enforcement | 0.7.2+ |
+| SCD2 dims + merge | **P7** |
+| OBT layer rules | **P7** |
+| Remote Iceberg SoR | P8 |
 
 ## Related
 
 - [concepts/star-schema-data-modeling-rules.md](concepts/star-schema-data-modeling-rules.md)
 - [COMPLEX_BRONZE_AND_RUN_SCOPE.md](COMPLEX_BRONZE_AND_RUN_SCOPE.md)
-- [ADR_001_PROJECT_STRUCTURE.md](adr/ADR_001_PROJECT_STRUCTURE.md)
-- [ICEBERG_SOR.md](ICEBERG_SOR.md)
+- [adr/ADR_001_PROJECT_STRUCTURE.md](adr/ADR_001_PROJECT_STRUCTURE.md)

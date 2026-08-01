@@ -179,7 +179,7 @@ impl ModelDag {
                     if let Some(&dep_idx) = name_map.get(dep_name) {
                         let dep_node = &self.graph[dep_idx];
 
-                        // Enforce Layer Boundary Rule: Transform models cannot depend on Mart models
+                        // Transform models cannot depend on Mart models (facts/dims are terminal for transforms)
                         if node.layer == ModelLayer::Transform && dep_node.layer == ModelLayer::Mart
                         {
                             bail!(
@@ -189,13 +189,29 @@ impl ModelDag {
                             );
                         }
 
-                        // Enforce Layer Boundary Rule: Staging models cannot depend on downstream models
+                        // Staging is the silver endpoint: may ref silver prep transforms (tf_ before stg),
+                        // but not marts or other staging models.
                         if node.layer == ModelLayer::Staging {
-                            bail!(
-                                "Illegal DAG Layer Boundary: Staging model '{}' (stg_) cannot depend on downstream model '{}'",
-                                node.name,
-                                dep_node.name
-                            );
+                            match dep_node.layer {
+                                ModelLayer::Mart => {
+                                    bail!(
+                                        "Illegal DAG Layer Boundary: Staging model '{}' (stg_) cannot depend on Mart model '{}'",
+                                        node.name,
+                                        dep_node.name
+                                    );
+                                }
+                                ModelLayer::Staging => {
+                                    bail!(
+                                        "Illegal DAG Layer Boundary: Staging model '{}' cannot depend on staging model '{}' \
+                                         (stg_* are silver endpoints; chain prep in tf_* then land stg_*)",
+                                        node.name,
+                                        dep_node.name
+                                    );
+                                }
+                                ModelLayer::Transform => {
+                                    // OK: bronze → tf_base_* → stg_* (optional silver prep before stage endpoint)
+                                }
+                            }
                         }
 
                         edges.push((dep_idx, idx));
@@ -216,6 +232,39 @@ impl ModelDag {
 
         if is_cyclic_directed(&self.graph) {
             bail!("Circular dependency detected in model pipeline DAG!");
+        }
+
+        // Medallion transform band: never mix silver-prep and gold-prep deps on one tf.
+        // - Gold transforms: only ref stg_* (silver endpoints)
+        // - Silver prep transforms: only ref other tf_* (or bronze via source()), never stg_*
+        // - Never: stg_* → silver/tf_* (stg is endpoint; gold tf refs stg instead)
+        for &idx in self.node_map.values() {
+            let node = &self.graph[idx];
+            if node.layer != ModelLayer::Transform {
+                continue;
+            }
+            let mut refs_stg = false;
+            let mut refs_tf = false;
+            for dep in &node.dependencies {
+                if let DependencyRef::Model(dep_name) = dep {
+                    if let Some(&dep_idx) = self.node_map.get(dep_name) {
+                        match self.graph[dep_idx].layer {
+                            ModelLayer::Staging => refs_stg = true,
+                            ModelLayer::Transform => refs_tf = true,
+                            ModelLayer::Mart => {}
+                        }
+                    }
+                }
+            }
+            if refs_stg && refs_tf {
+                bail!(
+                    "E_RBT_LAYER_TRANSFORM_BAND: transform '{}' refs both stg_* and tf_*. \
+                     Gold transforms may only ref silver stage endpoints (stg_*). \
+                     Silver prep transforms may only ref bronze sources or other silver tf_* \
+                     (then land stg_*). Never stg_* → silver/tf_*.",
+                    node.name
+                );
+            }
         }
 
         Ok(())
@@ -772,6 +821,79 @@ mod tests {
             .to_string()
             .contains("Illegal DAG Layer Boundary"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn transform_cannot_mix_stg_and_tf_deps() -> Result<()> {
+        let mut dag = ModelDag::new();
+        dag.add_model(
+            "stg_a",
+            "SELECT 1 AS id FROM {{ source('b', 'x') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.add_model(
+            "tf_prep",
+            "SELECT 1 AS id FROM {{ source('b', 'y') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.add_model(
+            "tf_mixed",
+            "SELECT * FROM {{ ref('stg_a') }} a JOIN {{ ref('tf_prep') }} t ON 1=1",
+            Materialization::Table,
+            "db",
+        )?;
+        let err = dag.build_graph().unwrap_err().to_string();
+        assert!(
+            err.contains("E_RBT_LAYER_TRANSFORM_BAND"),
+            "got {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn staging_may_ref_silver_prep_transform() -> Result<()> {
+        let mut dag = ModelDag::new();
+        dag.add_model(
+            "tf_base_events",
+            "SELECT 1 AS id FROM {{ source('bronze', 'raw') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.add_model(
+            "stg_events",
+            "SELECT * FROM {{ ref('tf_base_events') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.build_graph()?;
+        Ok(())
+    }
+
+    #[test]
+    fn gold_transform_may_ref_only_stg() -> Result<()> {
+        let mut dag = ModelDag::new();
+        dag.add_model(
+            "stg_a",
+            "SELECT 1 AS id FROM {{ source('b', 'x') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.add_model(
+            "tf_gold_prep",
+            "SELECT * FROM {{ ref('stg_a') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.add_model(
+            "fact_a",
+            "SELECT * FROM {{ ref('tf_gold_prep') }}",
+            Materialization::Table,
+            "db",
+        )?;
+        dag.build_graph()?;
         Ok(())
     }
 

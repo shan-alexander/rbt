@@ -287,11 +287,11 @@ Outputs (paths relative to the example project):
 
 | Model | Path |
 |-------|------|
-| `stg_ohlcv_1m` | `lake/silver/stg_ohlcv_1m.parquet` |
-| `stg_ohlcv_1d` | `lake/silver/stg_ohlcv_1d.parquet` |
-| `tf_bar_metrics` | `lake/silver/tf_bar_metrics.parquet` |
-| `tf_bar_metrics_1d` | `lake/silver/tf_bar_metrics_1d.parquet` |
-| `tf_symbol` | `lake/silver/tf_symbol.parquet` |
+| `stg_ohlcv_1m` | `lake/silver/stage/stg_ohlcv_1m.parquet` (silver endpoint) |
+| `stg_ohlcv_1d` | `lake/silver/stage/stg_ohlcv_1d.parquet` |
+| `tf_bar_metrics` | `lake/gold/tf/tf_bar_metrics.parquet` (gold transform) |
+| `tf_bar_metrics_1d` | `lake/gold/tf/tf_bar_metrics_1d.parquet` |
+| `tf_symbol` | `lake/gold/tf/tf_symbol.parquet` |
 | `dim_symbol` | `lake/gold/dim_symbol.parquet` |
 | `fact_1m_bars` | `lake/gold/fact_1m_bars.parquet` |
 | `fact_1d_bars` | `lake/gold/fact_1d_bars.parquet` |
@@ -303,9 +303,9 @@ Outputs (paths relative to the example project):
 cd examples/full_e2e_rbt_example
 
 duckdb -c "
-SELECT 'stg_1m' t, count(*) c FROM read_parquet('lake/silver/stg_ohlcv_1m.parquet')
-UNION ALL SELECT 'tf_metrics_1m', count(*) FROM read_parquet('lake/silver/tf_bar_metrics.parquet')
-UNION ALL SELECT 'tf_symbol', count(*) FROM read_parquet('lake/silver/tf_symbol.parquet')
+SELECT 'stg_1m' t, count(*) c FROM read_parquet('lake/silver/stage/stg_ohlcv_1m.parquet')
+UNION ALL SELECT 'tf_metrics_1m', count(*) FROM read_parquet('lake/gold/tf/tf_bar_metrics.parquet')
+UNION ALL SELECT 'tf_symbol', count(*) FROM read_parquet('lake/gold/tf/tf_symbol.parquet')
 UNION ALL SELECT 'dim', count(*) FROM read_parquet('lake/gold/dim_symbol.parquet')
 UNION ALL SELECT 'fact_1m', count(*) FROM read_parquet('lake/gold/fact_1m_bars.parquet')
 UNION ALL SELECT 'obt', count(*) FROM read_parquet('lake/gold/obt_symbol_summary.parquet');

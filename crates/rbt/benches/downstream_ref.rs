@@ -303,9 +303,11 @@ fn bench_downstream_queries(c: &mut Criterion) {
 fn bench_e2e_lake_file(c: &mut Criterion) {
     let runtime = rt();
     let candidates = [
-        workspace_root().join("examples/full_e2e_rbt_example/lake/silver/stg_ohlcv_1d.parquet"),
+        workspace_root()
+            .join("examples/full_e2e_rbt_example/lake/silver/stage/stg_ohlcv_1d.parquet"),
         workspace_root().join("examples/full_e2e_rbt_example/lake/gold/fact_1d_bars.parquet"),
-        workspace_root().join("examples/full_e2e_rbt_example/lake/silver/stg_ohlcv_1m.parquet"),
+        workspace_root()
+            .join("examples/full_e2e_rbt_example/lake/silver/stage/stg_ohlcv_1m.parquet"),
     ];
 
     let path = candidates.into_iter().find(|p| p.is_file());

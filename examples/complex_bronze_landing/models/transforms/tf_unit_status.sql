@@ -1,5 +1,8 @@
 ---
-description: Outer-style unit reconciliation — plan ⟕ scrape ⟕ failures → row_status.
+description: >
+  Gold transform: one row per planned url per report_date per run_id.
+  Refs silver stage endpoints only (stg_*); outer recon plan ⟕ scrape ⟕ failures.
+  Physical path: gold/tf (not silver/tf — stg_* are already silver endpoints).
 stage_mode: full_refresh
 grain: [url, report_date, run_id]
 tests:

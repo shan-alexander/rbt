@@ -9,6 +9,8 @@ examples/smoke_fixture/lake/gold/
 examples/smoke_fixture/**/*.iceberg/
 examples/complex_bronze_landing/lake/silver/
 examples/complex_bronze_landing/lake/gold/
+examples/full_e2e_rbt_example/lake/silver/
+examples/full_e2e_rbt_example/lake/gold/
 examples/**/target/
 # rustbrain bootstrap / local agent scaffolding (knowledge notes under docs/goals etc. may be committed intentionally)
 AGENTS.md

@@ -20,8 +20,8 @@ cargo build -p rbt-datalake --release
 
 | Model | Path after run |
 |-------|----------------|
-| `stg_trades` | `lake/silver/stg_trades.parquet` |
-| `tf_ticker_stats` | `lake/silver/tf_ticker_stats.parquet` |
+| `stg_trades` | `lake/silver/stage/stg_trades.parquet` (silver endpoint) |
+| `tf_ticker_stats` | `lake/gold/tf/tf_ticker_stats.parquet` (gold transform) |
 | `dim_ticker` | `lake/gold/dim_ticker.parquet` |
 
 Expected: 3 staging rows after dedupe (ids 1,2,3), 2 tickers in dim.

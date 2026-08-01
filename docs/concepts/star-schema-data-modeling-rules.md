@@ -223,7 +223,12 @@ Fact:
 - **Gold**: Business star schema. `dim*` (conformed dimensions, typically SCD2) + `fact*` tables at the declared business grain. This is the analytical source of truth and the primary contract for downstream consumers.
 - **Serving / Semantic Layer**: Spice.ai (customer-facing). Used for curated views, OBTs, metric definitions, and acceleration (materializing hot subsets into DuckDB or Cayenne). Iceberg Gold remains the source of truth.
 
-**rbt mapping note:** rbt’s default layout is `staging` / `transforms` / `marts` ([[ADR-001 Project Layout]]). Typical lake paths: `silver/stage` for `stg_*`, **`silver/tf` for silver transforms** (recon/cleanse — allowed and correct), `gold` for `dim_*`/`fact_*`/`obt_*`. Optional **gold transforms** should only `ref`/`source` **silver stage** (`stg_*`), not silver/`tf_*`. Never `source()` an upstream project’s private transforms. See [[GOLD_DEFAULT]] / [GOLD_DEFAULT.md](../GOLD_DEFAULT.md).
+**rbt mapping note:** See [GOLD_DEFAULT.md](../GOLD_DEFAULT.md) for the full topology.
+
+- **`stg_*`** = **silver endpoints** (`silver/stage`). Prefer 1:1 bronze→stg when simple.
+- **Silver prep `tf_*`** (optional): ref bronze / other silver `tf_*` only, then land **`stg_*`**. Never hang silver `tf_*` *after* `stg_*`.
+- **Gold `tf_*`** (`gold/tf`): ref **only** `stg_*`, then feed dim/fact.
+- **`dim_*` / `fact_*` / `obt_*`**: gold endpoints. Never `source()` upstream private `tf_*`.
 **Must**
 - Keep the conformed star schema (`dim*` + `fact*`) in the Gold layer on Iceberg. Do not define core business grain, conformed dimensions, or fact logic in Spice.
 - Use Spice as a **semantic + acceleration layer** on top of Gold, not as the storage layer for the dimensional model.
