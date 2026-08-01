@@ -13,24 +13,27 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.5.0"
+//! rbt-datalake = "0.6.0"
 //! ```
 //!
 //! ## Quick start (library)
 //!
 //! ```rust,no_run
-//! use rbt::{RbtProjectConfig, TransformationEngine};
+//! use rbt::{RbtProjectConfig, RunScope, TransformationEngine};
 //! # async fn demo() -> anyhow::Result<()> {
 //! let project = std::path::Path::new(".");
 //! let config = RbtProjectConfig::load(project)?;
 //! let dag = config.build_dag(project, None)?;
 //! let engine = TransformationEngine::new();
-//! let _summary = engine.execute_dag(&dag, project, "./target/output").await?;
+//! let scope = RunScope::new().with_var("report_date", "2026-07-29");
+//! let _summary = engine
+//!     .execute_dag_with_scope(&dag, project, "./target/output", &config, &scope)
+//!     .await?;
 //! # Ok(())
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.5.0")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.6.0")]
 
 pub mod core;
 pub mod engine;
@@ -43,18 +46,21 @@ pub mod testing;
 // --- Public API (stable surface for library users) ---------------------------
 
 pub use core::{
-    model_has_test_contract, parse_select_spec, resolve_scan_path, scan_path_exists,
-    BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DependencyRef,
-    DiagnosticSeverity, IcebergConfig, IcebergWriteMode, Materialization, MaterializeConfig,
-    MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelTests, OutputFormat, PathGlobSet,
-    RbtProjectConfig, RbtTemplateEngine, RefBackend, RefStrategy, ScanConfig, SelectMode,
-    SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES,
+    apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version, expand_braced_vars,
+    model_has_test_contract, parse_logical_dtype, parse_select_spec, resolve_scan_path,
+    scan_path_exists, BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta,
+    DependencyRef, DiagnosticSeverity, IcebergConfig, IcebergWriteMode, Materialization,
+    MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult,
+    ModelTests, OnMissing, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
+    RefBackend, RefStrategy, RunReceipt, RunScope, RunStatus, ScanConfig, SelectMode, SelectToken,
+    SourceFormat, SqlModelParser, StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES,
     DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 
 pub use engine::{
-    register_bronze_for_model, register_bronze_sources_for_dag, BronzeRegistrationMode,
-    BronzeSourceMeta, BronzeTableProvider, DagExecutionSummary, PreviewResult, RbtEngineBuilder,
+    register_bronze_for_model, register_bronze_for_model_scoped, register_bronze_sources_for_dag,
+    register_bronze_sources_for_dag_scoped, BronzeRegistrationMode, BronzeSourceMeta,
+    BronzeTableProvider, DagExecutionSummary, PreviewResult, RbtEngineBuilder,
     TransformationEngine,
 };
 pub use engine::udf::{register_builtin_udfs, register_scalar_udf, BUILTIN_UDF_NAMES};
@@ -68,7 +74,9 @@ pub use materializer::{
 };
 pub use measure::{
     default_report_path, list_scenarios, run_measure_scenario, write_measure_report, MeasureReport,
-    SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE, SCENARIO_VALIDATE_DX,
+    ModeCompare, SCENARIO_COMPLEX_BRONZE, SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE,
+    SCENARIO_STREAM_VS_COLLECT, SCENARIO_VALIDATE_DX, SCENARIO_WHALE_SYNTHETIC, DEFAULT_WHALE_PARTS,
+    DEFAULT_WHALE_ROWS,
 };
 
 pub use json::{JShiftExtractor, JsonExtractSpec};

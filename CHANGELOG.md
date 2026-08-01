@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] — 2026-08-01
+
+### Added (P5a — scoped lakes & optional bronze)
+
+- **Run scope:** CLI `--var key=value` (repeatable), env `RBT_VAR_*` / `RBT_VARS`, library [`RunScope`](crates/rbt/src/core/run_scope.rs)
+- Template expansion `{key}` / `${key}` in `scan_path`, `path_glob`, `require_partitions`
+- Partition binds: vars merge into effective `require_partitions` for `partition_by` keys
+- **`on_missing: empty|error`** on bronze frontmatter — optional artifact families register typed empty frames
+- **`columns.*.dtype`** drives empty-frame Arrow schema (`utf8`, `int64`, `float64`, `bool`, …)
+- Frontmatter **`stage_mode`** hint (`full_refresh` | `latest_only` | `append` | `mirror_bronze`)
+- Project **`contract_version`** for fingerprint identity
+
+### Added (P5b — job contract)
+
+- **Bronze fingerprint** (fnv1a64 over filtered file set + contract version)
+- **`RunReceipt`** JSON under `{project}/.rbt/runs/` (+ `latest_{scope_key}.json`)
+- CLI `--skip-if-match`, `--run-id`, `--contract-version`, `--write-receipt`, `--receipt-json`
+- `TransformationEngine::execute_dag_with_scope`
+- Example: [examples/complex_bronze_landing](examples/complex_bronze_landing/) — multi-artifact outer reconciliation
+- Docs: [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md)
+
+### Added (P5c — prove scale)
+
+- Measure scenarios: `stream_vs_collect`, `whale_synthetic`, `complex_bronze`
+- [`ModeCompare`](crates/rbt/src/measure/mod.rs) in JSON reports (stream vs collect wall + RSS)
+- Synthetic whale generator: `RBT_MEASURE_ROWS` (default 100k), `RBT_MEASURE_PARTS` (default 20)
+- Unit tests for small whale + stream_vs_collect on smoke fixture
+
+### Notes
+
+- RSS is Linux VmRSS after each pass (directional, not allocator peak)
+- Host domain quarantine / Restate stays out of core (one scoped invoke per entity)
+- P6+ gold/merge/remote still on dual-track roadmap
+
 ## [0.5.0] — 2026-07-31
 
 ### Added (P4 — measure, incremental, WAP, UDFs)

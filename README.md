@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.5.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine: `compile` / `run` / `test` / `validate` / `explain` / `preview` / `measure` / `--select`. Streaming materialize; Arrow IPC spill; Iceberg catalog snapshot commit; **P4:** measure packs, `incremental_append`, FS WAP, builtin `rbt_*` UDFs.
+> **Status:** **`0.6.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine: `compile` / `run` / `test` / `validate` / `explain` / `preview` / `measure` / `--select`. Streaming materialize; Iceberg catalog SoR; **P4** measure/WAP/incremental/UDFs; **P5a/b:** run vars, optional bronze (`on_missing: empty`), fingerprints + RunReceipt / `--skip-if-match`.
 
 ## Why rbt
 
@@ -83,7 +83,7 @@ See [examples/smoke_fixture/README.md](examples/smoke_fixture/README.md) and
 | `rbt preview -s <model> [--limit N]` | Sample rows (ancestors materialize; target not written) |
 | `rbt run -p <proj> [--select …] [--format parquet\|iceberg\|…]` | Execute subgraph (ancestors always included) |
 | `rbt test -p <proj> [--select …]` | Run subgraph + frontmatter tests |
-| `rbt measure --scenario smoke_pipeline\|validate_dx\|…` | Thesis measure packs (JSON report) |
+| `rbt measure --scenario smoke_pipeline\|stream_vs_collect\|whale_synthetic\|…` | Thesis measure packs (JSON report; P5c) |
 | `rbt bench` | In-memory throughput microbench |
 
 ### `--select` (dbt-like)

@@ -37,6 +37,8 @@ pub struct ScanRequest {
     pub roots: HashMap<String, String>,
     /// Max bytes for one opaque protobuf file (from `scan.protobuf_max_payload_bytes`).
     pub protobuf_max_payload_bytes: u64,
+    /// When true, missing roots / zero files after filters return empty list (no error).
+    pub allow_empty: bool,
 }
 
 impl ScanRequest {
@@ -87,6 +89,10 @@ impl ScanRequest {
             inject_source_path: fm.inject_source_path.unwrap_or(false),
             roots,
             protobuf_max_payload_bytes: scan_cfg.protobuf_max_payload_bytes,
+            allow_empty: matches!(
+                fm.on_missing_policy(),
+                crate::core::run_scope::OnMissing::Empty
+            ),
         })
     }
 
@@ -122,9 +128,13 @@ impl LakeScanner {
             )
         })?;
         if !root.exists() {
+            if req.allow_empty {
+                return Ok((root, Vec::new()));
+            }
             bail!(
                 "E_RBT_BRONZE_SCAN_PATH_NOT_FOUND: bronze scan_path does not exist: {} \
-                 (resolved from '{}'). Hint: verify the lake path and `$root` expansion.",
+                 (resolved from '{}'). Hint: verify the lake path and `$root` expansion, \
+                 or set on_missing: empty for optional artifact families.",
                 root.display(),
                 req.scan_path
             );
@@ -140,11 +150,15 @@ impl LakeScanner {
             files.retain(|f| glob_set.matches(f, &root));
         }
         if files.is_empty() {
+            if req.allow_empty {
+                return Ok((root, Vec::new()));
+            }
             bail!(
                 "E_RBT_BRONZE_SCAN_EMPTY: no {} files under {} after filters \
                  (require_partitions={:?}, path_glob={:?}). \
                  Hint: path_glob disables DataFusion listing pushdown and uses the \
-                 scan→MemTable/spill path; check filename patterns and hive partitions.",
+                 scan→MemTable/spill path; check filename patterns and hive partitions, \
+                 or set on_missing: empty for optional artifact families.",
                 req.format.as_str(),
                 root.display(),
                 req.require_partitions,
@@ -155,8 +169,19 @@ impl LakeScanner {
     }
 
     /// Scan using a full [`ScanRequest`] (format-aware). Loads all batches into memory.
+    ///
+    /// When `allow_empty` and no files match, returns an empty `Vec` (caller builds empty schema).
     pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
         let (root, files) = self.list_files(req)?;
+        if files.is_empty() {
+            tracing::info!(
+                "Bronze scan: 0 file(s) under {} (format={}, allow_empty={})",
+                root.display(),
+                req.format,
+                req.allow_empty
+            );
+            return Ok(Vec::new());
+        }
         tracing::info!(
             "Bronze scan: {} file(s) under {} (format={}, globs={:?})",
             files.len(),

@@ -1,0 +1,24 @@
+# Complex multi-artifact bronze → silver (P5a/P5b demo).
+# Generic Hive-ish landing zone: domain= / report_date= / run_id= + artifact families.
+name: complex_bronze_landing
+version: "0.1.0"
+contract_version: "p5-v1"
+models_dir: models
+target_path: $lake/gold
+
+roots:
+  lake: lake
+
+layers:
+  staging:
+    path: models/staging
+    target_path: $lake/silver/stage
+    default_format: parquet
+  transforms:
+    path: models/transforms
+    target_path: $lake/silver/tf
+    default_format: parquet
+  marts:
+    path: models/marts
+    target_path: $lake/gold
+    default_format: parquet

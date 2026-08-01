@@ -1,24 +1,31 @@
+---
+tags: [adr, layout, layers, frontmatter, dag]
+node_type: adr
+aliases: [ADR-001, ADR-001 Project Layout, project structure, layer governance, zero-copy clone]
+status: accepted
+---
 # ADR 001: Project Layout Architecture, Layer Governance, and Native Zero-Copy Cloning
 
-* **Status**: Accepted (structure/layers/frontmatter shipped; zero-copy clone planned)
-* **Date**: 2026-07-25
-* **Authors**: Project maintainers
-* **Note**: Moved from root-era path; implement zero-copy clone only after Iceberg catalog SoR or a deliberate FS pointer design.
+## Status
 
----
+**Accepted** (structure / layers / frontmatter shipped; zero-copy clone planned).  
+**Date:** 2026-07-25 · **Authors:** Project maintainers  
 
-## Context & User Intentions
+Note: Moved from root-era path; implement zero-copy clone only after Iceberg catalog SoR or a deliberate FS pointer design.
+
+## Context
 
 As `rbt` scales to replace legacy dbt architectures, developers need:
-1. A clean, predictable, and modular project directory structure.
-2. Strict DAG layer boundary enforcement (preventing circular or illegal upstream dependencies, e.g. transforms pulling from marts).
+
+1. A clean, predictable, modular project directory structure.
+2. Strict DAG layer boundary enforcement (no circular or illegal upstream deps, e.g. transforms pulling from marts).
 3. Soft-enforced model naming prefixes (`stg_`, `tf_`, `dim_`, `fact_`, `obt_`).
-4. SQL Frontmatter YAML configuration for staging lake partition scanners.
+4. SQL frontmatter YAML for staging lake partition scanners.
 5. Ultra-low-latency zero-copy materialization strategies.
 
----
+## Decision
 
-## Decision 1: Project Directory Architecture & Naming Conventions
+### Decision 1: Project directory architecture & naming
 
 The `rbt` project configuration (`rbt_project.yml`) mandates three primary model locations by default:
 
@@ -38,31 +45,26 @@ my_rbt_project/
             └── obt_<one_big_table_name>.sql
 ```
 
-### Table Prefix Conventions
-* **Staging (`stg_`)**: Raw source ingestion and lake scanners (e.g. `stg_users.sql`).
-* **Transforms (`tf_`)**: Intermediate transformations and topic aggregations (e.g. `tf_user_events.sql`).
-* **Marts (`dim_`, `fact_`, `obt_`)**:
-  * `dim_`: Dimension tables (e.g. `dim_customers.sql`).
-  * `fact_`: Fact tables (e.g. `fact_orders.sql`).
-  * `obt_`: One Big Table aggregations downstream of dims/facts (e.g. `obt_user_sales.sql`).
+**Table prefix conventions**
 
----
+- **Staging (`stg_`)**: Raw source ingestion and lake scanners (e.g. `stg_users.sql`).
+- **Transforms (`tf_`)**: Intermediate transformations and topic aggregations (e.g. `tf_user_events.sql`).
+- **Marts (`dim_`, `fact_`, `obt_`)**:
+  - `dim_`: Dimension tables
+  - `fact_`: Fact tables
+  - `obt_`: One Big Table aggregations downstream of dims/facts
 
-## Decision 2: Strict Layer Dependency Boundary Enforcement
+### Decision 2: Strict layer dependency boundary enforcement
 
-To maintain a clean and maintainable DAG, `rbt` enforces the following layer directional constraints:
+1. **Staging (`stg_`)**: May reference external lake sources (`source()`). Cannot reference `tf_` or mart tables.
+2. **Transforms (`tf_`)**: May only reference `stg_` or sibling `tf_`. **Cannot** reference mart tables (`dim_`, `fact_`, `obt_`).
+3. **Marts (`dim_`, `fact_`, `obt_`)**: May reference `tf_` or upstream marts (e.g. `obt_` → `dim_` / `fact_`).
 
-1. **Staging Layer (`stg_`)**: Can reference external lake sources (`source()`). Cannot reference `tf_` or mart tables.
-2. **Transforms Layer (`tf_`)**: Can ONLY reference `stg_` tables or sibling `tf_` tables. **Transforms CANNOT reference Mart tables (`dim_`, `fact_`, `obt_`)**.
-3. **Marts Layer (`dim_`, `fact_`, `obt_`)**: Can reference `tf_` tables or upstream mart tables (e.g. `obt_` referencing `dim_`/`fact_` tables).
+Violations fail at `rbt compile` / `rbt run`.
 
-Attempts to violate layer boundaries (e.g. a `tf_` model referencing a `fact_` model) will trigger a compiler error during `rbt compile` / `rbt run`.
+### Decision 3: Staging SQL frontmatter YAML
 
----
-
-## Decision 3: Staging SQL Frontmatter YAML Configuration
-
-Staging models support YAML frontmatter at the top of the `.sql` file (`--- ... ---`) to define lake scanning and partition parameters:
+Staging models support YAML frontmatter on `.sql` files for lake scan parameters:
 
 ```sql
 ---
@@ -70,20 +72,32 @@ source_format: parquet # arrow_ipc | jsonl | parquet | csv
 scan_path: "s3://my-lake/raw/events/*/*.parquet"
 partition_by: ["year", "month"]
 ---
-SELECT 
+SELECT
     user_id,
     event_type,
     created_at
 FROM {{ source('raw_lake', 'events') }}
 ```
 
----
+### Decision 4: Native zero-copy table cloning & delta materialization
 
-## Decision 4: Native Zero-Copy Table Cloning & Delta Materialization
+**Planned** — `Materialization::ZeroCopyClone` instead of complex Jinja macros:
 
-Instead of requiring developers to write complex Jinja macros, `rbt` introduces **Native Zero-Copy Table Cloning** (`Materialization::ZeroCopyClone`).
+1. **Metadata pointer duplication** — new catalog entry pointing at existing Parquet/Iceberg manifests without byte copy.
+2. **Delta patch evaluation** — append only modified partitions or delta expressions.
+3. **Targets** — filesystem lakes, Hive directories, Iceberg/DataFusion catalog paths.
 
-### Execution Mechanics
-1. **Metadata Pointer Duplication**: Creates a new table entry in the catalog referencing existing Parquet/Iceberg manifest files without duplicating raw bytes on disk.
-2. **Delta Patch Evaluation**: Computes and appends only modified partitions or delta SQL expressions.
-3. **Target Platforms**: Native support for filesystem lakes, Hive directories, and Apache Iceberg/DataFusion catalog paths.
+Implement only after [[Iceberg system of record]] catalog proof or an explicit FS pointer design.
+
+## Consequences
+
+- Layer rules and prefixes make medallion DAGs reviewable and agent-checkable.
+- Frontmatter contracts are the bronze edge surface ([[Bronze contracts multi-root and path_glob]]).
+- Zero-copy clone remains deferred; do not document as shipped until implemented.
+- Dimensional modeling of `tf_` / `dim_` / `fact_` logic placement: see [[Star schema data modeling rules]].
+
+## Related
+
+- Goals: [[Primary path spine]], [[Product north star]], [[Bronze contracts multi-root and path_glob]], [[Iceberg system of record]]
+- Concept: [[Star schema data modeling rules]]
+- Next ADRs: [[ADR-002 Thesis Alignment]], [[ADR-003 Polyglot DAG]]

@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rbt::{
-    model_has_test_contract, BronzeCheckMode, OutputFormat, RbtProjectConfig, SelectMode,
+    model_has_test_contract, BronzeCheckMode, OutputFormat, RbtProjectConfig, RunScope, SelectMode,
     TransformationEngine,
 };
 
@@ -9,6 +9,45 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Instant;
 use tracing_subscriber::EnvFilter;
+
+/// Shared run-scope flags for execute paths (P5a/P5b).
+#[derive(Debug, Clone, clap::Args)]
+struct RunScopeArgs {
+    /// Run variable / partition bind (`key=value`). Repeatable.
+    ///
+    /// Merges into `require_partitions` for keys listed in model `partition_by`,
+    /// and expands `{key}` / `${key}` in scan_path and partition values.
+    #[arg(long = "var", value_name = "KEY=VALUE")]
+    vars: Vec<String>,
+    /// Contract version for fingerprints (overrides `contract_version` in yml).
+    #[arg(long)]
+    contract_version: Option<String>,
+    /// Explicit run id for receipts (default: generated).
+    #[arg(long)]
+    run_id: Option<String>,
+    /// Skip materialize when bronze fingerprint matches last successful receipt for this scope.
+    #[arg(long, default_value_t = false)]
+    skip_if_match: bool,
+    /// Write `.rbt/runs/{run_id}.json` receipt (default: true for run/test).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    write_receipt: bool,
+    /// Emit run receipt JSON to stdout after success.
+    #[arg(long, default_value_t = false)]
+    receipt_json: bool,
+}
+
+impl RunScopeArgs {
+    fn to_scope(&self) -> Result<RunScope> {
+        let mut scope = RunScope::new();
+        scope.write_receipt = self.write_receipt;
+        scope.skip_if_fingerprint_match = self.skip_if_match;
+        scope.contract_version = self.contract_version.clone();
+        scope.run_id = self.run_id.clone();
+        scope.extend_from_env();
+        scope.extend_from_kv_pairs(self.vars.iter().map(String::as_str))?;
+        Ok(scope)
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -108,6 +147,8 @@ enum Commands {
         /// Pre-flight bronze path check before execution (default: fail)
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
+        #[command(flatten)]
+        scope: RunScopeArgs,
     },
     /// Run frontmatter tests for selected models (executes subgraph then asserts)
     Test {
@@ -125,6 +166,8 @@ enum Commands {
         format: CliFormat,
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
+        #[command(flatten)]
+        scope: RunScopeArgs,
     },
     /// Static validation: load project, build DAG, bronze paths, layer rules (no execute)
     Validate {
@@ -168,7 +211,8 @@ enum Commands {
     Measure {
         #[arg(short, long, default_value = ".")]
         project_dir: PathBuf,
-        /// Scenario: smoke_pipeline | validate_dx | incremental_append
+        /// Scenario: smoke_pipeline | validate_dx | incremental_append |
+        /// stream_vs_collect | whale_synthetic | complex_bronze
         #[arg(long, default_value = "smoke_pipeline")]
         scenario: String,
         #[arg(short, long, default_value = "./target/output")]
@@ -254,10 +298,12 @@ async fn main() -> Result<()> {
             output_dir,
             format,
             bronze_check,
+            scope,
         } => {
+            let run_scope = scope.to_scope()?;
             println!(
-                "[rbt] Executing pipeline from {:?} (select: {:?}, format: {:?}, output: {:?}, bronze_check={:?})...",
-                project_dir, select, format, output_dir, bronze_check
+                "[rbt] Executing pipeline from {:?} (select: {:?}, format: {:?}, output: {:?}, bronze_check={:?}, vars={:?})...",
+                project_dir, select, format, output_dir, bronze_check, run_scope.vars
             );
             let start = Instant::now();
 
@@ -292,16 +338,37 @@ async fn main() -> Result<()> {
             );
 
             let engine = TransformationEngine::new();
-            let summary = engine.execute_dag(&dag, &project_dir, &output_dir).await?;
+            let summary = engine
+                .execute_dag_with_scope(&dag, &project_dir, &output_dir, &config, &run_scope)
+                .await?;
             let duration = start.elapsed();
 
-            println!(
-                "[rbt] Completed {} models ({} rows, {} bronze sources) in {:.2?}",
-                summary.models_executed,
-                summary.total_rows_produced,
-                summary.bronze_sources_registered,
-                duration
-            );
+            if summary.skipped {
+                println!(
+                    "[rbt] SKIPPED materialize (fingerprint match) in {:.2?} — {}",
+                    duration,
+                    summary.skip_reason.as_deref().unwrap_or("identical bronze")
+                );
+            } else {
+                println!(
+                    "[rbt] Completed {} models ({} rows, {} bronze sources) in {:.2?}",
+                    summary.models_executed,
+                    summary.total_rows_produced,
+                    summary.bronze_sources_registered,
+                    duration
+                );
+            }
+            if let Some(ref fp) = summary.bronze_fingerprint {
+                println!("[rbt] bronze_fingerprint={fp}");
+            }
+            if let Some(ref p) = summary.receipt_path {
+                println!("[rbt] receipt={}", p.display());
+            }
+            if scope.receipt_json {
+                if let Some(ref p) = summary.receipt_path {
+                    print!("{}", std::fs::read_to_string(p)?);
+                }
+            }
         }
         Commands::Test {
             project_dir,
@@ -310,6 +377,7 @@ async fn main() -> Result<()> {
             output_dir,
             format,
             bronze_check,
+            scope,
         } => {
             let select = match (select, model) {
                 (Some(s), Some(m)) => Some(format!("{},{}", s, m)),
@@ -317,6 +385,7 @@ async fn main() -> Result<()> {
                 (None, Some(m)) => Some(m),
                 (None, None) => None,
             };
+            let run_scope = scope.to_scope()?;
 
             println!(
                 "[rbt] Testing project {:?} (select={:?})...",
@@ -363,8 +432,9 @@ async fn main() -> Result<()> {
             );
 
             let engine = TransformationEngine::new();
-            // execute_dag already runs frontmatter tests and fails hard on error
-            let summary = engine.execute_dag(&dag, &project_dir, &output_dir).await?;
+            let summary = engine
+                .execute_dag_with_scope(&dag, &project_dir, &output_dir, &config, &run_scope)
+                .await?;
 
             // Summarize which models had tests (already enforced during materialize)
             let mut tested = 0usize;
@@ -632,6 +702,16 @@ async fn main() -> Result<()> {
                     report_data.bronze_sources,
                     report_data.peak_rss_kb
                 );
+                if let Some(ref mc) = report_data.mode_compare {
+                    println!(
+                        "[rbt] mode_compare stream_ms={} collect_ms={} stream_rss={:?} collect_rss={:?} rows={}",
+                        mc.stream_wall_ms,
+                        mc.collect_wall_ms,
+                        mc.stream_rss_kb,
+                        mc.collect_rss_kb,
+                        mc.rows
+                    );
+                }
                 println!("[rbt] report written → {}", out.display());
                 for n in &report_data.notes {
                     println!("  note: {n}");

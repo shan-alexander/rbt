@@ -17,10 +17,13 @@
 
 use crate::core::dag::{ModelDag, ModelNode};
 use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
+use crate::core::receipt::apply_scope_to_frontmatter;
+use crate::core::run_scope::{OnMissing, RunScope};
 use crate::scan::{LakeScanner, ScanRequest};
 use anyhow::{bail, Context, Result};
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::Session;
 use datafusion::catalog::TableProvider;
 use datafusion::common::TableReference;
@@ -110,6 +113,7 @@ impl TableProvider for BronzeTableProvider {
 ///
 /// Idempotent per `(schema, table)` within a single run (tracked by `registered`).
 /// Uses `config.roots` and `config.scan` (no re-read of yml per model).
+/// Optional [`RunScope`] expands `{var}` templates and partition binds (P5a).
 pub async fn register_bronze_sources_for_dag(
     ctx: &SessionContext,
     dag: &ModelDag,
@@ -117,11 +121,24 @@ pub async fn register_bronze_sources_for_dag(
     registered: &mut HashSet<(String, String)>,
     config: &crate::core::project::RbtProjectConfig,
 ) -> Result<usize> {
+    register_bronze_sources_for_dag_scoped(ctx, dag, project_dir, registered, config, None).await
+}
+
+/// Like [`register_bronze_sources_for_dag`] with an explicit run scope.
+pub async fn register_bronze_sources_for_dag_scoped(
+    ctx: &SessionContext,
+    dag: &ModelDag,
+    project_dir: &Path,
+    registered: &mut HashSet<(String, String)>,
+    config: &crate::core::project::RbtProjectConfig,
+    scope: Option<&RunScope>,
+) -> Result<usize> {
     let mut count = 0;
     for idx in dag.graph.node_indices() {
         let node = &dag.graph[idx];
         if let Some(n) =
-            register_bronze_for_model(ctx, node, project_dir, registered, config).await?
+            register_bronze_for_model_scoped(ctx, node, project_dir, registered, config, scope)
+                .await?
         {
             count += n;
         }
@@ -137,12 +154,29 @@ pub async fn register_bronze_for_model(
     registered: &mut HashSet<(String, String)>,
     config: &crate::core::project::RbtProjectConfig,
 ) -> Result<Option<usize>> {
-    let Some(fm) = node.frontmatter.as_ref() else {
+    register_bronze_for_model_scoped(ctx, node, project_dir, registered, config, None).await
+}
+
+/// Register bronze with optional run scope (partition binds + var templates + on_missing).
+pub async fn register_bronze_for_model_scoped(
+    ctx: &SessionContext,
+    node: &ModelNode,
+    project_dir: &Path,
+    registered: &mut HashSet<(String, String)>,
+    config: &crate::core::project::RbtProjectConfig,
+    scope: Option<&RunScope>,
+) -> Result<Option<usize>> {
+    let Some(fm_raw) = node.frontmatter.as_ref() else {
         return Ok(None);
     };
-    if !fm.has_scan_contract() {
+    if !fm_raw.has_scan_contract() {
         return Ok(None);
     }
+
+    let default_scope = RunScope::default();
+    let scope = scope.unwrap_or(&default_scope);
+    let fm = apply_scope_to_frontmatter(fm_raw, scope);
+    let fm = &fm;
 
     let (schema_name, table_name) = ModelDag::bronze_source_ident(node).with_context(|| {
         format!(
@@ -178,10 +212,33 @@ pub async fn register_bronze_for_model(
             node.name, raw_scan
         )
     })?;
+    let on_missing = fm.on_missing_policy();
     if !resolved.exists() && !crate::core::frontmatter::is_remote_uri(raw_scan) {
+        if on_missing == OnMissing::Empty {
+            let provider = empty_memtable(fm, scope).with_context(|| {
+                format!(
+                    "model '{}': on_missing empty frame failed (scan_path missing)",
+                    node.name
+                )
+            })?;
+            return finish_register(
+                ctx,
+                registered,
+                key,
+                schema_name,
+                table_name,
+                node,
+                format,
+                resolved,
+                provider,
+                BronzeRegistrationMode::ScanMemTable,
+            )
+            .await;
+        }
         bail!(
             "E_RBT_BRONZE_SCAN_PATH_NOT_FOUND: model '{}': bronze scan_path does not exist: {} \
-             (resolved {}). Hint: verify the lake path and `$root` expansion.",
+             (resolved {}). Hint: verify the lake path and `$root` expansion, \
+             or set on_missing: empty for optional artifact families.",
             node.name,
             raw_scan,
             resolved.display()
@@ -193,20 +250,46 @@ pub async fn register_bronze_for_model(
 
     let (inner, mode) = if use_scan {
         if should_spill_to_parquet(format, config) {
-            let provider = scan_spill_to_listing(ctx, project_dir, fm, format, config, &schema_name, &table_name)
-                .await
-                .with_context(|| {
-                    format!(
-                        "model '{}': bronze spill→parquet failed (format={})",
-                        node.name, format
+            match scan_spill_to_listing(
+                ctx,
+                project_dir,
+                fm,
+                format,
+                config,
+                &schema_name,
+                &table_name,
+            )
+            .await
+            {
+                Ok(provider) => (provider, BronzeRegistrationMode::ScanSpillParquet),
+                Err(e) if on_missing == OnMissing::Empty && is_empty_or_missing_err(&e) => {
+                    (
+                        empty_memtable(fm, scope)?,
+                        BronzeRegistrationMode::ScanMemTable,
                     )
-                })?;
-            (provider, BronzeRegistrationMode::ScanSpillParquet)
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "model '{}': bronze spill→parquet failed (format={})",
+                            node.name, format
+                        )
+                    })
+                }
+            }
         } else {
-            let provider = scan_to_memtable(project_dir, fm, format, config)
-                .await
-                .with_context(|| format!("model '{}': bronze scan failed", node.name))?;
-            (provider, BronzeRegistrationMode::ScanMemTable)
+            match scan_to_memtable(project_dir, fm, format, config).await {
+                Ok(provider) => (provider, BronzeRegistrationMode::ScanMemTable),
+                Err(e) if on_missing == OnMissing::Empty && is_empty_or_missing_err(&e) => {
+                    (
+                        empty_memtable(fm, scope)?,
+                        BronzeRegistrationMode::ScanMemTable,
+                    )
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| format!("model '{}': bronze scan failed", node.name))
+                }
+            }
         }
     } else {
         let provider = listing_table_provider(ctx, &path_str, format)
@@ -219,6 +302,34 @@ pub async fn register_bronze_for_model(
             })?;
         (provider, BronzeRegistrationMode::DataFusionListing)
     };
+
+    finish_register(
+        ctx,
+        registered,
+        key,
+        schema_name,
+        table_name,
+        node,
+        format,
+        resolved,
+        inner,
+        mode,
+    )
+    .await
+}
+
+async fn finish_register(
+    ctx: &SessionContext,
+    registered: &mut HashSet<(String, String)>,
+    key: (String, String),
+    schema_name: String,
+    table_name: String,
+    node: &ModelNode,
+    format: SourceFormat,
+    resolved: PathBuf,
+    inner: Arc<dyn TableProvider>,
+    mode: BronzeRegistrationMode,
+) -> Result<Option<usize>> {
 
     let meta = BronzeSourceMeta {
         model_name: node.name.clone(),
@@ -247,6 +358,25 @@ pub async fn register_bronze_for_model(
         format
     );
     Ok(Some(1))
+}
+
+fn is_empty_or_missing_err(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains("E_RBT_BRONZE_SCAN_EMPTY")
+        || s.contains("E_RBT_BRONZE_SCAN_PATH_NOT_FOUND")
+        || s.contains("bronze scan produced zero batches")
+}
+
+/// Zero-row MemTable with declared schema; partition keys filled from run scope when present.
+fn empty_memtable(fm: &StagingFrontmatter, scope: &RunScope) -> Result<Arc<dyn TableProvider>> {
+    let schema = fm.empty_frame_schema()?;
+    // Empty batch — partition constants are for SQL via require_partitions on non-empty scans;
+    // empty frame still exposes partition columns as nullable Utf8 for outer joins.
+    let batch = RecordBatch::new_empty(schema.clone());
+    let _ = scope; // reserved: future constant partition columns on empty frames
+    let mem = MemTable::try_new(schema, vec![vec![batch]])
+        .map_err(|e| anyhow::anyhow!("MemTable empty: {e}"))?;
+    Ok(Arc::new(mem))
 }
 
 fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
@@ -389,6 +519,19 @@ async fn scan_to_memtable(
     let scanner = LakeScanner::from_request(&req);
     let batches = scanner.scan(&req).await?;
     if batches.is_empty() {
+        if req.allow_empty {
+            let schema = fm.empty_frame_schema().unwrap_or_else(|_| {
+                Arc::new(arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+                    "_empty",
+                    arrow::datatypes::DataType::Utf8,
+                    true,
+                )]))
+            });
+            let batch = RecordBatch::new_empty(schema.clone());
+            let mem = MemTable::try_new(schema, vec![vec![batch]])
+                .map_err(|e| anyhow::anyhow!("MemTable::try_new empty: {e}"))?;
+            return Ok(Arc::new(mem));
+        }
         bail!(
             "E_RBT_BRONZE_SCAN_EMPTY: bronze scan produced zero batches for {}",
             req.resolved_path()?.display()

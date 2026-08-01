@@ -1,9 +1,12 @@
 //! Staging SQL frontmatter: bronze scan contract and compile-time path checks.
 
+use crate::core::run_scope::OnMissing;
 use anyhow::{bail, Context, Result};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// How `rbt compile` treats missing/unresolvable bronze `scan_path` entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -241,6 +244,17 @@ pub struct StagingFrontmatter {
     /// Enables "latest chunk wins" dedupe via `ORDER BY _source_path DESC`.
     #[serde(default)]
     pub inject_source_path: Option<bool>,
+    /// When scan root is missing or filters match no files: `error` (default) | `empty`.
+    ///
+    /// `empty` registers a zero-row table with a declared schema from `columns.*.dtype`
+    /// (plus `partition_by` keys as Utf8). Required for partial multi-artifact bronze.
+    #[serde(default)]
+    pub on_missing: Option<OnMissing>,
+    /// Silver stage policy hint (docs + future engine): `full_refresh` | `latest_only` |
+    /// `append` | `mirror_bronze`. Does not change SQL by itself — authors implement
+    /// semantics in the model; rbt may use this for materialization defaults later.
+    #[serde(default)]
+    pub stage_mode: Option<String>,
 
     /// Logical grain of the model (e.g. `[symbol, timestamp_ns]`).
     #[serde(default)]
@@ -293,6 +307,86 @@ impl StagingFrontmatter {
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false)
     }
+
+    pub fn on_missing_policy(&self) -> OnMissing {
+        self.on_missing.unwrap_or(OnMissing::Error)
+    }
+
+    /// Build Arrow schema for empty bronze frames (`on_missing: empty`).
+    ///
+    /// Fields: declared `columns` with `dtype`, then any `partition_by` keys not already
+    /// present (Utf8), then optional `_source_path`.
+    pub fn empty_frame_schema(&self) -> Result<SchemaRef> {
+        let mut fields: Vec<Field> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if let Some(cols) = &self.columns {
+            for (name, meta) in cols {
+                let dtype = meta
+                    .dtype
+                    .as_deref()
+                    .with_context(|| {
+                        format!(
+                            "E_RBT_EMPTY_SCHEMA: column '{name}' needs dtype: for on_missing: empty \
+                             (e.g. utf8, int64, float64, bool, binary, timestamp)"
+                        )
+                    })?;
+                let dt = parse_logical_dtype(dtype).with_context(|| {
+                    format!("E_RBT_EMPTY_SCHEMA: column '{name}' dtype '{dtype}'")
+                })?;
+                fields.push(Field::new(name, dt, true));
+                seen.insert(name.clone());
+            }
+        }
+
+        if let Some(parts) = &self.partition_by {
+            for p in parts {
+                if seen.insert(p.clone()) {
+                    fields.push(Field::new(p, DataType::Utf8, true));
+                }
+            }
+        }
+
+        if self.inject_source_path.unwrap_or(false) && seen.insert("_source_path".into()) {
+            fields.push(Field::new("_source_path", DataType::Utf8, true));
+        }
+
+        if fields.is_empty() {
+            bail!(
+                "E_RBT_EMPTY_SCHEMA: on_missing: empty requires columns with dtype \
+                 and/or partition_by (model scan contract has no schema fields)"
+            );
+        }
+        Ok(Arc::new(Schema::new(fields)))
+    }
+}
+
+/// Parse logical dtype strings used in frontmatter `columns.*.dtype`.
+pub fn parse_logical_dtype(s: &str) -> Result<DataType> {
+    let key = s.trim().to_ascii_lowercase().replace('-', "_");
+    Ok(match key.as_str() {
+        "utf8" | "string" | "str" | "varchar" | "text" => DataType::Utf8,
+        "int64" | "long" | "bigint" | "i64" => DataType::Int64,
+        "int32" | "int" | "i32" => DataType::Int32,
+        "int16" | "smallint" | "i16" => DataType::Int16,
+        "int8" | "tinyint" | "i8" => DataType::Int8,
+        "uint64" | "u64" => DataType::UInt64,
+        "uint32" | "u32" => DataType::UInt32,
+        "float64" | "double" | "f64" => DataType::Float64,
+        "float32" | "float" | "f32" => DataType::Float32,
+        "bool" | "boolean" => DataType::Boolean,
+        "binary" | "bytes" | "blob" => DataType::Binary,
+        "date" | "date32" => DataType::Date32,
+        "timestamp" | "timestamp_us" | "timestamptz" => {
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        }
+        "timestamp_ms" => DataType::Timestamp(TimeUnit::Millisecond, None),
+        "timestamp_ns" => DataType::Timestamp(TimeUnit::Nanosecond, None),
+        "timestamp_s" => DataType::Timestamp(TimeUnit::Second, None),
+        other => bail!(
+            "unknown dtype '{other}' (expected utf8|int64|int32|float64|bool|binary|date|timestamp…)"
+        ),
+    })
 }
 
 /// Severity of a bronze compile diagnostic.

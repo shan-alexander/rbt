@@ -7,6 +7,11 @@ use crate::core::dag::{Materialization, ModelDag, ModelNode, OutputFormat};
 use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
 };
+use crate::core::receipt::{
+    bronze_fingerprint, effective_contract_version, now_unix_ms, ModelRunResult, RunReceipt,
+    RunStatus,
+};
+use crate::core::run_scope::RunScope;
 use crate::materializer::{
     incremental_ref_path, load_parquet_batches, materialize_incremental_append_stream,
     materialize_stream, new_wap_run_id, sibling_iceberg_dir, wap_publish, MaterializeWriteOptions,
@@ -26,8 +31,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub use bronze::{
-    register_bronze_for_model, register_bronze_sources_for_dag, BronzeRegistrationMode,
-    BronzeSourceMeta, BronzeTableProvider,
+    register_bronze_for_model, register_bronze_for_model_scoped, register_bronze_sources_for_dag,
+    register_bronze_sources_for_dag_scoped, BronzeRegistrationMode, BronzeSourceMeta,
+    BronzeTableProvider,
 };
 
 /// Execution metric summary for a executed model DAG.
@@ -36,6 +42,29 @@ pub struct DagExecutionSummary {
     pub models_executed: usize,
     pub total_rows_produced: usize,
     pub bronze_sources_registered: usize,
+    /// True when fingerprint skip short-circuited materialize (P5b).
+    pub skipped: bool,
+    pub skip_reason: Option<String>,
+    pub bronze_fingerprint: Option<String>,
+    pub run_id: Option<String>,
+    pub receipt_path: Option<PathBuf>,
+    pub model_results: Vec<ModelRunResult>,
+}
+
+impl Default for DagExecutionSummary {
+    fn default() -> Self {
+        Self {
+            models_executed: 0,
+            total_rows_produced: 0,
+            bronze_sources_registered: 0,
+            skipped: false,
+            skip_reason: None,
+            bronze_fingerprint: None,
+            run_id: None,
+            receipt_path: None,
+            model_results: Vec::new(),
+        }
+    }
 }
 
 /// Result of `preview` — limited rows from one model without materializing it.
@@ -309,20 +338,100 @@ impl TransformationEngine {
         output_dir: impl AsRef<Path>,
         config: &RbtProjectConfig,
     ) -> Result<DagExecutionSummary> {
+        self.execute_dag_with_scope(dag, project_dir, output_dir, config, &RunScope::default())
+            .await
+    }
+
+    /// DAG execution with run scope (vars, partition binds, fingerprint skip, receipts).
+    pub async fn execute_dag_with_scope(
+        &self,
+        dag: &ModelDag,
+        project_dir: impl AsRef<Path>,
+        output_dir: impl AsRef<Path>,
+        config: &RbtProjectConfig,
+        scope: &RunScope,
+    ) -> Result<DagExecutionSummary> {
         let project_dir = project_dir.as_ref();
         let output_base = output_dir.as_ref();
         let materialize = &config.materialize;
         tokio::fs::create_dir_all(output_base).await?;
 
+        let started = now_unix_ms();
+        let run_id = scope.resolve_run_id();
+        let scope_key = scope.scope_key();
+        let contract = effective_contract_version(config, scope);
+        let fp = bronze_fingerprint(dag, project_dir, config, scope)
+            .context("E_RBT_FINGERPRINT: bronze fingerprint failed")?;
+
+        if scope.skip_if_fingerprint_match {
+            if let Some(prev) = RunReceipt::load_latest_for_scope(project_dir, &scope_key) {
+                if prev.status == RunStatus::Ok
+                    && prev.bronze_fingerprint == fp
+                    && prev.contract_version == contract
+                {
+                    let finished = now_unix_ms();
+                    let mut summary = DagExecutionSummary {
+                        models_executed: 0,
+                        total_rows_produced: 0,
+                        bronze_sources_registered: 0,
+                        skipped: true,
+                        skip_reason: Some(
+                            "bronze fingerprint + contract_version match previous successful receipt"
+                                .into(),
+                        ),
+                        bronze_fingerprint: Some(fp.clone()),
+                        run_id: Some(run_id.clone()),
+                        receipt_path: None,
+                        model_results: Vec::new(),
+                    };
+                    if scope.write_receipt {
+                        let receipt = RunReceipt {
+                            schema_version: RunReceipt::SCHEMA_VERSION,
+                            run_id: run_id.clone(),
+                            project: config.name.clone(),
+                            package_version: crate::VERSION.into(),
+                            contract_version: contract.clone(),
+                            scope_key: scope_key.clone(),
+                            vars: scope.vars.clone(),
+                            status: RunStatus::Skipped,
+                            skipped: true,
+                            skip_reason: summary.skip_reason.clone(),
+                            bronze_fingerprint: fp.clone(),
+                            models_executed: 0,
+                            total_rows: 0,
+                            bronze_sources: 0,
+                            model_results: Vec::new(),
+                            started_unix_ms: started,
+                            finished_unix_ms: finished,
+                            wall_ms: finished.saturating_sub(started),
+                            error: None,
+                        };
+                        summary.receipt_path = Some(receipt.write(project_dir)?);
+                    }
+                    tracing::info!(
+                        "E_RBT_SKIP: identical bronze fingerprint for scope {scope_key}; skipping materialize"
+                    );
+                    return Ok(summary);
+                }
+            }
+        }
+
         let mut registered = HashSet::new();
-        let bronze_sources_registered =
-            register_bronze_sources_for_dag(&self.ctx, dag, project_dir, &mut registered, config)
-                .await
-                .context("frontmatter-driven bronze registration failed")?;
+        let bronze_sources_registered = register_bronze_sources_for_dag_scoped(
+            &self.ctx,
+            dag,
+            project_dir,
+            &mut registered,
+            config,
+            Some(scope),
+        )
+        .await
+        .context("frontmatter-driven bronze registration failed")?;
 
         let tiers = dag.execution_tiers()?;
         let mut models_executed = 0;
         let mut total_rows_produced = 0;
+        let mut model_results: Vec<ModelRunResult> = Vec::new();
         let wap_run_id = if materialize.wap {
             Some(new_wap_run_id())
         } else {
@@ -340,8 +449,15 @@ impl TransformationEngine {
                 tracing::info!("Executing model '{}'...", model.name);
 
                 // Late-bind: if this model carries frontmatter not registered yet
-                register_bronze_for_model(&self.ctx, model, project_dir, &mut registered, config)
-                    .await?;
+                register_bronze_for_model_scoped(
+                    &self.ctx,
+                    model,
+                    project_dir,
+                    &mut registered,
+                    config,
+                    Some(scope),
+                )
+                .await?;
 
                 let dest_path = model
                     .output_path
@@ -513,14 +629,53 @@ impl TransformationEngine {
 
                 models_executed += 1;
                 total_rows_produced += row_count;
+                model_results.push(ModelRunResult {
+                    name: model.name.clone(),
+                    rows: row_count,
+                    output_path: Some(dest_path.display().to_string()),
+                });
             }
         }
 
-        Ok(DagExecutionSummary {
+        let finished = now_unix_ms();
+        let mut summary = DagExecutionSummary {
             models_executed,
             total_rows_produced,
             bronze_sources_registered,
-        })
+            skipped: false,
+            skip_reason: None,
+            bronze_fingerprint: Some(fp.clone()),
+            run_id: Some(run_id.clone()),
+            receipt_path: None,
+            model_results: model_results.clone(),
+        };
+
+        if scope.write_receipt {
+            let receipt = RunReceipt {
+                schema_version: RunReceipt::SCHEMA_VERSION,
+                run_id: run_id.clone(),
+                project: config.name.clone(),
+                package_version: crate::VERSION.into(),
+                contract_version: contract,
+                scope_key,
+                vars: scope.vars.clone(),
+                status: RunStatus::Ok,
+                skipped: false,
+                skip_reason: None,
+                bronze_fingerprint: fp,
+                models_executed,
+                total_rows: total_rows_produced,
+                bronze_sources: bronze_sources_registered,
+                model_results,
+                started_unix_ms: started,
+                finished_unix_ms: finished,
+                wall_ms: finished.saturating_sub(started),
+                error: None,
+            };
+            summary.receipt_path = Some(receipt.write(project_dir)?);
+        }
+
+        Ok(summary)
     }
 }
 

@@ -402,18 +402,33 @@ impl ModelDag {
             }
 
             if !super::frontmatter::scan_path_exists_with_roots(project_dir, scan_path, roots) {
-                let resolved = super::paths::resolve_project_path(project_dir, scan_path, roots)
-                    .unwrap_or_else(|_| project_dir.join(scan_path));
-                report.diagnostics.push(BronzeDiagnostic {
-                    model: node.name.clone(),
-                    severity,
-                    code: "E_RBT_BRONZE_SCAN_PATH_NOT_FOUND",
-                    message: format!(
-                        "scan_path '{}' does not exist (resolved: {})",
-                        scan_path,
-                        resolved.display()
-                    ),
-                });
+                // Optional artifact families may be absent for a partition (P5a).
+                if fm.on_missing_policy() == super::run_scope::OnMissing::Empty {
+                    if let Err(e) = fm.empty_frame_schema() {
+                        report.diagnostics.push(BronzeDiagnostic {
+                            model: node.name.clone(),
+                            severity,
+                            code: "E_RBT_EMPTY_SCHEMA",
+                            message: format!(
+                                "on_missing: empty but schema invalid while scan_path missing: {e}"
+                            ),
+                        });
+                    }
+                } else {
+                    let resolved = super::paths::resolve_project_path(project_dir, scan_path, roots)
+                        .unwrap_or_else(|_| project_dir.join(scan_path));
+                    report.diagnostics.push(BronzeDiagnostic {
+                        model: node.name.clone(),
+                        severity,
+                        code: "E_RBT_BRONZE_SCAN_PATH_NOT_FOUND",
+                        message: format!(
+                            "scan_path '{}' does not exist (resolved: {}). \
+                             Hint: set on_missing: empty for optional artifact families.",
+                            scan_path,
+                            resolved.display()
+                        ),
+                    });
+                }
             }
 
             // Validate path_glob patterns early (syntax only).

@@ -245,6 +245,10 @@ pub struct RbtProjectConfig {
     pub version: String,
     pub models_dir: PathBuf,
     pub target_path: PathBuf,
+    /// Logical contract / model-pack version for fingerprints and skip-if-match (P5b).
+    /// Bump when silver SQL or bronze column contracts change meaning.
+    #[serde(default)]
+    pub contract_version: Option<String>,
     #[serde(default)]
     pub layers: HashMap<String, LayerConfig>,
     /// Optional; defaults to lake-as-truth Parquet re-read for `ref()`.
@@ -293,6 +297,7 @@ impl Default for RbtProjectConfig {
             version: "1.0.0".to_string(),
             models_dir: PathBuf::from("models"),
             target_path: PathBuf::from("lake/gold"),
+            contract_version: None,
             layers,
             materialize: MaterializeConfig::default(),
             scan: ScanConfig::default(),

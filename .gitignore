@@ -7,7 +7,18 @@ examples/full_e2e_rbt_example/lake/gold/
 examples/smoke_fixture/lake/silver/
 examples/smoke_fixture/lake/gold/
 examples/smoke_fixture/**/*.iceberg/
+examples/complex_bronze_landing/lake/silver/
+examples/complex_bronze_landing/lake/gold/
 examples/**/target/
+# rustbrain bootstrap / local agent scaffolding (knowledge notes under docs/goals etc. may be committed intentionally)
+AGENTS.md
+docs/AGENTS.md
+docs/BOOTSTRAP_CHECKLIST.md
+docs/implementation/module-map.generated.md
+.rustbrainignore
 # Bronze Arrow IPC spill cache, measure reports, WAP stages (local runs)
 **/.rbt/
 **/.wap/
+
+# rustbrain local index
+.brain/
