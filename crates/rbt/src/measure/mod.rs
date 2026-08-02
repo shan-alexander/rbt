@@ -526,10 +526,31 @@ async fn measure_complex_bronze(project_dir: &Path, output_dir: &Path) -> Result
 
     let config = RbtProjectConfig::load(&project)?;
     let dag = config.build_dag(&project, None)?;
+
+    // Prefer lake/lz/LATEST_RUN.json from fetch_bronze.py; fallback vars for empty CI.
+    let mut domain = "semicon-ai-research".to_string();
+    let mut report_date = "2026-08-01".to_string();
+    let mut run_id = "run20260802T022258Z".to_string();
+    let pointer = project.join("lake/lz/LATEST_RUN.json");
+    if pointer.is_file() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&pointer)?)
+        {
+            if let Some(s) = v.get("domain").and_then(|x| x.as_str()) {
+                domain = s.to_string();
+            }
+            if let Some(s) = v.get("report_date").and_then(|x| x.as_str()) {
+                report_date = s.to_string();
+            }
+            if let Some(s) = v.get("run_id").and_then(|x| x.as_str()) {
+                run_id = s.to_string();
+            }
+        }
+    }
+
     let mut scope = RunScope::new()
-        .with_var("domain", "acme.com")
-        .with_var("report_date", "2026-07-29")
-        .with_var("run_id", "r1");
+        .with_var("domain", domain.clone())
+        .with_var("report_date", report_date.clone())
+        .with_var("run_id", run_id.clone());
     scope.write_receipt = true;
     scope.skip_if_fingerprint_match = false;
 
@@ -542,8 +563,8 @@ async fn measure_complex_bronze(project_dir: &Path, output_dir: &Path) -> Result
         .context("E_RBT_MEASURE: complex_bronze execute failed")?;
     let wall_ms = start.elapsed().as_millis();
 
-    // Expect outer join to produce 3 unit rows on the sample lake.
-    let ok = summary.total_rows_produced >= 3;
+    // Research mini-lake: expect multi-model star with works + dims + fact.
+    let ok = summary.total_rows_produced >= 10 && summary.models_executed >= 5;
     Ok(MeasureReport {
         scenario: SCENARIO_COMPLEX_BRONZE.into(),
         project: config.name,
@@ -554,16 +575,16 @@ async fn measure_complex_bronze(project_dir: &Path, output_dir: &Path) -> Result
         bronze_sources: summary.bronze_sources_registered,
         peak_rss_kb: read_peak_rss_kb().or(rss0),
         notes: vec![
-            "Multi-artifact bronze + on_missing empty + outer unit status".into(),
+            "Research papers mini-lake: PubMed/Crossref bronze → silver stg → gold tf/marts".into(),
             format!("fingerprint={:?}", summary.bronze_fingerprint),
             format!("receipt={:?}", summary.receipt_path),
-            "Run vars: domain=acme.com report_date=2026-07-29 run_id=r1".into(),
+            format!("Run vars: domain={domain} report_date={report_date} run_id={run_id}"),
         ],
         ok,
         error: if ok {
             None
         } else {
-            Some("expected at least 3 rows from sample outer join".into())
+            Some("expected multi-model research lake materialize (works+dims+fact)".into())
         },
         mode_compare: None,
         synthetic_rows: None,

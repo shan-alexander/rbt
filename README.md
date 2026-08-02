@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.7.2`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine + stream + Iceberg SoR; **P4** measure/WAP/incremental/UDFs; **P5** run scope / empty bronze / receipts / measure packs; **P6** parts sources, lineage stamps, relationship tests.
+> **Status:** **`0.7.3`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine + stream + Iceberg SoR; **P4** measure/WAP/incremental/UDFs; **P5** run scope / empty bronze / receipts / measure packs; **P6** parts sources, lineage stamps, relationship tests.
 
 ## Why rbt
 

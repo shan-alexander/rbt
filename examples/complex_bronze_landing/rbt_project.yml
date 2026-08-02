@@ -1,7 +1,9 @@
-# Multi-artifact bronze → silver stage endpoints → gold transforms → gold marts.
-name: complex_bronze_landing
-version: "0.3.0"
-contract_version: "topology-v1"
+# Research-papers mini lakehouse
+# Topic: semiconductors + ML / neuromorphic computing
+# Bronze: PubMed + Crossref + arXiv (polite public APIs)
+name: research_papers_lake
+version: "1.0.0"
+contract_version: "research-papers-v1"
 models_dir: models
 target_path: $lake/gold
 
@@ -13,7 +15,6 @@ layers:
     path: models/staging
     target_path: $lake/silver/stage
     default_format: parquet
-  # Gold transforms: ref stg_* only (silver endpoints). Never silver/tf after stg.
   transforms:
     path: models/transforms
     target_path: $lake/gold/tf

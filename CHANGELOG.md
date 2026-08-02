@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.3] — 2026-08-02
+
+### Examples
+
+- **`complex_bronze_landing`** rebuilt as a **research-papers mini lakehouse**
+  (semiconductors + ML): polite bronze lander (`scripts/fetch_bronze.py`) for
+  PubMed E-utilities (XML), Crossref JSON, arXiv Atom (when not rate-limited),
+  `robots.txt`, and HTML abstract cards
+- Mixed bronze filetypes under hive partitions; silver `stg_*` endpoints; gold
+  `tf_paper_status` + dims/fact with SK + Unknown + relationships
+- Measure scenario `complex_bronze` reads `lake/lz/LATEST_RUN.json`
+
 ## [0.7.2] — 2026-08-01
 
 ### Fixed (medallion topology)
