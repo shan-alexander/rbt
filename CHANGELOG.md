@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (RBT-A6 — declared schema emit)
+
+- `core/schema_emit`: shared helpers — `try_declared_schema`, `empty_batch_for_frontmatter`,
+  `ensure_declared_columns`, `merge_stream_and_declared`, `SUPPORTED_LOGICAL_DTYPES`
+- Zero-row SQL materialize writes Parquet with **declared** columns (not empty schema)
+- Non-empty materialize: keep SQL columns; append missing declared cols as nulls
+- Bronze `on_missing: empty` uses the same empty-batch helper (strict dtype on listed cols)
+- Preview applies the same schema merge; docs-only columns (no `dtype`) are soft-skipped
+- Docs: dtype map in `COMPLEX_BRONZE_AND_RUN_SCOPE.md`
+
 ### Added (RBT-A5 — parts-only publish / consolidate policy)
 
 - `materialize.consolidate`: `auto` (default) | `never` | `always`

@@ -385,6 +385,9 @@ Large incremental models never rewrite a multi-GB single file unless consolidate
 
 ## 8. Feature RBT-A6 — Declared schema emit (stable contracts)
 
+> **Status:** **Implemented** on Unreleased (`core/schema_emit`, zero-row materialize/preview,
+> bronze empty via shared helper, dtype inventory + docs).
+
 ### Goal
 
 When bronze is missing/empty (`on_missing: empty`) or SQL returns zero rows, the **published** table still has **all declared frontmatter columns** with correct Arrow/Parquet types (NULL values), plus any partition columns.

@@ -2,11 +2,10 @@
 
 use crate::core::run_scope::OnMissing;
 use anyhow::{bail, Context, Result};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// How `rbt compile` treats missing/unresolvable bronze `scan_path` entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -391,49 +390,10 @@ impl StagingFrontmatter {
     /// Build Arrow schema for empty bronze frames (`on_missing: empty`).
     ///
     /// Fields: declared `columns` with `dtype`, then any `partition_by` keys not already
-    /// present (Utf8), then optional `_source_path`.
+    /// present (Utf8), then optional `_source_path`. Shared with materialize via
+    /// [`crate::core::schema_emit`] (RBT-A6).
     pub fn empty_frame_schema(&self) -> Result<SchemaRef> {
-        let mut fields: Vec<Field> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        if let Some(cols) = &self.columns {
-            for (name, meta) in cols {
-                let dtype = meta
-                    .dtype
-                    .as_deref()
-                    .with_context(|| {
-                        format!(
-                            "E_RBT_EMPTY_SCHEMA: column '{name}' needs dtype: for on_missing: empty \
-                             (e.g. utf8, int64, float64, bool, binary, timestamp)"
-                        )
-                    })?;
-                let dt = parse_logical_dtype(dtype).with_context(|| {
-                    format!("E_RBT_EMPTY_SCHEMA: column '{name}' dtype '{dtype}'")
-                })?;
-                fields.push(Field::new(name, dt, true));
-                seen.insert(name.clone());
-            }
-        }
-
-        if let Some(parts) = &self.partition_by {
-            for p in parts {
-                if seen.insert(p.clone()) {
-                    fields.push(Field::new(p, DataType::Utf8, true));
-                }
-            }
-        }
-
-        if self.inject_source_path.unwrap_or(false) && seen.insert("_source_path".into()) {
-            fields.push(Field::new("_source_path", DataType::Utf8, true));
-        }
-
-        if fields.is_empty() {
-            bail!(
-                "E_RBT_EMPTY_SCHEMA: on_missing: empty requires columns with dtype \
-                 and/or partition_by (model scan contract has no schema fields)"
-            );
-        }
-        Ok(Arc::new(Schema::new(fields)))
+        crate::core::schema_emit::declared_schema_for_frontmatter(self)
     }
 }
 

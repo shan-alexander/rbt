@@ -317,9 +317,23 @@ impl TransformationEngine {
                 target.name
             )
         })?;
-        let batches = df.collect().await.with_context(|| {
+        let sql_schema: arrow::datatypes::SchemaRef = {
+            let df_schema = df.schema();
+            std::sync::Arc::new(df_schema.as_arrow().clone())
+        };
+        let mut batches = df.collect().await.with_context(|| {
             format!("E_RBT_PREVIEW: collect failed for model '{}'", target.name)
         })?;
+        // RBT-A6: preview also exposes declared columns when SQL is zero-row / missing cols.
+        let declared = target
+            .frontmatter
+            .as_ref()
+            .and_then(|fm| crate::core::schema_emit::try_declared_schema(fm).ok().flatten());
+        batches = crate::core::schema_emit::align_batches_to_declared(
+            &batches,
+            sql_schema.as_ref(),
+            declared.as_deref(),
+        )?;
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
         Ok(PreviewResult {
@@ -492,6 +506,19 @@ impl TransformationEngine {
                         model: model.name.clone(),
                         bronze_fingerprint: Some(fp.clone()),
                     });
+                }
+                // RBT-A6: merge declared columns into published schema (zero-row + missing cols)
+                if let Some(fm) = model.frontmatter.as_ref() {
+                    if let Some(schema) = crate::core::schema_emit::try_declared_schema(fm)
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_SCHEMA_EMIT: model '{}' declared columns invalid",
+                                model.name
+                            )
+                        })?
+                    {
+                        write_opts = write_opts.with_declared_schema(schema);
+                    }
                 }
                 let mode = materialize.effective_mode();
 
@@ -1043,18 +1070,32 @@ async fn execute_model_collect(
     assertions: &[Assertion],
     fail_on_error: bool,
 ) -> Result<usize> {
+    use crate::core::schema_emit::align_batches_to_declared;
+    use crate::materializer::write_empty_parquet;
+    use datafusion::common::DFSchema;
+
     let df = ctx.sql(&model.compiled_sql).await.with_context(|| {
         format!(
             "E_RBT_SQL: execution failed for model '{}' (compiled: {})",
             model.name, model.compiled_sql
         )
     })?;
+    // DFSchema → Arrow Schema for declared merge on zero-row collect.
+    let sql_schema: arrow::datatypes::SchemaRef = {
+        let df_schema: &DFSchema = df.schema();
+        std::sync::Arc::new(df_schema.as_arrow().clone())
+    };
     let mut batches = df.collect().await.with_context(|| {
         format!(
             "E_RBT_SQL: collect failed for model '{}'",
             model.name
         )
     })?;
+    batches = align_batches_to_declared(
+        &batches,
+        sql_schema.as_ref(),
+        write_opts.declared_schema.as_deref(),
+    )?;
     if let Some(ref lin) = write_opts.lineage {
         batches = batches
             .iter()
@@ -1063,8 +1104,27 @@ async fn execute_model_collect(
     }
     let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
 
-    MultiFormatWriter::write_batches(&batches, &model.output_format, dest_path)?;
-    // Prefer atomic parquet path for primary formats already handled inside MultiFormatWriter.
+    // Zero-row: still publish schema-stable parquet when we have a batch/schema (A6).
+    if row_count == 0
+        && matches!(
+            model.output_format,
+            OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+        )
+    {
+        let schema = batches
+            .first()
+            .map(|b| b.schema())
+            .unwrap_or(sql_schema);
+        write_empty_parquet(schema, dest_path, write_opts).with_context(|| {
+            format!(
+                "E_RBT_SCHEMA_EMIT: zero-row write for model '{}' → {}",
+                model.name,
+                dest_path.display()
+            )
+        })?;
+    } else {
+        MultiFormatWriter::write_batches(&batches, &model.output_format, dest_path)?;
+    }
 
     if !assertions.is_empty() {
         let result = RecordBatchValidator::validate_batches(&batches, assertions);
@@ -1539,6 +1599,87 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
             .await?;
         assert_eq!(summary.models_executed, 2);
         assert_eq!(summary.total_rows_produced, 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zero_row_emits_declared_schema() -> Result<()> {
+        use crate::core::frontmatter::{ColumnMeta, StagingFrontmatter};
+        use crate::core::project::MaterializeConfig;
+        use arrow::datatypes::DataType;
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("stg_empty.parquet");
+        let mut dag = ModelDag::new();
+        // Zero-row SQL — only exposes `id` from SELECT; declared adds name + entity
+        let idx = dag.add_model_with_format(
+            "stg_empty",
+            "SELECT CAST(1 AS BIGINT) AS id WHERE false",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(dest.to_string_lossy().into()),
+            "",
+        )?;
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "id".into(),
+            ColumnMeta {
+                dtype: Some("int64".into()),
+                ..Default::default()
+            },
+        );
+        cols.insert(
+            "name".into(),
+            ColumnMeta {
+                dtype: Some("utf8".into()),
+                ..Default::default()
+            },
+        );
+        cols.insert(
+            "docs_only".into(),
+            ColumnMeta {
+                description: Some("no dtype — soft skip".into()),
+                ..Default::default()
+            },
+        );
+        dag.graph[idx].frontmatter = Some(StagingFrontmatter {
+            columns: Some(cols),
+            partition_by: Some(vec!["entity".into()]),
+            ..Default::default()
+        });
+        dag.build_graph()?;
+
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(
+                &dag,
+                temp.path(),
+                temp.path(),
+                &MaterializeConfig::default(),
+            )
+            .await?;
+        assert_eq!(summary.models_executed, 1);
+        assert_eq!(summary.total_rows_produced, 0);
+        assert!(dest.exists());
+
+        let file = std::fs::File::open(&dest)?;
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let schema = builder.schema();
+        assert_eq!(
+            schema.field_with_name("id").unwrap().data_type(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            schema.field_with_name("name").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        assert_eq!(
+            schema.field_with_name("entity").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        // docs_only without dtype must not appear
+        assert!(schema.index_of("docs_only").is_err());
         Ok(())
     }
 

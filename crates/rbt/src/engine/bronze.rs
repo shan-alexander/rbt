@@ -405,12 +405,10 @@ fn is_empty_or_missing_err(e: &anyhow::Error) -> bool {
         || s.contains("bronze scan produced zero batches")
 }
 
-/// Zero-row MemTable with declared schema; partition keys filled from run scope when present.
+/// Zero-row MemTable with declared schema (RBT-A6 `empty_batch_for_frontmatter`).
 fn empty_memtable(fm: &StagingFrontmatter, scope: &RunScope) -> Result<Arc<dyn TableProvider>> {
-    let schema = fm.empty_frame_schema()?;
-    // Empty batch — partition constants are for SQL via require_partitions on non-empty scans;
-    // empty frame still exposes partition columns as nullable Utf8 for outer joins.
-    let batch = RecordBatch::new_empty(schema.clone());
+    let batch = crate::core::schema_emit::empty_batch_for_frontmatter(fm)?;
+    let schema = batch.schema();
     let _ = scope; // reserved: future constant partition columns on empty frames
     let mem = MemTable::try_new(schema, vec![vec![batch]])
         .map_err(|e| anyhow::anyhow!("MemTable empty: {e}"))?;

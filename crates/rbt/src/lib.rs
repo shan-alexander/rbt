@@ -69,7 +69,9 @@ pub use core::{
     RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
     ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
     DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
-    DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES, SUPPORTED_LOGICAL_DTYPES,
+    align_batches_to_declared, declared_schema_for_frontmatter, empty_batch_for_frontmatter,
+    ensure_declared_columns, merge_stream_and_declared, try_declared_schema,
 };
 
 pub use engine::{

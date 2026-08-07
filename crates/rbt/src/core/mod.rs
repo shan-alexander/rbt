@@ -8,6 +8,7 @@ pub mod paths;
 pub mod project;
 pub mod receipt;
 pub mod run_scope;
+pub mod schema_emit;
 pub mod select;
 
 pub use contracts::{
@@ -41,5 +42,10 @@ pub use receipt::{
 };
 pub use run_scope::{
     expand_braced_vars, fnv1a64, OnMissing, RunScope, ScopeValue, DEFAULT_MULTI_VAR_LIMIT,
+};
+pub use schema_emit::{
+    align_batches_to_declared, declared_schema_for_frontmatter, empty_batch_for_frontmatter,
+    ensure_declared_columns, merge_stream_and_declared, try_declared_schema,
+    SUPPORTED_LOGICAL_DTYPES,
 };
 pub use select::{model_has_test_contract, parse_select_spec, SelectMode, SelectToken};

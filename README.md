@@ -159,6 +159,20 @@ materialize:
 rbt consolidate -p proj -s stg_entity_events
 ```
 
+### Declared schema emit (**A6**)
+
+```yaml
+# frontmatter — physical contract for empty bronze / zero-row materialize
+columns:
+  url: { dtype: utf8 }
+  score: { dtype: int64 }
+partition_by: [entity, report_date]
+on_missing: empty   # bronze: zero-row typed frame when scan empty
+```
+
+Zero-row SQL and missing SELECT columns still publish declared fields (null-typed).
+See [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md) dtype map.
+
 ### Contracts registry (optional enums)
 
 Closed vocabularies in `rbt_project.yml` (`contracts.enums`) + model
@@ -199,7 +213,8 @@ my_project/
   lake/gold/…
 ```
 
-Staging frontmatter: `scan_path`, `source_format`, `path_glob`, `partition_by`, `grain`, `tests`, `columns.*.description` / `context`.  
+Staging frontmatter: `scan_path`, `source_format`, `path_glob`, `partition_by`, `grain`, `tests`,
+`columns.*.description` / `context` / `dtype` (A6 physical schema).  
 Multi-root lakes, absolute targets, glob semantics, protobuf bronze, and when `path_glob` disables DataFusion listing pushdown: [docs/MULTI_ROOT_AND_PATH_GLOB.md](docs/MULTI_ROOT_AND_PATH_GLOB.md).
 
 ### Materialize + `ref()` (optional)

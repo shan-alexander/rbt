@@ -63,7 +63,7 @@ let summary = engine
     .await?;
 ```
 
-## 2. Optional artifact families (`on_missing: empty`)
+## 2. Optional artifact families (`on_missing: empty`) + declared schema (RBT-A6)
 
 ```yaml
 ---
@@ -82,6 +82,43 @@ columns:
 When the scan root is missing **or** filters match **no files**, rbt registers a **zero-row** table with the declared schema (column dtypes + any `partition_by` keys not already listed). Outer-join silver SQL stays valid under partial bronze.
 
 `on_missing: error` (default) keeps fail-closed behavior for required families (e.g. plan inventory).
+
+### Declared schema emit (RBT-A6)
+
+Frontmatter `columns.*.dtype` is a **physical schema contract** used for:
+
+| Path | Behavior |
+|------|----------|
+| Bronze `on_missing: empty` | Zero-row MemTable with full declared schema (strict: every listed col needs `dtype`) |
+| Materialize zero-row SQL | Published Parquet still has SQL cols **plus** missing declared cols (null-typed) |
+| Materialize with rows | SQL columns kept; any declared field missing from SELECT is appended as all-null |
+| `rbt preview` | Same merge so hosts see stable field names on empty slices |
+
+Implementation: [`core/schema_emit.rs`](../crates/rbt/src/core/schema_emit.rs) —
+`empty_batch_for_frontmatter`, `ensure_declared_columns`, `try_declared_schema`.
+
+**Supported `dtype` tokens** (aliases in parentheses):
+
+| Token | Arrow |
+|-------|-------|
+| `utf8` (`string`, `str`, `varchar`, `text`) | Utf8 |
+| `int64` (`long`, `bigint`, `i64`) | Int64 |
+| `int32` (`int`, `i32`) | Int32 |
+| `int16` / `int8` | Int16 / Int8 |
+| `uint64` / `uint32` | UInt64 / UInt32 |
+| `float64` (`double`, `f64`) | Float64 |
+| `float32` (`float`, `f32`) | Float32 |
+| `bool` (`boolean`) | Boolean |
+| `binary` (`bytes`, `blob`) | Binary |
+| `date32` (`date`) | Date32 |
+| `timestamp` (`timestamp_us`, `timestamptz`) | Timestamp(µs) |
+| `timestamp_ms` / `_ns` / `_s` | Timestamp(ms/ns/s) |
+
+Notes:
+
+- Columns **without** `dtype` are documentation-only (description/context); soft materialize path ignores them.
+- Existing SQL column types win; declared dtype does not cast SQL fields.
+- Error codes: `E_RBT_EMPTY_SCHEMA`, `E_RBT_SCHEMA_EMIT`.
 
 ## 3. Scoped part replace (RBT-A2)
 
