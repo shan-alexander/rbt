@@ -236,9 +236,6 @@ pub async fn materialize_scoped_replace_stream(
     let part_name = format!("part-{scope_id}.parquet");
     let part_path = parts_dir.join(&part_name);
 
-    // Subtract previous rows for this scope part (if any)
-    let prev_rows = manifest.part_rows.get(&part_name).copied().unwrap_or(0);
-
     let mut stream = stream;
     let stats = crate::materializer::stream::write_parquet_stream(
         &mut stream,
@@ -255,52 +252,20 @@ pub async fn materialize_scoped_replace_stream(
     })?;
 
     if stats.rows == 0 {
-        // Empty result for this scope: remove part if present so peers dominate.
+        // Empty result for this scope: drop part so peer scopes dominate the ref().
         let _ = fs::remove_file(&part_path);
         manifest.parts.retain(|p| p != &part_name);
         manifest.part_rows.remove(&part_name);
-        manifest.total_rows = recompute_total_rows(&manifest);
-        // If we only had total_rows without part_rows history, best-effort subtract
-        if prev_rows > 0 && manifest.part_rows.is_empty() {
-            manifest.total_rows = manifest.total_rows.saturating_sub(prev_rows);
-        }
-        manifest.updated_at_ms = now_ms();
-        manifest.strategy = "scoped_replace".into();
-        write_manifest(&parts_dir, &manifest)?;
-        write_parts_pointer(dest_parquet, &parts_dir, "scoped_replace")?;
-        return Ok(StreamWriteStats {
-            rows: 0,
-            batches: stats.batches,
-            path: parts_dir,
-            bytes_written: 0,
-            validation: stats.validation,
-        });
-    }
-
-    if !manifest.parts.iter().any(|p| p == &part_name) {
-        manifest.parts.push(part_name.clone());
-        manifest.parts.sort();
-    }
-    manifest.part_rows.insert(part_name, stats.rows as u64);
-    // Reconcile total: if we only knew prev via total without part_rows, adjust
-    if prev_rows > 0 && !manifest.part_rows.is_empty() {
-        // recompute from map is authoritative
-        manifest.total_rows = recompute_total_rows(&manifest);
-    } else if prev_rows > 0 {
-        manifest.total_rows = manifest
-            .total_rows
-            .saturating_sub(prev_rows)
-            .saturating_add(stats.rows as u64);
     } else {
-        manifest.total_rows = recompute_total_rows(&manifest);
-        if manifest.total_rows == 0 {
-            manifest.total_rows = stats.rows as u64;
+        if !manifest.parts.iter().any(|p| p == &part_name) {
+            manifest.parts.push(part_name.clone());
+            manifest.parts.sort();
         }
+        manifest.part_rows.insert(part_name, stats.rows as u64);
     }
-    // Always prefer sum of part_rows when map is complete
-    if manifest.part_rows.len() == manifest.parts.len() {
-        manifest.total_rows = recompute_total_rows(&manifest);
-    }
+    // Authoritative total = sum of tracked part_rows (legacy manifests without
+    // part_rows keep prior total_rows via recompute_total_rows fallback).
+    manifest.total_rows = recompute_total_rows(&manifest);
     manifest.updated_at_ms = now_ms();
     manifest.strategy = "scoped_replace".into();
     write_manifest(&parts_dir, &manifest)?;
@@ -310,7 +275,11 @@ pub async fn materialize_scoped_replace_stream(
         rows: stats.rows,
         batches: stats.batches,
         path: parts_dir,
-        bytes_written: stats.bytes_written,
+        bytes_written: if stats.rows == 0 {
+            0
+        } else {
+            stats.bytes_written
+        },
         validation: stats.validation,
     })
 }
@@ -486,6 +455,57 @@ mod tests {
         let id2 = scope_part_id("stg_x", "1", &["report_date".into(), "entity".into()], &scope)?;
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 16);
+
+        // Multi-value part key hashes as one canonical part (A1 ∩ A2)
+        let multi = RunScope::new()
+            .with_var_multi("entity", ["a.com", "b.com"])?
+            .with_var("report_date", "2026-08-07");
+        let mid = scope_part_id(
+            "stg_x",
+            "1",
+            &["entity".into(), "report_date".into()],
+            &multi,
+        )?;
+        assert_ne!(mid, id1);
+        assert_eq!(mid.len(), 16);
+
+        // Empty scope after replace removes part
+        let st_empty = materialize_scoped_replace_stream(
+            ctx.sql("SELECT 1 AS id WHERE false")
+                .await?
+                .execute_stream()
+                .await?,
+            &dest,
+            &opts,
+            &[],
+            "scope_aaa",
+        )
+        .await?;
+        assert_eq!(st_empty.rows, 0);
+        let m2 = load_manifest(&parts)?;
+        assert!(!m2.parts.iter().any(|p| p == "part-scope_aaa.parquet"));
+        assert_eq!(m2.total_rows, 1); // only bbb left
         Ok(())
+    }
+
+    #[test]
+    fn resolve_part_keys_defaults() {
+        let scope = RunScope::new()
+            .with_var("entity", "a.com")
+            .with_var("report_date", "2026-08-07")
+            .with_var("noise", "x");
+        let keys = resolve_part_keys(
+            None,
+            Some(&["entity".into(), "report_date".into(), "run_id".into()]),
+            &scope,
+        );
+        assert_eq!(keys, vec!["entity", "report_date"]);
+
+        let explicit = resolve_part_keys(
+            Some(&["entity".into()]),
+            Some(&["entity".into(), "report_date".into()]),
+            &scope,
+        );
+        assert_eq!(explicit, vec!["entity"]);
     }
 }

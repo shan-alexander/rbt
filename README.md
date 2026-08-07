@@ -102,6 +102,21 @@ rbt run -p proj --var 'entity:=["a.com","b.com"]' --var report_date=2026-08-07
 Showcase: [examples/a1_multi_value_scope](examples/a1_multi_value_scope/). Details:
 [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md).
 
+### Scoped part replace (**A2**)
+
+```yaml
+# model frontmatter
+materialization: scoped_replace
+partition_by: [entity, report_date]
+```
+
+```bash
+rbt run -p proj --var entity=a.com --var report_date=2026-08-07
+# re-run same vars → replaces part-{scope_id}.parquet only; peer entities kept
+```
+
+Showcase: [examples/a2_scoped_replace](examples/a2_scoped_replace/).
+
 ### Contracts registry (optional enums)
 
 Closed vocabularies in `rbt_project.yml` (`contracts.enums`) + model

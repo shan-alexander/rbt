@@ -400,6 +400,55 @@ fn bench_a1_multi_value_scope(c: &mut Criterion) {
     g.finish();
 }
 
+/// RBT-A2: replace same scope twice (write cost of one part overwrite).
+fn bench_a2_scoped_replace(c: &mut Criterion) {
+    use datafusion::prelude::SessionContext;
+    use rbt::{materialize_scoped_replace_stream, MaterializeWriteOptions};
+    use tempfile::tempdir;
+
+    let runtime = rt();
+    let mut g = c.benchmark_group("a2_scoped_replace");
+    g.sample_size(25);
+    g.warm_up_time(Duration::from_secs(1));
+    g.measurement_time(Duration::from_secs(5));
+
+    // 10 × 10 = 100 rows via portable CROSS JOIN of unions
+    let sql_100 = "SELECT a.n * 10 + b.n AS id FROM \
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 \
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) a \
+        CROSS JOIN \
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 \
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) b";
+
+    g.bench_function("replace_same_scope_twice_100_rows", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let temp = tempdir().unwrap();
+                let dest = temp.path().join("stg.parquet");
+                let opts = MaterializeWriteOptions::default();
+                let ctx = SessionContext::new();
+                for _ in 0..2 {
+                    let stream = ctx
+                        .sql(sql_100)
+                        .await
+                        .unwrap()
+                        .execute_stream()
+                        .await
+                        .unwrap();
+                    let st = materialize_scoped_replace_stream(
+                        stream, &dest, &opts, &[], "benchscope",
+                    )
+                    .await
+                    .unwrap();
+                    black_box(st.rows);
+                }
+            })
+        });
+    });
+
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_compile,
@@ -409,5 +458,6 @@ criterion_group!(
     bench_run_e2e_select,
     bench_run_e2e_full,
     bench_a1_multi_value_scope,
+    bench_a2_scoped_replace,
 );
 criterion_main!(benches);

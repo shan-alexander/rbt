@@ -604,6 +604,18 @@ impl TransformationEngine {
                             model.name
                         );
                     }
+                    (
+                        Materialization::ScopedReplace | Materialization::IncrementalAppend,
+                        _,
+                        MaterializeMode::Collect,
+                    ) => {
+                        bail!(
+                            "E_RBT_INCREMENTAL: model '{}': parts strategies (scoped_replace / \
+                             incremental_append) require stream materialize mode \
+                             (set materialize.mode: stream or omit for default)",
+                            model.name
+                        );
+                    }
                     (_, _, MaterializeMode::Stream) => {
                         let stats = execute_model_stream(
                             &self.ctx,
@@ -645,7 +657,15 @@ impl TransformationEngine {
                 }
 
                 // Expose model for downstream {{ ref() }} per project materialize policy.
+                // Parts strategies re-register even when this scope wrote 0 rows so peer
+                // parts remain visible to later models in the same run.
+                let parts_strategy = uses_parts_directory(&model.materialization)
+                    && matches!(
+                        model.output_format,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+                    );
                 if row_count > 0
+                    || parts_strategy
                     || matches!(
                         model.output_format,
                         OutputFormat::Parquet
@@ -655,39 +675,41 @@ impl TransformationEngine {
                     )
                 {
                     let backend = materialize.choose_ref_backend(row_count);
-                    if row_count > 0 {
-                        let ref_path = if uses_parts_directory(&model.materialization)
-                            && matches!(
-                                model.output_format,
-                                OutputFormat::Parquet | OutputFormat::ZeroCopyClone
-                            ) {
+                    if row_count > 0 || parts_strategy {
+                        let ref_path = if parts_strategy {
                             incremental_ref_path(&dest_path)
                         } else {
                             dest_path.clone()
                         };
-                        register_model_for_ref(
-                            &self.ctx,
-                            &model.name,
-                            &model.output_format,
-                            &ref_path,
-                            backend,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "E_RBT_REF_REGISTER: model '{}' (backend={:?}, rows={}, mode={:?})",
-                                model.name, backend, row_count, mode
+                        // Skip register if parts dir missing (never ran successfully)
+                        let should_register = !parts_strategy
+                            || ref_path.is_dir()
+                            || row_count > 0;
+                        if should_register {
+                            register_model_for_ref(
+                                &self.ctx,
+                                &model.name,
+                                &model.output_format,
+                                &ref_path,
+                                backend,
                             )
-                        })?;
-                        tracing::debug!(
-                            model = %model.name,
-                            rows = row_count,
-                            ?backend,
-                            ?mode,
-                            strategy = ?materialize.ref_strategy,
-                            mat = ?model.materialization,
-                            "registered model for ref()"
-                        );
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_REF_REGISTER: model '{}' (backend={:?}, rows={}, mode={:?})",
+                                    model.name, backend, row_count, mode
+                                )
+                            })?;
+                            tracing::debug!(
+                                model = %model.name,
+                                rows = row_count,
+                                ?backend,
+                                ?mode,
+                                strategy = ?materialize.ref_strategy,
+                                mat = ?model.materialization,
+                                "registered model for ref()"
+                            );
+                        }
                     }
                 }
 
