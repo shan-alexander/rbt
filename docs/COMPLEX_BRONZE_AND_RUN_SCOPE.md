@@ -83,7 +83,29 @@ When the scan root is missing **or** filters match **no files**, rbt registers a
 
 `on_missing: error` (default) keeps fail-closed behavior for required families (e.g. plan inventory).
 
-## 3. Stage modes (author intent)
+## 3. Scoped part replace (RBT-A2)
+
+When re-running a single entity/date must **not** grow infinite append parts:
+
+```yaml
+---
+materialization: scoped_replace
+partition_by: [entity, report_date]
+# part_key: [entity, report_date]   # optional; default = partition_by ∩ run vars
+---
+```
+
+```bash
+rbt run -p proj --var entity=a.com --var report_date=2026-08-07
+# writes …/stg_x.parts/part-{scope_id}.parquet
+rbt run -p proj --var entity=a.com --var report_date=2026-08-07
+# replaces the same part; other entities' parts remain
+```
+
+`scope_id` is a 16-hex FNV of model + contract_version + sorted part_key vars
+(multi vars use their canonical form). Distinct from `incremental_append` (always adds).
+
+## 4. Stage modes (author intent)
 
 Frontmatter `stage_mode` documents **how silver relates to bronze** (engine may use it later; SQL still owns transforms today):
 

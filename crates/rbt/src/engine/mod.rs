@@ -14,6 +14,7 @@ use crate::core::receipt::{
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
     incremental_ref_path, load_parquet_batches, materialize_incremental_append_stream,
+    materialize_scoped_replace_stream, resolve_part_keys, scope_part_id, uses_parts_directory,
     materialize_stream, new_wap_run_id, sibling_iceberg_dir, stamp_batch, wap_publish,
     LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
 };
@@ -497,7 +498,7 @@ impl TransformationEngine {
                     if matches!(
                         model.output_format,
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone
-                    ) && model.materialization != Materialization::IncrementalAppend
+                    ) && !uses_parts_directory(&model.materialization)
                     {
                         let paths =
                             WapModelPaths::for_model(project_dir, run_id, &model.name, &dest_path);
@@ -543,13 +544,63 @@ impl TransformationEngine {
                         (stats.rows, Some(stats))
                     }
                     (
+                        Materialization::ScopedReplace,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Stream,
+                    ) => {
+                        let contract = effective_contract_version(config, scope);
+                        let part_keys = resolve_part_keys(
+                            model
+                                .frontmatter
+                                .as_ref()
+                                .and_then(|f| f.part_key.as_deref()),
+                            model
+                                .frontmatter
+                                .as_ref()
+                                .and_then(|f| f.partition_by.as_deref()),
+                            scope,
+                        );
+                        let sid = scope_part_id(
+                            &model.name,
+                            &contract,
+                            &part_keys,
+                            scope,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_PART_KEY: model '{}' cannot build scope_id",
+                                model.name
+                            )
+                        })?;
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let stream = df.execute_stream().await?;
+                        let stats = materialize_scoped_replace_stream(
+                            stream,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                            &sid,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_INCREMENTAL: model '{}' scoped_replace failed (scope_id={sid})",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        (stats.rows, Some(stats))
+                    }
+                    (
                         Materialization::IncrementalMerge,
                         _,
                         _,
                     ) => {
                         bail!(
                             "E_RBT_INCREMENTAL: model '{}': incremental_merge is not implemented yet \
-                             (use incremental_append for part-file appends)",
+                             (use incremental_append or scoped_replace for part files)",
                             model.name
                         );
                     }
@@ -605,7 +656,7 @@ impl TransformationEngine {
                 {
                     let backend = materialize.choose_ref_backend(row_count);
                     if row_count > 0 {
-                        let ref_path = if model.materialization == Materialization::IncrementalAppend
+                        let ref_path = if uses_parts_directory(&model.materialization)
                             && matches!(
                                 model.output_format,
                                 OutputFormat::Parquet | OutputFormat::ZeroCopyClone

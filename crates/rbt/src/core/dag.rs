@@ -16,6 +16,8 @@ pub enum Materialization {
     View,
     Table,
     IncrementalAppend,
+    /// RBT-A2: deterministic part file per scope key; re-run replaces that part only.
+    ScopedReplace,
     IncrementalMerge,
     /// Native zero-copy metadata table clone (zero disk byte duplication)
     ZeroCopyClone,
@@ -27,11 +29,14 @@ pub fn parse_materialization_hint(s: &str) -> Result<Materialization> {
         "table" | "full_refresh" | "full-refresh" => Ok(Materialization::Table),
         "view" => Ok(Materialization::View),
         "incremental_append" | "append" | "incremental" => Ok(Materialization::IncrementalAppend),
+        "scoped_replace" | "incremental_replace" | "replace_scope" => {
+            Ok(Materialization::ScopedReplace)
+        }
         "incremental_merge" | "merge" => Ok(Materialization::IncrementalMerge),
         "zero_copy_clone" | "clone" => Ok(Materialization::ZeroCopyClone),
         other => bail!(
             "E_RBT_MATERIALIZATION: unknown materialization '{other}' \
-             (table | view | incremental_append | incremental_merge)"
+             (table | view | incremental_append | scoped_replace | incremental_merge)"
         ),
     }
 }

@@ -311,6 +311,10 @@ pub struct StagingFrontmatter {
     /// Also auto-detected when the resolved path is a parts directory.
     #[serde(default)]
     pub parts: Option<bool>,
+    /// RBT-A2: vars that form the scoped part identity (default: intersection of
+    /// `partition_by` and run-scope vars). Used by `materialization: scoped_replace`.
+    #[serde(default)]
+    pub part_key: Option<Vec<String>>,
     /// Stamp `_rbt_run_id`, `_rbt_contract_version`, `_rbt_model` (+ optional fingerprint)
     /// onto each output row at materialize time (P6 lineage).
     #[serde(default)]

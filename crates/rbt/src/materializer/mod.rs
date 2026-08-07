@@ -14,8 +14,9 @@ pub use iceberg_catalog::{
     IcebergCatalogOptions, IcebergCatalogWriteStats,
 };
 pub use incremental::{
-    clear_incremental_parts, incremental_ref_path, load_manifest, materialize_incremental_append_stream,
-    parts_dir_for_parquet, IncrementalManifest,
+    clear_incremental_parts, incremental_ref_path, load_manifest,
+    materialize_incremental_append_stream, materialize_scoped_replace_stream, parts_dir_for_parquet,
+    resolve_part_keys, scope_part_id, uses_parts_directory, IncrementalManifest,
 };
 pub use lineage::{stamp_batch, stamped_schema, LineageStamp};
 pub use stream::{

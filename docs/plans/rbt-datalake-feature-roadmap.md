@@ -177,6 +177,9 @@ If a var is multi but **not** in `partition_by`, still expand templates only if 
 
 ## 4. Feature RBT-A2 — Scoped part identity + replace
 
+> **Status:** **Implemented** on feat line (`materialization: scoped_replace`, `part_key`,
+> `scope_part_id`, manifest `part_rows`). See `materializer/incremental.rs` + COMPLEX_BRONZE §3.
+
 ### Goal
 
 When materializing **append-style** (or a new strategy), write a **deterministic part file** keyed by the active run **scope** (partition vars), and **replace** that part on re-run without deleting peer parts from other scopes.

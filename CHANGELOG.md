@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (RBT-A2 — scoped_replace materialization)
+
+- `materialization: scoped_replace` — deterministic `part-{scope_id}.parquet` under
+  `{model}.parts/`; re-run of the same scope **replaces** that part only
+- `part_key:` frontmatter (default: `partition_by` ∩ run vars); `scope_part_id` FNV hex
+- Manifest `part_rows` map for accurate totals after replace
+- Peer scopes untouched; `ref()` still lists the parts directory
+
 ### Added (RBT-A1 — multi-value partition scope)
 
 - **`ScopeValue`**: run vars are scalar or multi (`Single` / `Multi`)
