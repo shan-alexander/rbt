@@ -13,8 +13,9 @@ use crate::core::receipt::{
 };
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
-    incremental_ref_path, load_parquet_batches, materialize_incremental_append_stream,
-    materialize_scoped_replace_stream, resolve_part_keys, scope_part_id, uses_parts_directory,
+    consolidate_parts_to_parquet, incremental_ref_path, load_parquet_batches,
+    materialize_incremental_append_stream, materialize_scoped_replace_stream,
+    materialize_table_parts_only_stream, resolve_part_keys, scope_part_id, uses_parts_directory,
     materialize_stream, new_wap_run_id, sibling_iceberg_dir, stamp_batch, wap_publish,
     LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
 };
@@ -495,11 +496,15 @@ impl TransformationEngine {
                 let mode = materialize.effective_mode();
 
                 // WAP: write to stage path first; publish only after audit.
+                // Parts strategies (incl. table + consolidate:never) skip WAP staging.
+                let table_parts_only = matches!(model.materialization, Materialization::Table)
+                    && !materialize.consolidate.table_writes_monolith();
                 let (write_path, wap_paths) = if let Some(ref run_id) = wap_run_id {
                     if matches!(
                         model.output_format,
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone
                     ) && !uses_parts_directory(&model.materialization)
+                        && !table_parts_only
                     {
                         let paths =
                             WapModelPaths::for_model(project_dir, run_id, &model.name, &dest_path);
@@ -542,6 +547,13 @@ impl TransformationEngine {
                             )
                         })?;
                         log_assertion_result(model, &stats, fail_on_error)?;
+                        maybe_consolidate_after_parts(
+                            materialize,
+                            &dest_path,
+                            &write_opts,
+                            &model.name,
+                        )
+                        .await?;
                         (stats.rows, Some(stats))
                     }
                     (
@@ -592,6 +604,39 @@ impl TransformationEngine {
                             )
                         })?;
                         log_assertion_result(model, &stats, fail_on_error)?;
+                        maybe_consolidate_after_parts(
+                            materialize,
+                            &dest_path,
+                            &write_opts,
+                            &model.name,
+                        )
+                        .await?;
+                        (stats.rows, Some(stats))
+                    }
+                    (
+                        Materialization::Table,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Stream,
+                    ) if !materialize.consolidate.table_writes_monolith() => {
+                        // A5: consolidate: never → parts only for table
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let stream = df.execute_stream().await?;
+                        let stats = materialize_table_parts_only_stream(
+                            stream,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_CONSOLIDATE: model '{}' table parts-only failed",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
                         (stats.rows, Some(stats))
                     }
                     (
@@ -613,6 +658,18 @@ impl TransformationEngine {
                         bail!(
                             "E_RBT_INCREMENTAL: model '{}': parts strategies (scoped_replace / \
                              incremental_append) require stream materialize mode \
+                             (set materialize.mode: stream or omit for default)",
+                            model.name
+                        );
+                    }
+                    (
+                        Materialization::Table,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Collect,
+                    ) if !materialize.consolidate.table_writes_monolith() => {
+                        bail!(
+                            "E_RBT_CONSOLIDATE: model '{}': consolidate: never with table \
+                             materialization requires stream mode \
                              (set materialize.mode: stream or omit for default)",
                             model.name
                         );
@@ -660,7 +717,9 @@ impl TransformationEngine {
                 // Expose model for downstream {{ ref() }} per project materialize policy.
                 // Parts strategies re-register even when this scope wrote 0 rows so peer
                 // parts remain visible to later models in the same run.
-                let parts_strategy = uses_parts_directory(&model.materialization)
+                let parts_strategy = (uses_parts_directory(&model.materialization)
+                    || (matches!(model.materialization, Materialization::Table)
+                        && !materialize.consolidate.table_writes_monolith()))
                     && matches!(
                         model.output_format,
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone
@@ -796,6 +855,32 @@ impl TransformationEngine {
 
         Ok(summary)
     }
+}
+
+/// After parts strategies, optionally rebuild monolith when `consolidate: always`.
+async fn maybe_consolidate_after_parts(
+    materialize: &MaterializeConfig,
+    dest_path: &Path,
+    write_opts: &crate::materializer::MaterializeWriteOptions,
+    model_name: &str,
+) -> Result<()> {
+    if !materialize.consolidate.parts_also_write_monolith() {
+        return Ok(());
+    }
+    let stats = consolidate_parts_to_parquet(dest_path, write_opts)
+        .await
+        .with_context(|| {
+            format!(
+                "E_RBT_CONSOLIDATE: model '{model_name}' always-consolidate failed"
+            )
+        })?;
+    tracing::info!(
+        model = %model_name,
+        rows = stats.rows,
+        path = %dest_path.display(),
+        "consolidated parts → monolith parquet (consolidate: always)"
+    );
+    Ok(())
 }
 
 /// Build frontmatter assertion list + fail-on-error policy for a model.
@@ -1454,6 +1539,104 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
             .await?;
         assert_eq!(summary.models_executed, 2);
         assert_eq!(summary.total_rows_produced, 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_table_consolidate_never_parts_only_and_ref() -> Result<()> {
+        use crate::core::project::{ConsolidatePolicy, MaterializeConfig};
+        use crate::materializer::parts_dir_for_parquet;
+
+        let temp = tempfile::tempdir()?;
+        let stg = temp.path().join("stg_a.parquet");
+        let tf = temp.path().join("tf_b.parquet");
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_a",
+            "SELECT 1 AS id UNION ALL SELECT 2",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(stg.to_string_lossy().into()),
+            "",
+        )?;
+        dag.add_model_with_format(
+            "tf_b",
+            "SELECT count(*) AS c FROM {{ ref('stg_a') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(tf.to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let mat = MaterializeConfig {
+            consolidate: ConsolidatePolicy::Never,
+            ..Default::default()
+        };
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat)
+            .await?;
+        assert_eq!(summary.models_executed, 2);
+        assert_eq!(summary.total_rows_produced, 3); // 2 upstream + 1 count row
+        assert!(!stg.exists(), "never must not write monolith for table");
+        let parts = parts_dir_for_parquet(&stg);
+        assert!(parts.join("part-full.parquet").exists());
+        // Project-level never applies to all table models; ref() still sees parts
+        assert!(!tf.exists());
+        assert!(parts_dir_for_parquet(&tf).join("part-full.parquet").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_incremental_auto_no_monolith_always_writes_monolith() -> Result<()> {
+        use crate::core::project::{ConsolidatePolicy, MaterializeConfig};
+        use crate::materializer::parts_dir_for_parquet;
+
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("stg_inc.parquet");
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_inc",
+            "SELECT 1 AS id UNION ALL SELECT 2",
+            Materialization::IncrementalAppend,
+            OutputFormat::Parquet,
+            Some(dest.to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        // auto: parts only, no monolith
+        let mat_auto = MaterializeConfig {
+            consolidate: ConsolidatePolicy::Auto,
+            ..Default::default()
+        };
+        let engine = TransformationEngine::new();
+        engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat_auto)
+            .await?;
+        assert!(!dest.exists());
+        assert!(parts_dir_for_parquet(&dest).join("part-0000000000001.parquet").exists()
+            || parts_dir_for_parquet(&dest)
+                .read_dir()?
+                .any(|e| e
+                    .ok()
+                    .map(|e| e.path().extension().and_then(|x| x.to_str()) == Some("parquet"))
+                    .unwrap_or(false)));
+
+        // always: parts + monolith rebuild
+        let mat_always = MaterializeConfig {
+            consolidate: ConsolidatePolicy::Always,
+            ..Default::default()
+        };
+        // clear and re-run with always
+        let _ = std::fs::remove_dir_all(parts_dir_for_parquet(&dest));
+        let _ = std::fs::remove_file(&dest);
+        engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat_always)
+            .await?;
+        assert!(dest.exists(), "always must rebuild monolith from parts");
+        assert!(parts_dir_for_parquet(&dest).is_dir());
         Ok(())
     }
 }

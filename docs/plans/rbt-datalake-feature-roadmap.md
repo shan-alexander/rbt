@@ -351,6 +351,9 @@ Prefix fingerprint string:
 
 ## 7. Feature RBT-A5 — Parts-only publish / consolidate policy
 
+> **Status:** **Implemented** on Unreleased (`materialize.consolidate`, table+never parts-only,
+> `always` monolith rebuild, `rbt consolidate -s`, docs in COMPLEX_BRONZE / P4).
+
 ### Goal
 
 Hosts can keep **parts directories** as the source of truth without rewriting a monolithic `model.parquet` on every run.

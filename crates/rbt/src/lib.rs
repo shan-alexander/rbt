@@ -62,12 +62,12 @@ pub use core::{
     resolve_scan_path, run_contract_diff, scan_path_exists, strip_contract_prefix,
     try_apply_scope_to_frontmatter, AcceptedValuesEntry, BronzeCheckMode, BronzeDiagnostic,
     BronzeValidationReport, ColumnMeta, ContractDiffColumn, ContractDiffReport, ContractsConfig,
-    DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe, FingerprintAlgo, FingerprintConfig,
-    FingerprintMode, IcebergConfig, IcebergWriteMode, Materialization, MaterializeConfig,
-    MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult, ModelTests, OnMissing,
-    OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine, RefBackend,
-    RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig, ScopeValue,
-    SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
+    ConsolidatePolicy, DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe, FingerprintAlgo,
+    FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode, Materialization,
+    MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult, ModelTests,
+    OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
+    RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
+    ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
     DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
     DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
@@ -81,9 +81,10 @@ pub use engine::{
 pub use engine::udf::{register_builtin_udfs, register_scalar_udf, BUILTIN_UDF_NAMES};
 
 pub use materializer::{
-    clear_incremental_parts, incremental_ref_path, materialize_incremental_append_stream,
-    materialize_scoped_replace_stream, materialize_stream, new_wap_run_id, resolve_part_keys,
-    scope_part_id, sibling_iceberg_dir, stamp_batch, uses_parts_directory,
+    clear_incremental_parts, consolidate_parts_to_parquet, incremental_ref_path,
+    materialize_incremental_append_stream, materialize_scoped_replace_stream,
+    materialize_table_parts_only_stream, materialize_stream, new_wap_run_id, parts_dir_for_parquet,
+    resolve_part_keys, scope_part_id, sibling_iceberg_dir, stamp_batch, uses_parts_directory,
     verify_iceberg_catalog_table, wap_publish, write_iceberg_catalog_batches, write_iceberg_fs_table,
     write_parquet_stream, IcebergCatalogOptions, IcebergCatalogWriteStats, IncrementalManifest,
     LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapAuditLog,

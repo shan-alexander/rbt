@@ -205,6 +205,32 @@ RBT_FINGERPRINT_MODE=content_hash rbt run -p proj --skip-if-match
 
 **Mode mismatch never skips** (e.g. previous path_stat vs current content_hash → always re-execute).
 
+### Parts-only publish / consolidate (RBT-A5)
+
+Hosts can keep **parts directories** as the source of truth without rewriting a monolithic
+`model.parquet` on every run:
+
+```yaml
+# rbt_project.yml
+materialize:
+  consolidate: auto    # never | always | auto (default)
+```
+
+| Policy | `materialization: table` | `incremental_append` / `scoped_replace` |
+|--------|--------------------------|------------------------------------------|
+| `auto` (default) | Single `model.parquet` | Parts only (no silent monolith) |
+| `never` | One `part-full.parquet` under `.parts/` only | Parts only |
+| `always` | Single file | Parts **and** rebuild `model.parquet` after write |
+
+```bash
+# Ops: rebuild a monolith from existing parts (does not delete parts)
+rbt consolidate -p proj -s stg_entity_events
+rbt consolidate -p proj -s stg_entity_events --json
+```
+
+`ref()` already lists the parts directory for parts strategies (and for `table` + `never`).
+Error code: `E_RBT_CONSOLIDATE`.
+
 ## 5. Example
 
 See [examples/complex_bronze_landing](../examples/complex_bronze_landing/): research-papers mini lakehouse — PubMed / Crossref / Europe PMC / arXiv landings → `stg_*` → gold `tf_paper_status` + Kimball star.

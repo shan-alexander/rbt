@@ -85,6 +85,7 @@ See [examples/smoke_fixture/README.md](examples/smoke_fixture/README.md) and
 | `rbt run -p <proj> [--select …] [--format parquet\|iceberg\|…]` | Execute subgraph (ancestors always included) |
 | `rbt test -p <proj> [--select …]` | Run subgraph + frontmatter tests |
 | `rbt measure --scenario smoke_pipeline\|stream_vs_collect\|whale_synthetic\|…` | Thesis measure packs (JSON report; P5c) |
+| `rbt consolidate -s <model>` | Rebuild monolith parquet from `.parts/` (RBT-A5 ops) |
 | `rbt bench` | In-memory throughput microbench |
 
 ### Run scope (partition binds + multi-value **A1**)
@@ -144,6 +145,18 @@ fingerprint:
 
 ```bash
 rbt run -p proj --skip-if-match --fingerprint-mode content_hash
+```
+
+### Parts-only / consolidate (**A5**)
+
+```yaml
+materialize:
+  consolidate: auto    # never | always | auto
+```
+
+```bash
+# Ops rebuild of a single parquet from .parts/ (parts stay authoritative)
+rbt consolidate -p proj -s stg_entity_events
 ```
 
 ### Contracts registry (optional enums)

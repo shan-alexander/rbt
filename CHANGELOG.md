@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (RBT-A5 — parts-only publish / consolidate policy)
+
+- `materialize.consolidate`: `auto` (default) | `never` | `always`
+  - `auto`: table → monolith; incremental_append / scoped_replace → parts only
+  - `never`: table also writes parts only (`part-full.parquet` under `.parts/`)
+  - `always`: after parts strategies, rebuild monolith parquet from parts
+- CLI **`rbt consolidate -s <model>`** (ops): rebuild monolith; parts remain authoritative
+- Code: `E_RBT_CONSOLIDATE`; `ref()` registers parts dir for table+never
+
 ### Added (RBT-A4 — content-addressed bronze fingerprints)
 
 - `fingerprint:` in `rbt_project.yml`: `mode` (`path_stat` \| `content_hash`), `algo`

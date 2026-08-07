@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rbt::{
-    model_has_test_contract, run_contract_diff, BronzeCheckMode, OutputFormat, RbtProjectConfig,
-    RunScope, SelectMode, TransformationEngine,
+    consolidate_parts_to_parquet, model_has_test_contract, parts_dir_for_parquet, run_contract_diff,
+    BronzeCheckMode, MaterializeWriteOptions, OutputFormat, RbtProjectConfig, RunScope, SelectMode,
+    TransformationEngine,
 };
 
 use std::path::PathBuf;
@@ -263,6 +264,20 @@ enum Commands {
     Bench {
         #[arg(short, long, default_value_t = 1000000)]
         num_rows: usize,
+    },
+    /// Rebuild a single monolith parquet from a model's `.parts/` directory (RBT-A5 ops)
+    Consolidate {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Single model name whose parts should be consolidated
+        #[arg(short = 's', long)]
+        select: String,
+        /// Fallback output dir when the model has no resolved `output_path`
+        #[arg(short, long, default_value = "./target/output")]
+        output_dir: PathBuf,
+        /// Emit JSON result to stdout
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -847,6 +862,63 @@ async fn main() -> Result<()> {
                 bail!(
                     "[rbt] measure scenario failed: {}",
                     report_data.error.unwrap_or_default()
+                );
+            }
+        }
+        Commands::Consolidate {
+            project_dir,
+            select,
+            output_dir,
+            json,
+        } => {
+            let config = RbtProjectConfig::load(&project_dir)?;
+            let full = config.build_dag(&project_dir, None)?;
+            let name = select.trim();
+            let node = full
+                .topological_sequence()?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("E_RBT_CONSOLIDATE: unknown model '{name}'")
+                })?;
+            let dest_path = node
+                .output_path
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| output_dir.join(format!("{}.parquet", node.name)));
+            let parts = parts_dir_for_parquet(&dest_path);
+            if !parts.is_dir() {
+                bail!(
+                    "E_RBT_CONSOLIDATE: model '{name}' has no parts directory at {} \
+                     (run incremental_append / scoped_replace / consolidate:never first)",
+                    parts.display()
+                );
+            }
+            let write_opts = MaterializeWriteOptions::from_config(&config.materialize, true);
+            let stats = consolidate_parts_to_parquet(&dest_path, &write_opts)
+                .await
+                .with_context(|| {
+                    format!("E_RBT_CONSOLIDATE: consolidate model '{name}' failed")
+                })?;
+            if json {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "model": name,
+                    "parts_dir": parts.display().to_string(),
+                    "monolith": dest_path.display().to_string(),
+                    "rows": stats.rows,
+                    "bytes_written": stats.bytes_written,
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!(
+                    "[rbt] consolidate model='{name}' rows={} → {}",
+                    stats.rows,
+                    dest_path.display()
+                );
+                println!(
+                    "  parts remain authoritative at {}; monolith is a convenience rebuild",
+                    parts.display()
                 );
             }
         }

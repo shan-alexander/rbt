@@ -1,4 +1,4 @@
-//! Incremental + **scoped_replace** materialization for parquet models.
+//! Incremental + **scoped_replace** + **parts-only publish** (RBT-A5) for parquet models.
 //!
 //! **Honest scope:** part files under `{model}.parts/`, not row-level MERGE.
 //!
@@ -6,16 +6,20 @@
 //! |----------|----------|
 //! | `incremental_append` | Always add a new `part-NNNN.parquet` |
 //! | `scoped_replace` (A2) | Write/replace `part-{scope_id}.parquet` for the active run scope |
+//! | `table` + `consolidate: never` (A5) | Full refresh as single `part-full.parquet` (no monolith) |
+//! | `consolidate_parts_to_parquet` (A5 ops) | Rebuild monolith from parts; parts stay authoritative |
 //!
 //! Layout:
 //! ```text
 //! lake/silver/stg_events.parts/
 //!   part-0000000000001.parquet          # append
 //!   part-a1b2c3d4e5f60708.parquet       # scoped_replace (hex scope_id)
+//!   part-full.parquet                   # table + consolidate: never
 //!   _rbt_manifest.json
 //! ```
 //!
 //! Downstream `ref()` registers the **parts directory** as a multi-file parquet table.
+//! With `materialize.consolidate: always`, parts strategies also rebuild `{model}.parquet`.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -359,6 +363,136 @@ pub fn uses_parts_directory(m: &crate::core::dag::Materialization) -> bool {
     )
 }
 
+/// Full-refresh write of a single part under `.parts/` (RBT-A5 `consolidate: never` for table).
+///
+/// Clears existing parts, writes `part-full.parquet`, updates manifest. No monolith file.
+pub async fn materialize_table_parts_only_stream(
+    stream: SendableRecordBatchStream,
+    dest_parquet: &Path,
+    opts: &MaterializeWriteOptions,
+    assertions: &[Assertion],
+) -> Result<StreamWriteStats> {
+    let parts_dir = parts_dir_for_parquet(dest_parquet);
+    if parts_dir.exists() {
+        fs::remove_dir_all(&parts_dir).with_context(|| {
+            format!(
+                "E_RBT_CONSOLIDATE: clear parts {}",
+                parts_dir.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(&parts_dir)?;
+    let part_name = "part-full.parquet";
+    let part_path = parts_dir.join(part_name);
+    let mut stream = stream;
+    let stats = crate::materializer::stream::write_parquet_stream(
+        &mut stream,
+        &part_path,
+        opts,
+        assertions,
+    )
+    .await?;
+    let mut manifest = IncrementalManifest {
+        strategy: "table_parts_only".into(),
+        parts: Vec::new(),
+        part_rows: BTreeMap::new(),
+        total_rows: 0,
+        updated_at_ms: now_ms(),
+    };
+    if stats.rows > 0 {
+        manifest.parts.push(part_name.into());
+        manifest.part_rows.insert(part_name.into(), stats.rows as u64);
+        manifest.total_rows = stats.rows as u64;
+    } else {
+        let _ = fs::remove_file(&part_path);
+    }
+    write_manifest(&parts_dir, &manifest)?;
+    write_parts_pointer(dest_parquet, &parts_dir, "table_parts_only")?;
+    // Do not leave a stale monolith if one existed
+    if dest_parquet.exists() {
+        let _ = fs::remove_file(dest_parquet);
+    }
+    Ok(StreamWriteStats {
+        rows: stats.rows,
+        batches: stats.batches,
+        path: parts_dir,
+        bytes_written: stats.bytes_written,
+        validation: stats.validation,
+    })
+}
+
+/// Merge all parquet parts into a single `dest_parquet` file (RBT-A5 consolidate).
+///
+/// Uses DataFusion listing over the parts directory. Does **not** delete the parts dir.
+pub async fn consolidate_parts_to_parquet(
+    dest_parquet: &Path,
+    opts: &MaterializeWriteOptions,
+) -> Result<StreamWriteStats> {
+    use datafusion::prelude::{ParquetReadOptions, SessionContext};
+
+    let parts_dir = parts_dir_for_parquet(dest_parquet);
+    if !parts_dir.is_dir() {
+        bail!(
+            "E_RBT_CONSOLIDATE: no parts directory at {} — run a parts materialization first",
+            parts_dir.display()
+        );
+    }
+    let part_files = crate::scan::parts::list_part_files(&parts_dir)?;
+    if part_files.is_empty() {
+        bail!(
+            "E_RBT_CONSOLIDATE: parts directory {} has no parquet parts",
+            parts_dir.display()
+        );
+    }
+
+    let ctx = SessionContext::new();
+    // Register directory as multi-file parquet table
+    ctx.register_parquet(
+        "parts",
+        parts_dir
+            .to_str()
+            .context("E_RBT_CONSOLIDATE: parts path not utf-8")?,
+        ParquetReadOptions::default(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("E_RBT_CONSOLIDATE: register parts: {e}"))?;
+
+    let df = ctx
+        .sql("SELECT * FROM parts")
+        .await
+        .map_err(|e| anyhow::anyhow!("E_RBT_CONSOLIDATE: select parts: {e}"))?;
+    let stream = df
+        .execute_stream()
+        .await
+        .map_err(|e| anyhow::anyhow!("E_RBT_CONSOLIDATE: execute stream: {e}"))?;
+
+    if let Some(parent) = dest_parquet.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut stream = stream;
+    let stats = crate::materializer::stream::write_parquet_stream(
+        &mut stream,
+        dest_parquet,
+        opts,
+        &[],
+    )
+    .await
+    .context("E_RBT_CONSOLIDATE: write monolith parquet")?;
+
+    // Update pointer note
+    let pointer = dest_parquet.with_extension("rbt_incremental.json");
+    let body = serde_json::json!({
+        "strategy": "consolidated",
+        "parts_dir": parts_dir.file_name().and_then(|s| s.to_str()),
+        "monolith": dest_parquet.file_name().and_then(|s| s.to_str()),
+        "rows": stats.rows,
+        "note": "parts remain authoritative; monolith is a convenience rebuild"
+    });
+    let _ = fs::write(&pointer, serde_json::to_vec_pretty(&body)?);
+
+    Ok(stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +619,42 @@ mod tests {
         let m2 = load_manifest(&parts)?;
         assert!(!m2.parts.iter().any(|p| p == "part-scope_aaa.parquet"));
         assert_eq!(m2.total_rows, 1); // only bbb left
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn table_parts_only_and_consolidate() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("stg_x.parquet");
+        let opts = MaterializeWriteOptions::default();
+        let ctx = SessionContext::new();
+
+        // Seed a stale monolith that should be removed
+        std::fs::write(&dest, b"stale")?;
+
+        let stats = materialize_table_parts_only_stream(
+            ctx.sql("SELECT 1 AS id UNION ALL SELECT 2")
+                .await?
+                .execute_stream()
+                .await?,
+            &dest,
+            &opts,
+            &[],
+        )
+        .await?;
+        assert_eq!(stats.rows, 2);
+        assert!(!dest.exists(), "parts-only must not leave monolith");
+        let parts = parts_dir_for_parquet(&dest);
+        assert!(parts.join("part-full.parquet").exists());
+        let m = load_manifest(&parts)?;
+        assert_eq!(m.strategy, "table_parts_only");
+        assert_eq!(m.total_rows, 2);
+
+        // Ops consolidate rebuilds single file; parts remain
+        let c = consolidate_parts_to_parquet(&dest, &opts).await?;
+        assert_eq!(c.rows, 2);
+        assert!(dest.exists());
+        assert!(parts.join("part-full.parquet").exists());
         Ok(())
     }
 

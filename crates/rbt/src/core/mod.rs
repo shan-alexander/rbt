@@ -29,9 +29,9 @@ pub use paths::{
     validate_glob_patterns,
 };
 pub use project::{
-    FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode,
-    MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend, RefStrategy, ScanConfig,
-    DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
+    ConsolidatePolicy, FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig,
+    IcebergWriteMode, MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend, RefStrategy,
+    ScanConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
     DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 pub use receipt::{
