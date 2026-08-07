@@ -117,6 +117,19 @@ rbt run -p proj --var entity=a.com --var report_date=2026-08-07
 
 Showcase: [examples/a2_scoped_replace](examples/a2_scoped_replace/).
 
+### Run receipts + phase tags (**A3**)
+
+```yaml
+# model frontmatter — free-form host vocabulary
+phase: inventory
+tags: [stage, early]
+```
+
+```bash
+rbt run -p proj --var report_date=2026-08-07 --receipt-json
+# → .rbt/runs/{run_id}.json with models[].phase / tags / elapsed_ms
+```
+
 ### Contracts registry (optional enums)
 
 Closed vocabularies in `rbt_project.yml` (`contracts.enums`) + model

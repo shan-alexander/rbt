@@ -118,7 +118,7 @@ Frontmatter `stage_mode` documents **how silver relates to bronze** (engine may 
 
 Iceberg MoR/CoW remain materialize format / catalog concerns (`--format iceberg`, `materialize.iceberg`), not stage_mode synonyms.
 
-## 4. Run receipts & fingerprint skip (P5b)
+## 4. Run receipts & fingerprint skip (P5b + RBT-A3)
 
 After a successful run (when `write_receipt` is true — CLI default):
 
@@ -127,13 +127,48 @@ After a successful run (when `write_receipt` is true — CLI default):
 {project}/.rbt/runs/latest_{scope_key}.json
 ```
 
-Receipt fields include: `vars`, `contract_version`, `bronze_fingerprint`, `models_executed`, `total_rows`, `status`, `skipped`.
+Receipt fields include: `vars`, `contract_version`, `bronze_fingerprint`, `models_executed`,
+`total_rows`, `status`, `skipped`, and **`models[]`** (per-model outcomes).
 
-Fingerprint covers filtered bronze files (path + size + mtime) + `contract_version` (`rbt_project.yml` or `--contract-version`).
+### Per-model phase / tags (A3)
+
+Optional frontmatter — **free-form strings**; rbt does not interpret host vocabulary:
+
+```yaml
+---
+phase: inventory
+tags: [stage, optional_product_absent]
+---
+```
+
+Receipt shape (abbreviated):
+
+```json
+{
+  "status": "ok",
+  "skipped": false,
+  "models": [
+    {
+      "name": "stg_entity_inventory",
+      "status": "success",
+      "row_count": 1209,
+      "phase": "inventory",
+      "tags": ["stage", "optional_product_absent"],
+      "elapsed_ms": 42,
+      "output_path": "…/stg_entity_inventory.parquet"
+    }
+  ]
+}
+```
+
+Skip path (`--skip-if-match`): new receipt with `status: skipped`, empty `models`, prior fingerprint.
 
 ```bash
 rbt run -p my_project --var report_date=2026-07-29 --skip-if-match
 # Identical bronze + contract → SKIPPED materialize; new receipt with status=skipped
+
+rbt run -p my_project --var report_date=2026-07-29 --receipt-json
+# Print full receipt JSON (includes models[].phase)
 ```
 
 Bump `contract_version` in yml when silver SQL or bronze column meaning changes so skip does not return stale semantics.

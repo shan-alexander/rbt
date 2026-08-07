@@ -326,10 +326,14 @@ pub struct StagingFrontmatter {
     /// Primary uniqueness contract (usually same as grain for staging facts).
     #[serde(default)]
     pub unique_key: Option<Vec<String>>,
-    /// Free-form tags for selection / docs.
+    /// Free-form tags for selection / docs / receipt metadata (RBT-A3).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Materialization hint: `table` | `view` | `incremental_append` (engine may ignore for now).
+    /// Free-form publish phase for hosts (RBT-A3), e.g. `inventory` | `final`.
+    /// Written onto run receipts under `models[].phase` — engine does not interpret values.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// Materialization hint: `table` | `view` | `incremental_append` | `scoped_replace`.
     #[serde(default)]
     pub materialization: Option<String>,
     /// Post-materialization assertions.

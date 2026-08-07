@@ -240,6 +240,9 @@ Only vars listed in frontmatter `part_key:` (or default: all `partition_by` keys
 
 ## 5. Feature RBT-A3 — Phased publish metadata on receipts
 
+> **Status:** **Implemented** (`phase`/`tags` → receipt `models[]`, `elapsed_ms`,
+> `schema_version: 2`, legacy `model_results`/`rows` deserialize).
+
 ### Goal
 
 Receipts expose per-model outcomes + optional free-form **phase/tags** from frontmatter so hosts can distinguish “early inventory publish” vs “final product publish” without baking host vocabulary into the engine.

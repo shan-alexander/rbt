@@ -4,6 +4,8 @@ description: >
   Re-running the same entity/report_date replaces that scope's part only;
   peer entities keep their parts under stg_entity_events.parts/.
 materialization: scoped_replace
+phase: inventory
+tags: [stage, a2_showcase]
 source_format: jsonl
 scan_path: $lake/bronze/runs
 path_glob: events.jsonl

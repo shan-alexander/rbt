@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (RBT-A3 — phased publish metadata on receipts)
+
+- Frontmatter `phase:` (optional free-form) + existing `tags:` flow into receipts
+- Receipt `models[]` entries: `name`, `status`, `row_count`, `phase`, `tags`,
+  `elapsed_ms`, `output_path` (JSON key renamed from `model_results`; still reads legacy)
+- `schema_version: 2`; skip receipts keep empty `models`
+- CLI `--receipt-json` already prints the full receipt for host integration
+
 ### Added (RBT-A2 — scoped_replace materialization)
 
 - `materialization: scoped_replace` — deterministic `part-{scope_id}.parquet` under

@@ -448,6 +448,7 @@ impl TransformationEngine {
 
             for model in tier {
                 tracing::info!("Executing model '{}'...", model.name);
+                let model_started = now_unix_ms();
 
                 // Late-bind: if this model carries frontmatter not registered yet
                 register_bronze_for_model_scoped(
@@ -732,11 +733,26 @@ impl TransformationEngine {
 
                 models_executed += 1;
                 total_rows_produced += row_count;
-                model_results.push(ModelRunResult {
-                    name: model.name.clone(),
-                    rows: row_count,
-                    output_path: Some(dest_path.display().to_string()),
-                });
+                let model_finished = now_unix_ms();
+                let elapsed_ms = model_finished.saturating_sub(model_started) as u64;
+                let (phase, tags) = model
+                    .frontmatter
+                    .as_ref()
+                    .map(|f| {
+                        (
+                            f.phase.clone(),
+                            f.tags.clone().unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or((None, Vec::new()));
+                model_results.push(ModelRunResult::success(
+                    model.name.clone(),
+                    row_count,
+                    Some(dest_path.display().to_string()),
+                    phase,
+                    tags,
+                    Some(elapsed_ms),
+                ));
             }
         }
 

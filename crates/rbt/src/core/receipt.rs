@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Machine-readable result of one `rbt run` (or library execute with receipts enabled).
+///
+/// Hosts branch on [`RunReceipt::status`], per-model [`ModelRunResult::phase`] / `tags`
+/// (RBT-A3), and fingerprints without scraping logs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunReceipt {
     pub schema_version: u32,
@@ -36,6 +39,8 @@ pub struct RunReceipt {
     pub models_executed: usize,
     pub total_rows: usize,
     pub bronze_sources: usize,
+    /// Per-model outcomes (JSON field name: `models`; also accepts legacy `model_results`).
+    #[serde(rename = "models", alias = "model_results")]
     pub model_results: Vec<ModelRunResult>,
     pub started_unix_ms: u128,
     pub finished_unix_ms: u128,
@@ -43,23 +48,69 @@ pub struct RunReceipt {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
+    #[default]
     Ok,
     Skipped,
     Error,
 }
 
+/// Per-model outcome inside a receipt (RBT-A3 phase/tags + timing).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelRunResult {
     pub name: String,
-    pub rows: usize,
+    /// `success` | `skipped` | `error` (free for hosts; engine sets these).
+    #[serde(default = "default_model_status")]
+    pub status: String,
+    /// Rows produced this run for the model.
+    #[serde(alias = "rows")]
+    pub row_count: usize,
+    /// Frontmatter `phase:` (optional free-form host vocabulary).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Frontmatter `tags:` (optional free-form).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Wall time for this model’s materialize (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+fn default_model_status() -> String {
+    "success".into()
+}
+
+impl ModelRunResult {
+    pub fn success(
+        name: impl Into<String>,
+        row_count: usize,
+        output_path: Option<String>,
+        phase: Option<String>,
+        tags: Vec<String>,
+        elapsed_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: "success".into(),
+            row_count,
+            phase,
+            tags,
+            elapsed_ms,
+            output_path,
+            error: None,
+        }
+    }
 }
 
 impl RunReceipt {
-    pub const SCHEMA_VERSION: u32 = 1;
+    /// Schema 2: `models[]` with phase/tags/elapsed_ms/status (still reads schema 1).
+    pub const SCHEMA_VERSION: u32 = 2;
 
     pub fn receipt_dir(project_dir: &Path) -> PathBuf {
         project_dir.join(".rbt").join("runs")
@@ -278,7 +329,7 @@ mod tests {
     fn receipt_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let r = RunReceipt {
-            schema_version: 1,
+            schema_version: RunReceipt::SCHEMA_VERSION,
             run_id: "run_test".into(),
             project: "p".into(),
             package_version: "0.6.0".into(),
@@ -292,16 +343,65 @@ mod tests {
             models_executed: 1,
             total_rows: 2,
             bronze_sources: 1,
-            model_results: vec![],
+            model_results: vec![ModelRunResult::success(
+                "stg_x",
+                2,
+                Some("lake/stg_x.parquet".into()),
+                Some("inventory".into()),
+                vec!["stage".into(), "optional".into()],
+                Some(42),
+            )],
             started_unix_ms: 1,
             finished_unix_ms: 2,
             wall_ms: 1,
             error: None,
         };
         let p = r.write(dir.path()).unwrap();
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(body.contains("\"models\""), "receipt should use models key");
+        assert!(body.contains("\"phase\": \"inventory\""));
+        assert!(body.contains("\"row_count\": 2"));
         let loaded = RunReceipt::load(&p).unwrap();
         assert_eq!(loaded.run_id, "run_test");
+        assert_eq!(loaded.model_results[0].phase.as_deref(), Some("inventory"));
+        assert_eq!(loaded.model_results[0].tags, vec!["stage", "optional"]);
+        assert_eq!(loaded.model_results[0].elapsed_ms, Some(42));
         assert!(RunReceipt::latest_path_for_scope(dir.path(), "s0").exists());
+    }
+
+    #[test]
+    fn receipt_reads_legacy_model_results_and_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.json");
+        fs::write(
+            &path,
+            r#"{
+              "schema_version": 1,
+              "run_id": "old",
+              "project": "p",
+              "package_version": "0.6",
+              "contract_version": "0",
+              "scope_key": "s0",
+              "vars": {},
+              "status": "ok",
+              "skipped": false,
+              "skip_reason": null,
+              "bronze_fingerprint": "fnv1a64:00",
+              "models_executed": 1,
+              "total_rows": 3,
+              "bronze_sources": 0,
+              "model_results": [{"name": "stg_a", "rows": 3, "output_path": null}],
+              "started_unix_ms": 1,
+              "finished_unix_ms": 2,
+              "wall_ms": 1,
+              "error": null
+            }"#,
+        )
+        .unwrap();
+        let loaded = RunReceipt::load(&path).unwrap();
+        assert_eq!(loaded.model_results.len(), 1);
+        assert_eq!(loaded.model_results[0].row_count, 3);
+        assert_eq!(loaded.model_results[0].status, "success");
     }
 
     #[test]
