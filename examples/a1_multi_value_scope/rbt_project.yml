@@ -1,0 +1,16 @@
+# RBT-A1 showcase: multi-value partition scope
+# Three hive entities; one run selects two of three via --var / --var-file.
+name: a1_multi_value_scope
+version: "1.0.0"
+contract_version: "a1-v1"
+models_dir: models
+target_path: $lake/silver/stage
+
+roots:
+  lake: lake
+
+layers:
+  staging:
+    path: models/staging
+    target_path: $lake/silver/stage
+    default_format: parquet

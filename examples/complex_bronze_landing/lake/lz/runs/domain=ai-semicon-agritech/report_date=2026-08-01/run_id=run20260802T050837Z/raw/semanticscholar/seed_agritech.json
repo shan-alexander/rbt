@@ -1,0 +1,50 @@
+{
+  "total": 3,
+  "offset": 0,
+  "data": [
+    {
+      "paperId": "seed000000000000000000000000000000000001",
+      "externalIds": { "DOI": "10.0000/rbt.seed.s2.semicon.1" },
+      "title": "Graph Neural Networks for Semiconductor Process Yield Prediction",
+      "abstract": "We apply graph neural networks to multi-step semiconductor process data for early yield prediction. The model combines fab equipment graphs with ML feature stores suitable for edge gateways.",
+      "year": 2024,
+      "authors": [
+        { "authorId": "a1", "name": "Alan Turing" },
+        { "authorId": "a2", "name": "John Bardeen" }
+      ],
+      "venue": "Journal of Semiconductor Analytics (seed)",
+      "publicationVenue": { "name": "Journal of Semiconductor Analytics (seed)" },
+      "fieldsOfStudy": ["Computer Science", "Engineering"],
+      "url": "https://www.semanticscholar.org/paper/seed000000000000000000000000000000000001"
+    },
+    {
+      "paperId": "seed000000000000000000000000000000000002",
+      "externalIds": { "DOI": "10.0000/rbt.seed.s2.agritech.1" },
+      "title": "Transformer Models for Multispectral Crop Stress Detection",
+      "abstract": "Vision transformers trained on multispectral drone imagery detect early crop stress under field conditions. We report transfer learning results for low-data farms and edge deployment budgets.",
+      "year": 2025,
+      "authors": [
+        { "authorId": "a3", "name": "Rachel Carson" },
+        { "authorId": "a4", "name": "Wangari Maathai" }
+      ],
+      "venue": "Precision Agriculture Letters (seed)",
+      "publicationVenue": { "name": "Precision Agriculture Letters (seed)" },
+      "fieldsOfStudy": ["Agricultural Science", "Computer Science"],
+      "url": "https://www.semanticscholar.org/paper/seed000000000000000000000000000000000002"
+    },
+    {
+      "paperId": "seed000000000000000000000000000000000003",
+      "externalIds": {},
+      "title": "Neuromorphic Sensor Fusion for Smart Irrigation Controllers",
+      "abstract": "Event-driven neuromorphic chips fuse soil moisture and weather streams for low-power irrigation control. We compare SNN and ANN calibrators on open field logs.",
+      "year": 2023,
+      "authors": [
+        { "authorId": "a5", "name": "Carver Mead" },
+        { "authorId": "a6", "name": "Mamie Phipps Clark" }
+      ],
+      "venue": "Edge AI for Agritech (seed)",
+      "fieldsOfStudy": ["Computer Science", "Environmental Science"],
+      "url": "https://www.semanticscholar.org/paper/seed000000000000000000000000000000000003"
+    }
+  ]
+}

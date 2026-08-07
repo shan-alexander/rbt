@@ -474,7 +474,7 @@ impl TransformationEngine {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                let (assertions, fail_on_error) = model_assertions(model);
+                let (assertions, fail_on_error) = model_assertions(model, config)?;
                 let mut write_opts =
                     MaterializeWriteOptions::from_config(materialize, fail_on_error);
                 if model
@@ -710,7 +710,12 @@ impl TransformationEngine {
 }
 
 /// Build frontmatter assertion list + fail-on-error policy for a model.
-fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
+///
+/// Resolves `accepted_values` contract references via `config.contracts.enums`.
+fn model_assertions(
+    model: &ModelNode,
+    config: &RbtProjectConfig,
+) -> Result<(Vec<Assertion>, bool)> {
     let mut fail_on_error = true;
     let assertions = if let Some(fm) = model.frontmatter.as_ref() {
         if let Some(tests) = fm.tests.as_ref() {
@@ -723,10 +728,25 @@ fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
                     .clone()
                     .or_else(|| fm.unique_key.clone())
                     .or_else(|| fm.grain.clone());
+                let resolved = if let Some(map) = tests.accepted_values.as_ref() {
+                    Some(
+                        config
+                            .contracts
+                            .resolve_accepted_values(map)
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_CONTRACT: resolve accepted_values for model '{}'",
+                                    model.name
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
                 assertions_from_model_tests(
                     tests.not_null.as_deref(),
                     unique.as_deref(),
-                    tests.accepted_values.as_ref(),
+                    resolved.as_ref(),
                 )
             }
         } else if let Some(uk) = fm
@@ -743,7 +763,7 @@ fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
     } else {
         Vec::new()
     };
-    (assertions, fail_on_error)
+    Ok((assertions, fail_on_error))
 }
 
 fn log_assertion_result(

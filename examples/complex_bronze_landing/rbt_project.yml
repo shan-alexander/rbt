@@ -1,14 +1,48 @@
 # Research-papers mini lakehouse
-# Topic: semiconductors + ML / neuromorphic computing
-# Bronze: PubMed + Crossref + arXiv (polite public APIs)
+# Theme: AI × semiconductors / neuromorphic + AI in agritech
+# Bronze: PubMed + Crossref + Europe PMC + OpenAlex + Semantic Scholar + arXiv
 name: research_papers_lake
-version: "1.0.0"
-contract_version: "research-papers-v1"
+version: "1.2.0"
+contract_version: "research-papers-v3"
 models_dir: models
 target_path: $lake/gold
 
 roots:
   lake: lake
+
+# P0: single source of truth for bronze value enums (accepted_values + contract-diff)
+contracts:
+  enums:
+    works.source:
+      values:
+        - pubmed
+        - crossref
+        - europepmc
+        - openalex
+        - semanticscholar
+        - arxiv
+      on_new: fail
+      labels:
+        pubmed: "PubMed (NCBI E-utilities)"
+        crossref: "Crossref REST API"
+        europepmc: "Europe PMC REST API"
+        openalex: "OpenAlex REST API"
+        semanticscholar: "Semantic Scholar Graph API"
+        arxiv: "arXiv Atom API"
+      probe:
+        model: stg_works
+        column: source
+    works.topic_track:
+      values:
+        - semicon
+        - agritech
+      on_new: warn
+      labels:
+        semicon: "Semiconductors / neuromorphic AI"
+        agritech: "AI in agritech / precision agriculture"
+      probe:
+        model: stg_works
+        column: topic_track
 
 layers:
   staging:

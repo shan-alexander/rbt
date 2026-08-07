@@ -528,9 +528,9 @@ async fn measure_complex_bronze(project_dir: &Path, output_dir: &Path) -> Result
     let dag = config.build_dag(&project, None)?;
 
     // Prefer lake/lz/LATEST_RUN.json from fetch_bronze.py; fallback vars for empty CI.
-    let mut domain = "semicon-ai-research".to_string();
+    let mut domain = "ai-semicon-agritech".to_string();
     let mut report_date = "2026-08-01".to_string();
-    let mut run_id = "run20260802T022258Z".to_string();
+    let mut run_id = "run20260802T023408Z".to_string();
     let pointer = project.join("lake/lz/LATEST_RUN.json");
     if pointer.is_file() {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&pointer)?)
@@ -575,7 +575,7 @@ async fn measure_complex_bronze(project_dir: &Path, output_dir: &Path) -> Result
         bronze_sources: summary.bronze_sources_registered,
         peak_rss_kb: read_peak_rss_kb().or(rss0),
         notes: vec![
-            "Research papers mini-lake: PubMed/Crossref bronze → silver stg → gold tf/marts".into(),
+            "Research papers mini-lake: PubMed/Crossref/EuropePMC/arXiv → silver stg → gold tf/marts".into(),
             format!("fingerprint={:?}", summary.bronze_fingerprint),
             format!("receipt={:?}", summary.receipt_path),
             format!("Run vars: domain={domain} report_date={report_date} run_id={run_id}"),

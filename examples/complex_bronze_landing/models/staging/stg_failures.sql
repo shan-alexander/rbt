@@ -1,6 +1,6 @@
 ---
 description: >
-  Silver stage endpoint: failed bronze work units (rate limits, timeouts, HTTP errors).
+  Silver stage endpoint: failed bronze work units (rate limits, timeouts, HTTP).
   Optional artifact — on_missing empty for partial runs.
 source_format: jsonl
 scan_path: $lake/lz/runs

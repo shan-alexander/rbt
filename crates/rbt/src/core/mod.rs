@@ -1,5 +1,6 @@
 //! `rbt::core`: Core pipeline model declarations, AST/Jinja template resolution, and DAG topological compilation.
 
+pub mod contracts;
 pub mod dag;
 pub mod frontmatter;
 pub mod parser;
@@ -9,13 +10,17 @@ pub mod receipt;
 pub mod run_scope;
 pub mod select;
 
+pub use contracts::{
+    contract_diff_to_bronze_diagnostics, run_contract_diff, strip_contract_prefix, ContractsConfig,
+    ContractDiffColumn, ContractDiffReport, EnumContract, EnumProbe, OnNewPolicy,
+};
 pub use dag::{
     parse_materialization_hint, Materialization, ModelDag, ModelLayer, ModelNode, OutputFormat,
 };
 pub use frontmatter::{
-    parse_logical_dtype, resolve_scan_path, scan_path_exists, BronzeCheckMode, BronzeDiagnostic,
-    BronzeValidationReport, ColumnMeta, DiagnosticSeverity, ModelTests, RelationshipTest,
-    SourceFormat, StagingFrontmatter,
+    parse_logical_dtype, resolve_scan_path, scan_path_exists, AcceptedValuesEntry, BronzeCheckMode,
+    BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DiagnosticSeverity, ModelTests,
+    RelationshipTest, SourceFormat, StagingFrontmatter,
 };
 pub use parser::{DependencyRef, RbtTemplateEngine, SqlModelParser};
 pub use paths::PathGlobSet;
@@ -29,8 +34,10 @@ pub use project::{
     DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 pub use receipt::{
-    apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version, ModelRunResult,
-    RunReceipt, RunStatus,
+    apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version,
+    try_apply_scope_to_frontmatter, ModelRunResult, RunReceipt, RunStatus,
 };
-pub use run_scope::{expand_braced_vars, fnv1a64, OnMissing, RunScope};
+pub use run_scope::{
+    expand_braced_vars, fnv1a64, OnMissing, RunScope, ScopeValue, DEFAULT_MULTI_VAR_LIMIT,
+};
 pub use select::{model_has_test_contract, parse_select_spec, SelectMode, SelectToken};

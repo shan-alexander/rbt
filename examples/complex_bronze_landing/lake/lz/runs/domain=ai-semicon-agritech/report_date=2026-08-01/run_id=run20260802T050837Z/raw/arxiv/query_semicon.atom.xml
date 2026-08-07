@@ -1,0 +1,84 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/NPucOWNPt+Btmknq9vpuSyaemRM</id>
+  <title>arXiv Query: search_query=all:"semiconductor" AND (all:"machine learning" OR all:"neural network" OR all:neuromorphic)&amp;id_list=&amp;start=0&amp;max_results=3</title>
+  <updated>2026-08-02T05:08:46Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=all:%22semiconductor%22+AND+(all:%22machine+learning%22+OR+(all:%22neural+network%22+OR+all:neuromorphic))&amp;start=0&amp;max_results=3&amp;id_list=" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>3</opensearch:itemsPerPage>
+  <opensearch:totalResults>718</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2504.10053v2</id>
+    <title>Synthetic Biology meets Neuromorphic Computing: Towards a bio-inspired Olfactory Perception System</title>
+    <updated>2025-08-01T03:21:53Z</updated>
+    <link href="https://arxiv.org/abs/2504.10053v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2504.10053v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>In this study, we explore how the combination of synthetic biology, neuroscience modeling, and neuromorphic electronic systems offers a new approach to creating an artificial system that mimics the natural sense of smell. We argue that a co-design approach offers significant advantages in replicating the complex dynamics of odor sensing and processing. We propose a hybrid system of synthetic sensory neurons that provides three key features: (a) receptor-gated ion channels, (b) interface between synthetic biology and semiconductors and (c) event-based encoding and computing based on spiking networks. Our approach is validated using simulation-based modeling of the complete sensing and processing pipeline. This research seeks to develop a platform for ultra-sensitive, specific, and energy-efficient odor detection, with potential implications for environmental monitoring, medical diagnostics, and security.</summary>
+    <category term="cs.NE" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.ET" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="q-bio.NC" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2025-04-14T09:57:20Z</published>
+    <arxiv:comment>Updated after revision at Neuromorphic Computing and Engineering</arxiv:comment>
+    <arxiv:primary_category term="cs.NE"/>
+    <arxiv:journal_ref>Neuromorphic Computing and Engineering, 2025, Volume 5, Number 3</arxiv:journal_ref>
+    <author>
+      <name>Kevin Max</name>
+    </author>
+    <author>
+      <name>Larissa Sames</name>
+    </author>
+    <author>
+      <name>Shimeng Ye</name>
+    </author>
+    <author>
+      <name>Jan Steinkühler</name>
+    </author>
+    <author>
+      <name>Federico Corradi</name>
+    </author>
+    <arxiv:doi>10.1088/2634-4386/aded2d</arxiv:doi>
+    <link rel="related" href="https://doi.org/10.1088/2634-4386/aded2d" title="doi"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2407.19724v1</id>
+    <title>Constructing artificial life and materials scientists with accelerated AI using Deep AndersoNN</title>
+    <updated>2024-07-29T06:12:47Z</updated>
+    <link href="https://arxiv.org/abs/2407.19724v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2407.19724v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Deep AndersoNN accelerates AI by exploiting the continuum limit as the number of explicit layers in a neural network approaches infinity and can be taken as a single implicit layer, known as a deep equilibrium model. Solving for deep equilibrium model parameters reduces to a nonlinear fixed point iteration problem, enabling the use of vector-to-vector iterative solvers and windowing techniques, such as Anderson extrapolation, for accelerating convergence to the fixed point deep equilibrium. Here we show that Deep AndersoNN achieves up to an order of magnitude of speed-up in training and inference. The method is demonstrated on density functional theory results for industrial applications by constructing artificial life and materials `scientists' capable of classifying drugs as strongly or weakly polar, metal-organic frameworks by pore size, and crystalline materials as metals, semiconductors, and insulators, using graph images of node-neighbor representations transformed from atom-bond networks. Results exhibit accuracy up to 98\% and showcase synergy between Deep AndersoNN and machine learning capabilities of modern computing architectures, such as GPUs, for accelerated computational life and materials science by quickly identifying structure-property relationships. This paves the way for saving up to 90\% of compute required for AI, reducing its carbon footprint by up to 60 gigatons per year by 2030, and scaling above memory limits of explicit neural networks in life and materials science, and beyond.</summary>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="physics.app-ph" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2024-07-29T06:12:47Z</published>
+    <arxiv:comment>7 pages, 5 figures, 2 tables, Accepted by ICML ML4LMS https://openreview.net/forum?id=qhwyvhqAvI . International Conference on Machine Learning (ICML). Machine Learning for Life and Material Science (ML4LMS) Workshop, May 2024</arxiv:comment>
+    <arxiv:primary_category term="cs.LG"/>
+    <arxiv:journal_ref>International Conference on Machine Learning (ICML). Machine Learning for Life and Material Science (ML4LMS) Workshop, May 2024</arxiv:journal_ref>
+    <author>
+      <name>Saleem Abdul Fattah Ahmed Al Dajani</name>
+    </author>
+    <author>
+      <name>David Keyes</name>
+    </author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2604.04727v1</id>
+    <title>Neuromorphic Computing for Low-Power Artificial Intelligence</title>
+    <updated>2026-04-06T14:52:05Z</updated>
+    <link href="https://arxiv.org/abs/2604.04727v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2604.04727v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>Classical computing is beginning to encounter fundamental limits of energy efficiency. This presents a challenge that can no longer be solved by strategies such as increasing circuit density or refining standard semiconductor processes. The growing computational and memory demands of artificial intelligence (AI) require disruptive innovation in how information is represented, stored, communicated, and processed. By leveraging novel device modalities and compute-in-memory (CIM), in addition to analog dynamics and sparse communication inspired by the brain, neuromorphic computing offers a promising path toward improvements in the energy efficiency and scalability of current AI systems. But realizing this potential is not a matter of replacing one chip with another; rather, it requires a co-design effort, spanning new materials and non-volatile device structures, novel mixed-signal circuits and architectures, and learning algorithms tailored to the physics of these substrates. This article surveys the key limitations of classical complementary metal-oxide-semiconductor (CMOS) technology and outlines how such cross-layer neuromorphic approaches may overcome them.</summary>
+    <category term="cs.AR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2026-04-06T14:52:05Z</published>
+    <arxiv:comment>Published in "2025 Winter Bridge on the Grainger Foundation Frontiers of Engineering" available at https://www.nae.edu/344313/neuromorphic-computing-for-low-power-artificial-intelligence</arxiv:comment>
+    <arxiv:primary_category term="cs.AR"/>
+    <author>
+      <name>Keshava Katti</name>
+    </author>
+    <author>
+      <name>Pratik Chaudhari</name>
+    </author>
+    <author>
+      <name>Deep Jariwala</name>
+    </author>
+  </entry>
+</feed>

@@ -154,6 +154,23 @@ impl RelationshipTest {
     }
 }
 
+/// One column's accepted_values: inline list **or** project contract enum name.
+///
+/// YAML:
+/// ```yaml
+/// accepted_values:
+///   source: works.source          # contracts.enums.works.source
+///   topic_track: [semicon, agritech]  # inline
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AcceptedValuesEntry {
+    /// Explicit allowed values.
+    List(Vec<String>),
+    /// Reference to `contracts.enums.<name>` (optional `$` / `$contract:` prefix).
+    Contract(String),
+}
+
 /// Declared data-quality tests for a model (run after materialization when present).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ModelTests {
@@ -163,9 +180,9 @@ pub struct ModelTests {
     /// Single column unique, or multi-column composite unique when len > 1.
     #[serde(default)]
     pub unique: Option<Vec<String>>,
-    /// Map of column → allowed string values.
+    /// Map of column → allowed values (inline list) or contract enum name (string).
     #[serde(default)]
-    pub accepted_values: Option<std::collections::HashMap<String, Vec<String>>>,
+    pub accepted_values: Option<std::collections::HashMap<String, AcceptedValuesEntry>>,
     /// FK-ish checks against already-materialised models (P6 / G6).
     #[serde(default)]
     pub relationships: Option<Vec<RelationshipTest>>,
@@ -264,10 +281,17 @@ pub struct StagingFrontmatter {
     /// When true, use scan→MemTable path even for formats that support DF listing.
     #[serde(default)]
     pub force_scan: Option<bool>,
-    /// Only scan hive-partitioned files whose path segments match these values.
+    /// Only scan hive-partitioned files whose path segments match these values (equality).
     /// Example: `{ timeframe: "1m" }` keeps `.../timeframe=1m/...` and skips `timeframe=1d`.
     #[serde(default)]
     pub require_partitions: Option<std::collections::HashMap<String, String>>,
+    /// Multi-value partition filter (**RBT-A1**): keep files where hive key is **in** the list.
+    ///
+    /// Filled by run scope when a var is multi (`--var entity=a --var entity=b`);
+    /// can also be set statically in frontmatter. Combined with
+    /// [`Self::require_partitions`] (equality) via AND.
+    #[serde(default)]
+    pub require_partitions_in: Option<std::collections::HashMap<String, Vec<String>>>,
     /// Inject `_source_path` (Utf8) with the absolute file path for each row.
     /// Enables "latest chunk wins" dedupe via `ORDER BY _source_path DESC`.
     #[serde(default)]

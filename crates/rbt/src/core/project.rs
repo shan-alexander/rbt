@@ -262,6 +262,9 @@ pub struct RbtProjectConfig {
     /// Referenced in paths as `$name` or `${name}` (e.g. `$nonprod_lake/lz/runs`).
     #[serde(default)]
     pub roots: HashMap<String, String>,
+    /// Value contracts / enum registry (`contracts.enums`) for accepted_values + contract-diff.
+    #[serde(default)]
+    pub contracts: super::contracts::ContractsConfig,
 }
 
 impl Default for RbtProjectConfig {
@@ -304,6 +307,7 @@ impl Default for RbtProjectConfig {
             materialize: MaterializeConfig::default(),
             scan: ScanConfig::default(),
             roots: HashMap::new(),
+            contracts: super::contracts::ContractsConfig::default(),
         }
     }
 }
@@ -323,7 +327,7 @@ impl RbtProjectConfig {
                 format!(
                     "E_RBT_PROJECT_LOAD: failed to parse {}. \
                      Check required keys (name, version, models_dir, target_path) and \
-                     optional materialize:/scan:/roots:/layers blocks.",
+                     optional materialize:/scan:/roots:/layers:/contracts blocks.",
                     project_file.display()
                 )
             })?;

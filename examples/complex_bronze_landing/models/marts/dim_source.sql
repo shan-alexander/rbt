@@ -1,6 +1,6 @@
 ---
 description: >
-  one row per bibliographic source system (pubmed, crossref, arxiv) plus Unknown (-1).
+  one row per bibliographic source system plus Unknown (−1).
 lineage_stamp: true
 grain: [source_code]
 unique_key: [source_sk]
@@ -25,6 +25,9 @@ FROM (
     CASE source
       WHEN 'pubmed' THEN 'PubMed (NCBI E-utilities)'
       WHEN 'crossref' THEN 'Crossref REST API'
+      WHEN 'europepmc' THEN 'Europe PMC REST API'
+      WHEN 'openalex' THEN 'OpenAlex REST API'
+      WHEN 'semanticscholar' THEN 'Semantic Scholar Graph API'
       WHEN 'arxiv' THEN 'arXiv Atom API'
       ELSE source
     END AS source_name

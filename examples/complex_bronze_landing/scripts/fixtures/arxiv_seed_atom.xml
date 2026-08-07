@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Offline seed for the research mini-lake when live arXiv returns 429/timeout.
+  Content is synthetic/demo-oriented (not a live arXiv response mirror).
+  Used only by fetch_bronze.py seed-on-fail (default on).
+-->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>rbt arXiv seed fixture - AI semicon + agritech</title>
+  <id>http://rbt.local/fixtures/arxiv_seed</id>
+  <updated>2026-08-01T00:00:00Z</updated>
+
+  <entry>
+    <id>http://arxiv.org/abs/2401.00001v1</id>
+    <updated>2024-01-02T12:00:00Z</updated>
+    <published>2024-01-02T12:00:00Z</published>
+    <title>Neuromorphic In-Memory Computing for Edge Semiconductor Accelerators</title>
+    <summary>
+      We survey spiking neural network accelerators built on emerging non-volatile
+      memory devices and discuss how machine learning compilers map convolutional
+      workloads onto analog crossbar arrays. Results on a synthetic semiconductor
+      process benchmark show energy reductions versus digital baselines.
+    </summary>
+    <author><name>Ada Lovelace</name></author>
+    <author><name>Grace Hopper</name></author>
+    <category term="cs.AR" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <link href="http://arxiv.org/abs/2401.00001v1" rel="alternate" type="text/html"/>
+  </entry>
+
+  <entry>
+    <id>http://arxiv.org/abs/2402.00002v1</id>
+    <updated>2024-02-10T09:00:00Z</updated>
+    <published>2024-02-10T09:00:00Z</published>
+    <title>Deep Learning for Crop Disease Detection from Multispectral Drone Imagery</title>
+    <summary>
+      Precision agriculture pipelines increasingly rely on deep learning to detect
+      early plant stress from multispectral UAV imagery. We present a compact CNN
+      trained on open field datasets and evaluate transfer learning for low-data
+      farms. The model targets edge deployment on farm gateways.
+    </summary>
+    <author><name>George Washington Carver</name></author>
+    <author><name>Norman Borlaug</name></author>
+    <author><name>Temple Grandin</name></author>
+    <category term="cs.CV" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <link href="http://arxiv.org/abs/2402.00002v1" rel="alternate" type="text/html"/>
+  </entry>
+
+  <entry>
+    <id>http://arxiv.org/abs/2403.00003v1</id>
+    <updated>2024-03-15T18:30:00Z</updated>
+    <published>2024-03-15T18:30:00Z</published>
+    <title>Wide-Bandgap Sensor Front-Ends for Agritech Soil Monitoring</title>
+    <summary>
+      Silicon carbide and gallium nitride front-end electronics enable robust
+      soil-moisture and nutrient sensing under harsh field conditions. We combine
+      a compact ML calibrator with a GaN readout ASIC and report field trial results
+      from irrigated plots.
+    </summary>
+    <author><name>Katherine Johnson</name></author>
+    <author><name>Chien-Shiung Wu</name></author>
+    <category term="eess.SP" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <link href="http://arxiv.org/abs/2403.00003v1" rel="alternate" type="text/html"/>
+  </entry>
+</feed>

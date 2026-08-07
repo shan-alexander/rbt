@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added (RBT-A1 — multi-value partition scope)
+
+- **`ScopeValue`**: run vars are scalar or multi (`Single` / `Multi`)
+- **Repeated `--var key=v`**, **`--var key:=["a","b"]`**, **`--var-file key=path`**
+- Multi partition vars → `require_partitions_in` (hive path **IN** filter); scalar still equality
+- Path templates refuse multi-value keys (`E_RBT_VAR_MULTI`); use partition filters instead
+- Receipts serialize multi vars as JSON arrays; `scope_key` is multi-aware
+- Limit: `DEFAULT_MULTI_VAR_LIMIT` (100_000) → `E_RBT_VAR_LIMIT`
+
+### Added (P0 contracts + contract-diff)
+
+- **`contracts.enums`** in `rbt_project.yml`: named value registries with `values`, `on_new`
+  (`fail`|`warn`|`allow`), optional `labels`, optional `probe: { model, column }`
+- Frontmatter `tests.accepted_values` may reference a contract by name
+  (`source: works.source`) or keep an inline list
+- **`rbt validate --contract-diff`**: sample bronze (jsonl/json) for registered enums and
+  report `new_in_bronze` vs registry; optional `--var` partition filters
+- Codes: `E_RBT_CONTRACT_NEW_VALUE`, `W_RBT_CONTRACT_NEW_VALUE`, `E_RBT_CONTRACT_UNKNOWN`, …
+
+### Examples
+
+- **`complex_bronze_landing`** research mini-lake v2: dual tracks (**AI × semiconductors** +
+  **AI agritech**), polite APIs (PubMed XML, Crossref JSON, Europe PMC JSON, **OpenAlex**,
+  **Semantic Scholar** + seed, arXiv Atom + seed), `assets.jsonl` inventory, richer works
+  schema (`authors_json`, abstracts, keywords, `topic_track`), gold `tf_source_run_stats` +
+  `dim_topic` + `fact_source_run`. Policy skips: Google Scholar + Examine.com (not free papers).
+- Example uses `contracts.enums` for `works.source` / `works.topic_track`.
+- Analysis: [docs/analysis/bronze-source-onboarding-friction.md](docs/analysis/bronze-source-onboarding-friction.md)
+  — frictions + rbt product enhancements for bronze source growth.
+
 ## [0.7.3] — 2026-08-02
 
 ### Examples

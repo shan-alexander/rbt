@@ -2,15 +2,16 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.7.3`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Spine + stream + Iceberg SoR; **P4** measure/WAP/incremental/UDFs; **P5** run scope / empty bronze / receipts / measure packs; **P6** parts sources, lineage stamps, relationship tests.
+> **Status:** **`0.7.3`+ Unreleased.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), run scope, receipts, Iceberg-FS, measure packs. **A1** multi-value partition scope on the feat line.
 
 ## Why rbt
 
 | | |
 |--|--|
-| **Niche** | Bronze → silver → gold on a lake, not warehouse-dbt |
+| **Identity** | Data-engineering workflow engine for medallion lakes (not a generic app framework, not Temporal/Airflow) |
+| **Niche** | Bronze → silver → gold on lake files, with fast bronze adapters |
 | **Stack** | Rust + Arrow + DataFusion + optional Iceberg-style FS tables + jshift |
-| **UX** | Models, `ref` / `source`, frontmatter tests, CLI select |
+| **UX** | Models, `ref` / `source`, frontmatter tests, CLI select, run vars |
 | **Claim** | Replace ad-hoc scripts / Spark for team-scale medallion jobs |
 
 ## Install
@@ -78,13 +79,37 @@ See [examples/smoke_fixture/README.md](examples/smoke_fixture/README.md) and
 | Command | Purpose |
 |---------|---------|
 | `rbt compile -p <proj> [--select …]` | DAG + bronze path checks |
-| `rbt validate -p <proj> [--json]` | Static validate (DAG, bronze, refs) — no execute |
+| `rbt validate -p <proj> [--json] [--contract-diff]` | Static validate (DAG, bronze, refs, optional enum registry vs bronze) |
 | `rbt explain -s <model>` | Compiled SQL, deps, bronze contract |
 | `rbt preview -s <model> [--limit N]` | Sample rows (ancestors materialize; target not written) |
 | `rbt run -p <proj> [--select …] [--format parquet\|iceberg\|…]` | Execute subgraph (ancestors always included) |
 | `rbt test -p <proj> [--select …]` | Run subgraph + frontmatter tests |
 | `rbt measure --scenario smoke_pipeline\|stream_vs_collect\|whale_synthetic\|…` | Thesis measure packs (JSON report; P5c) |
 | `rbt bench` | In-memory throughput microbench |
+
+### Run scope (partition binds + multi-value **A1**)
+
+```bash
+# Scalar binds (hive equality filters for partition_by keys)
+rbt run -p proj --var report_date=2026-08-07 --var run_id=r1
+
+# Multi-value: one process, several partition values (IN filter)
+rbt run -p proj --var entity=a.com --var entity=b.com --var report_date=2026-08-07
+rbt run -p proj --var-file entity=entities.txt --var report_date=2026-08-07
+rbt run -p proj --var 'entity:=["a.com","b.com"]' --var report_date=2026-08-07
+```
+
+Showcase: [examples/a1_multi_value_scope](examples/a1_multi_value_scope/). Details:
+[docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md).
+
+### Contracts registry (optional enums)
+
+Closed vocabularies in `rbt_project.yml` (`contracts.enums`) + model
+`accepted_values: works.source`. Pre-run check:
+
+```bash
+rbt validate -p proj --contract-diff --var report_date=… --var run_id=…
+```
 
 ### `--select` (dbt-like)
 

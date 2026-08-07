@@ -10,6 +10,7 @@ use crate::core::project::RbtProjectConfig;
 use crate::core::run_scope::{fnv1a64, RunScope};
 use crate::scan::{LakeScanner, ScanRequest};
 use anyhow::{Context, Result};
+use tracing;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -26,7 +27,8 @@ pub struct RunReceipt {
     /// Project or CLI contract version used for skip decisions.
     pub contract_version: String,
     pub scope_key: String,
-    pub vars: BTreeMap<String, String>,
+    /// Run vars (string or multi array) — RBT-A1.
+    pub vars: BTreeMap<String, crate::core::run_scope::ScopeValue>,
     pub status: RunStatus,
     pub skipped: bool,
     pub skip_reason: Option<String>,
@@ -124,6 +126,17 @@ pub fn bronze_fingerprint(
     let contract = effective_contract_version(config, scope);
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("contract_version={contract}"));
+    // A1: multi-value sets must participate in skip identity even when file lists match
+    // (e.g. empty on_missing runs). Canonical sorted key=value&… line.
+    {
+        let mut parts: Vec<String> = scope
+            .vars
+            .iter()
+            .map(|(k, v)| format!("{k}={}", v.canonical()))
+            .collect();
+        parts.sort();
+        lines.push(format!("scope_vars={}", parts.join("&")));
+    }
 
     for idx in dag.graph.node_indices() {
         let node = &dag.graph[idx];
@@ -133,7 +146,12 @@ pub fn bronze_fingerprint(
         if !fm.has_scan_contract() {
             continue;
         }
-        let fm_eff = apply_scope_to_frontmatter(fm, scope);
+        let fm_eff = try_apply_scope_to_frontmatter(fm, scope).with_context(|| {
+            format!(
+                "E_RBT_FINGERPRINT: apply scope to bronze model '{}'",
+                node.name
+            )
+        })?;
         let mut req = ScanRequest::from_frontmatter_with_config(
             project_dir,
             &fm_eff,
@@ -183,27 +201,65 @@ pub fn bronze_fingerprint(
     Ok(format!("fnv1a64:{digest:016x}"))
 }
 
-/// Clone frontmatter with run-scope templates and effective require_partitions applied.
+/// Clone frontmatter with run-scope templates and effective partition filters applied.
+///
+/// Prefer [`try_apply_scope_to_frontmatter`] in engine/scan paths so multi-value
+/// template errors surface as `E_RBT_VAR_MULTI`. This convenience panics only in
+/// debug on failure; release falls back to unscoped frontmatter with an error log
+/// (tests that expect soft behavior should use `try_` explicitly).
 pub fn apply_scope_to_frontmatter(fm: &StagingFrontmatter, scope: &RunScope) -> StagingFrontmatter {
+    match try_apply_scope_to_frontmatter(fm, scope) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::error!(
+                "apply_scope_to_frontmatter failed ({e}); returning unscoped frontmatter — \
+                 callers should use try_apply_scope_to_frontmatter"
+            );
+            debug_assert!(
+                false,
+                "apply_scope_to_frontmatter failed: {e}; use try_apply_scope_to_frontmatter"
+            );
+            fm.clone()
+        }
+    }
+}
+
+/// Fallible scope apply (templates + partition equality / IN filters).
+pub fn try_apply_scope_to_frontmatter(
+    fm: &StagingFrontmatter,
+    scope: &RunScope,
+) -> Result<StagingFrontmatter> {
     let mut out = fm.clone();
     if let Some(sp) = out.scan_path.as_ref() {
-        out.scan_path = Some(scope.expand_template(sp));
+        out.scan_path = Some(scope.expand_template(sp)?);
     }
     if let Some(globs) = out.path_glob.as_ref() {
-        out.path_glob = Some(
-            globs
-                .iter()
-                .map(|g| scope.expand_template(g))
-                .collect(),
-        );
+        let mut expanded = Vec::with_capacity(globs.len());
+        for g in globs {
+            expanded.push(scope.expand_template(g)?);
+        }
+        out.path_glob = Some(expanded);
     }
     let partition_by = out.partition_by.clone().unwrap_or_default();
     let base = out.require_partitions.clone().unwrap_or_default();
-    let eff = scope.effective_require_partitions(&partition_by, &base);
-    if !eff.is_empty() {
-        out.require_partitions = Some(eff);
+    let (eq, mut inset) = scope.effective_partition_filters(&partition_by, &base)?;
+    // Merge static frontmatter require_partitions_in (scope multi wins per key)
+    if let Some(static_in) = out.require_partitions_in.as_ref() {
+        for (k, v) in static_in {
+            inset.entry(k.clone()).or_insert_with(|| v.clone());
+        }
     }
-    out
+    if !eq.is_empty() {
+        out.require_partitions = Some(eq);
+    } else {
+        out.require_partitions = None;
+    }
+    if !inset.is_empty() {
+        out.require_partitions_in = Some(inset);
+    } else {
+        out.require_partitions_in = None;
+    }
+    Ok(out)
 }
 
 pub fn now_unix_ms() -> u128 {
@@ -246,6 +302,25 @@ mod tests {
         let loaded = RunReceipt::load(&p).unwrap();
         assert_eq!(loaded.run_id, "run_test");
         assert!(RunReceipt::latest_path_for_scope(dir.path(), "s0").exists());
+    }
+
+    #[test]
+    fn fingerprint_includes_scope_vars_line() {
+        use crate::core::dag::ModelDag;
+        use crate::core::project::RbtProjectConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let config = RbtProjectConfig::default();
+        let dag = ModelDag::new();
+        let s1 = RunScope::new().with_var("entity", "a.com");
+        let s2 = RunScope::new()
+            .with_var_multi("entity", ["a.com", "b.com"])
+            .unwrap();
+        let f1 = bronze_fingerprint(&dag, dir.path(), &config, &s1).unwrap();
+        let f2 = bronze_fingerprint(&dag, dir.path(), &config, &s2).unwrap();
+        assert_ne!(
+            f1, f2,
+            "multi vs single scope must change fingerprint even with empty bronze"
+        );
     }
 
     #[test]

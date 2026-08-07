@@ -4,7 +4,7 @@ Product goal: turn **multi-artifact Hive-ish bronze trees** into reliable **silv
 
 Related brain notes: [[Complex bronze landing zones]], [[Bronze-to-silver maturity gap matrix]], [[Dual-track maturity roadmap]].
 
-## 1. Run variables & partition binds (P5a)
+## 1. Run variables & partition binds (P5a + RBT-A1 multi-value)
 
 ```bash
 rbt run -p my_project \
@@ -16,19 +16,44 @@ rbt run -p my_project \
 | Mechanism | Behavior |
 |-----------|----------|
 | `--var key=value` | Repeatable; also `RBT_VAR_<KEY>` and `RBT_VARS=k=v,k2=v2` |
-| `{key}` / `${key}` | Expanded in `scan_path`, `path_glob`, and `require_partitions` values |
-| `partition_by` + vars | Vars for those keys merge into effective `require_partitions` (run wins over static frontmatter) |
+| **Repeated `--var key=…`** | Different values promote to a **multi-value set** (A1) |
+| `--var key:=["a","b"]` | Explicit JSON string array multi bind |
+| `--var-file key=path` | One value per line (`#` comments / blanks skipped) |
+| `{key}` / `${key}` | Expanded in `scan_path`, `path_glob`, static partition values — **scalar only** |
+| Multi in path template | **`E_RBT_VAR_MULTI`** — use hive `partition_by` + IN filter instead |
+| `partition_by` + vars | Scalar → `require_partitions` equality; multi → `require_partitions_in` (**IN** set) |
 | `$lake` roots | Unchanged — still project `roots:` templates |
+
+**Multi-value example** (one run, two entities):
+
+```bash
+rbt run -p my_project \
+  --var entity=a.com --var entity=b.com \
+  --var report_date=2026-08-07
+
+# or
+rbt run -p my_project \
+  --var-file entity=entities.txt \
+  --var report_date=2026-08-07
+
+# or
+rbt run -p my_project \
+  --var entity:='["a.com","b.com"]' \
+  --var report_date=2026-08-07
+```
+
+With frontmatter `partition_by: [entity, report_date]`, bronze listing keeps hive dirs
+`entity=a.com` and `entity=b.com` only (not `entity=c.com`).
 
 Library:
 
 ```rust
 use rbt::{RunScope, TransformationEngine, RbtProjectConfig};
 
-let mut scope = RunScope::new()
+let scope = RunScope::new()
     .with_var("report_date", "2026-07-29")
-    .with_var("domain", "acme.com");
-scope.skip_if_fingerprint_match = true;
+    .with_var_multi("entity", ["a.com", "b.com"])?;
+// scope.skip_if_fingerprint_match = true;
 
 let config = RbtProjectConfig::load(project)?;
 let dag = config.build_dag(project, None)?;
@@ -93,7 +118,7 @@ Bump `contract_version` in yml when silver SQL or bronze column meaning changes 
 
 ## 5. Example
 
-See [examples/complex_bronze_landing](../examples/complex_bronze_landing/): plan + scrape + failures + optional siteinfo → `tf_unit_status` outer reconciliation.
+See [examples/complex_bronze_landing](../examples/complex_bronze_landing/): research-papers mini lakehouse — PubMed / Crossref / Europe PMC / arXiv landings → `stg_*` → gold `tf_paper_status` + Kimball star.
 
 ## 6. Measure packs (P5c)
 
@@ -110,3 +135,41 @@ rbt measure -p examples/complex_bronze_landing --scenario complex_bronze --json
 ```
 
 Reports include optional `mode_compare` (`stream_wall_ms`, `collect_wall_ms`, RSS). Linux only for RSS.
+
+## 7. Contracts registry + contract-diff (P0)
+
+Declare closed value sets once in `rbt_project.yml`:
+
+```yaml
+contracts:
+  enums:
+    works.source:
+      values: [pubmed, crossref, europepmc, openalex, semanticscholar, arxiv]
+      on_new: fail   # fail | warn | allow
+      labels:
+        openalex: "OpenAlex REST API"
+      probe:
+        model: stg_works
+        column: source
+```
+
+Reference from staging frontmatter (no duplicated lists):
+
+```yaml
+tests:
+  accepted_values:
+    source: works.source          # or $contract:works.source
+    topic_track: works.topic_track
+```
+
+Sample bronze and compare to the registry:
+
+```bash
+rbt validate -p examples/complex_bronze_landing --bronze-check fail --contract-diff \
+  --var domain=ai-semicon-agritech --var report_date=2026-08-01 --var run_id=run…
+```
+
+- **New bronze values** not in `values` → `E_RBT_CONTRACT_NEW_VALUE` (`on_new: fail`) or
+  `W_RBT_CONTRACT_NEW_VALUE` (`warn`) or notes only (`allow`).
+- **Adding a source:** lander → append to `contracts.enums.*.values` (+ labels) → re-run
+  `--contract-diff`. Models that reference the enum need no list edits.

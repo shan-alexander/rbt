@@ -1,0 +1,3 @@
+# Entities for --var-file entity=entities.txt
+a.com
+b.com

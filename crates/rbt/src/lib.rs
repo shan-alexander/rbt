@@ -1,6 +1,7 @@
 //! # rbt
 //!
-//! Medallion SQL DAG engine for lakehouse transforms (bronze → silver → gold).
+//! **Data-engineering workflow engine** for medallion lakes: bronze files → silver/gold
+//! Parquet via SQL DAGs (DataFusion), with run scope, receipts, and optional Iceberg-FS.
 //!
 //! ## Install
 //!
@@ -25,13 +26,22 @@
 //! let config = RbtProjectConfig::load(project)?;
 //! let dag = config.build_dag(project, None)?;
 //! let engine = TransformationEngine::new();
-//! let scope = RunScope::new().with_var("report_date", "2026-07-29");
+//! // Scalar + multi-value partition binds (RBT-A1)
+//! let scope = RunScope::new()
+//!     .with_var("report_date", "2026-07-29")
+//!     .with_var_multi("entity", ["a.com", "b.com"])?;
 //! let _summary = engine
 //!     .execute_dag_with_scope(&dag, project, "./target/output", &config, &scope)
 //!     .await?;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Run scope (A1)
+//!
+//! See [`RunScope`] and [`ScopeValue`]: repeated `--var`, `--var-file`, and
+//! `with_var_multi` bind hive **IN** filters. Showcase:
+//! `examples/a1_multi_value_scope`.
 
 #![doc(html_root_url = "https://docs.rs/rbt-datalake/0.7.3")]
 
@@ -46,16 +56,18 @@ pub mod testing;
 // --- Public API (stable surface for library users) ---------------------------
 
 pub use core::{
-    apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version, expand_braced_vars,
-    model_has_test_contract, parse_logical_dtype, parse_select_spec, resolve_scan_path,
-    scan_path_exists, BronzeCheckMode, BronzeDiagnostic, BronzeValidationReport, ColumnMeta,
-    DependencyRef, DiagnosticSeverity, IcebergConfig, IcebergWriteMode, Materialization,
-    MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult,
-    ModelTests, OnMissing, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
-    RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
-    SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
-    DEFAULT_MAX_ROW_GROUP_BYTES,
-    DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    apply_scope_to_frontmatter, bronze_fingerprint, contract_diff_to_bronze_diagnostics,
+    effective_contract_version, expand_braced_vars, model_has_test_contract, parse_logical_dtype,
+    parse_select_spec, resolve_scan_path, run_contract_diff, scan_path_exists, strip_contract_prefix,
+    try_apply_scope_to_frontmatter, AcceptedValuesEntry, BronzeCheckMode, BronzeDiagnostic,
+    BronzeValidationReport, ColumnMeta, ContractDiffColumn, ContractDiffReport, ContractsConfig,
+    DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe, IcebergConfig, IcebergWriteMode,
+    Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode,
+    ModelRunResult, ModelTests, OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig,
+    RbtTemplateEngine, RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus,
+    ScanConfig, ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser,
+    StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
+    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 
 pub use engine::{

@@ -1,7 +1,7 @@
 ---
 description: >
-  Silver stage endpoint: planned bronze work units (one row per planned API call).
-  1:1 from bronze plan.jsonl.
+  Silver stage endpoint: planned bronze work units (one row per planned API
+  call / journal slice / topic track).
 source_format: jsonl
 scan_path: $lake/lz/runs
 path_glob: plan.jsonl
@@ -10,6 +10,8 @@ columns:
   unit_id: { dtype: utf8 }
   source: { dtype: utf8 }
   query: { dtype: utf8 }
+  venue_filter: { dtype: utf8 }
+  topic_track: { dtype: utf8 }
   planned: { dtype: bool }
   domain: { dtype: utf8 }
   report_date: { dtype: utf8 }
@@ -23,6 +25,8 @@ SELECT
   unit_id,
   source,
   query,
+  venue_filter,
+  topic_track,
   planned,
   domain,
   report_date,

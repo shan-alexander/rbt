@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rbt::{
-    model_has_test_contract, BronzeCheckMode, OutputFormat, RbtProjectConfig, RunScope, SelectMode,
-    TransformationEngine,
+    model_has_test_contract, run_contract_diff, BronzeCheckMode, OutputFormat, RbtProjectConfig,
+    RunScope, SelectMode, TransformationEngine,
 };
 
 use std::path::PathBuf;
@@ -15,10 +15,16 @@ use tracing_subscriber::EnvFilter;
 struct RunScopeArgs {
     /// Run variable / partition bind (`key=value`). Repeatable.
     ///
-    /// Merges into `require_partitions` for keys listed in model `partition_by`,
-    /// and expands `{key}` / `${key}` in scan_path and partition values.
+    /// Repeated keys with different values become a multi-value set (RBT-A1):
+    /// `--var entity=a.com --var entity=b.com` → partition filter `entity IN (...)`.
+    /// JSON array form: `--var entity:=["a.com","b.com"]`.
+    /// Merges into `require_partitions` / `require_partitions_in` for keys in
+    /// model `partition_by`. Expands `{key}` / `${key}` in paths (**scalar only**).
     #[arg(long = "var", value_name = "KEY=VALUE")]
     vars: Vec<String>,
+    /// Load multi-value var from a file (`key=path`, one value per line, `#` comments).
+    #[arg(long = "var-file", value_name = "KEY=PATH")]
+    var_files: Vec<String>,
     /// Contract version for fingerprints (overrides `contract_version` in yml).
     #[arg(long)]
     contract_version: Option<String>,
@@ -45,6 +51,7 @@ impl RunScopeArgs {
         scope.run_id = self.run_id.clone();
         scope.extend_from_env();
         scope.extend_from_kv_pairs(self.vars.iter().map(String::as_str))?;
+        scope.extend_from_var_files(self.var_files.iter().map(String::as_str))?;
         Ok(scope)
     }
 }
@@ -177,9 +184,18 @@ enum Commands {
         select: Option<String>,
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
+        /// Sample bronze for `contracts.enums` and report values missing from the registry
+        #[arg(long, default_value_t = false)]
+        contract_diff: bool,
         /// Emit JSON report to stdout (machine-readable)
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Optional run vars for contract-diff partition filters (`key=value`)
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Multi-value var from file for contract-diff (`key=path`)
+        #[arg(long = "var-file", value_name = "KEY=PATH")]
+        var_files: Vec<String>,
     },
     /// Explain a model: compiled SQL, deps, layer, bronze contract, output path
     Explain {
@@ -461,7 +477,10 @@ async fn main() -> Result<()> {
             project_dir,
             select,
             bronze_check,
+            contract_diff,
             json,
+            vars,
+            var_files,
         } => {
             let config = RbtProjectConfig::load(&project_dir)?;
             let full = config.build_dag(&project_dir, None)?;
@@ -472,6 +491,16 @@ async fn main() -> Result<()> {
                 bronze_check.into(),
                 &config.roots,
             )?;
+
+            let mut scope = RunScope::new();
+            scope.extend_from_kv_pairs(vars.iter().map(String::as_str))?;
+            scope.extend_from_var_files(var_files.iter().map(String::as_str))?;
+
+            let mut contract_diff_report = None;
+            if contract_diff {
+                contract_diff_report =
+                    Some(run_contract_diff(&project_dir, &config, &full, &scope)?);
+            }
 
             let mut issues: Vec<String> = Vec::new();
             for d in &report.diagnostics {
@@ -490,9 +519,21 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            if let Some(cd) = &contract_diff_report {
+                for d in &cd.diagnostics {
+                    issues.push(d.clone());
+                }
+                for n in &cd.notes {
+                    issues.push(format!("NOTE: {n}"));
+                }
+            }
 
             let ok = !report.has_errors()
-                && !issues.iter().any(|i| i.contains("E_RBT_VALIDATE_REF"));
+                && !issues.iter().any(|i| i.contains("E_RBT_VALIDATE_REF"))
+                && contract_diff_report
+                    .as_ref()
+                    .map(|c| c.ok && !c.has_errors())
+                    .unwrap_or(true);
 
             if json {
                 let body = serde_json::json!({
@@ -510,6 +551,7 @@ async fn main() -> Result<()> {
                     "tier_plan": tiers.iter().map(|t| {
                         t.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
                     }).collect::<Vec<_>>(),
+                    "contract_diff": contract_diff_report,
                 });
                 println!("{}", serde_json::to_string_pretty(&body)?);
             } else {
@@ -527,8 +569,34 @@ async fn main() -> Result<()> {
                     eprintln!("{d}");
                 }
                 for i in &issues {
-                    if i.starts_with("E_RBT_VALIDATE") {
+                    if i.starts_with("E_RBT_VALIDATE")
+                        || i.starts_with("E_RBT_CONTRACT")
+                        || i.starts_with("W_RBT_CONTRACT")
+                        || i.starts_with("NOTE:")
+                    {
                         eprintln!("{i}");
+                    }
+                }
+                if let Some(cd) = &contract_diff_report {
+                    println!(
+                        "[rbt] contract-diff: {} enum(s), {} column probe(s)",
+                        cd.enums_checked,
+                        cd.columns.len()
+                    );
+                    for col in &cd.columns {
+                        println!(
+                            "  {} {}.{}: observed={} new_in_bronze={} files={} rows={}",
+                            col.enum_name,
+                            col.model,
+                            col.column,
+                            col.observed.len(),
+                            col.new_in_bronze.len(),
+                            col.files_sampled,
+                            col.rows_sampled
+                        );
+                        if !col.new_in_bronze.is_empty() {
+                            println!("    new: {:?}", col.new_in_bronze);
+                        }
                     }
                 }
                 if ok {
