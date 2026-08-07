@@ -153,6 +153,115 @@ impl Default for MaterializeConfig {
 /// Default max size for a single opaque protobuf bronze file (1 GiB).
 pub const DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// How bronze fingerprints are computed for skip-if-match (RBT-A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintMode {
+    /// Path + size + mtime (fast; default). Legacy receipts used bare `fnv1a64:…`.
+    #[default]
+    PathStat,
+    /// Hash file contents (correct when mtime/size are unreliable).
+    ContentHash,
+}
+
+impl FingerprintMode {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "path_stat" | "path-stat" | "stat" | "fnv" | "fnv1a64" => Ok(Self::PathStat),
+            "content_hash" | "content-hash" | "content" | "hash" => Ok(Self::ContentHash),
+            other => anyhow::bail!(
+                "E_RBT_FINGERPRINT_MODE: unknown mode '{other}' (path_stat | content_hash)"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PathStat => "path_stat",
+            Self::ContentHash => "content_hash",
+        }
+    }
+}
+
+/// Hash algorithm for [`FingerprintMode::ContentHash`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintAlgo {
+    #[default]
+    Blake3,
+    Sha256,
+}
+
+impl FingerprintAlgo {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "blake3" | "b3" => Ok(Self::Blake3),
+            "sha256" | "sha2" | "sha-256" => Ok(Self::Sha256),
+            other => anyhow::bail!(
+                "E_RBT_FINGERPRINT_MODE: unknown algo '{other}' (blake3 | sha256)"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blake3 => "blake3",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
+
+/// `fingerprint:` block in `rbt_project.yml` (RBT-A4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FingerprintConfig {
+    #[serde(default)]
+    pub mode: FingerprintMode,
+    /// Used when `mode: content_hash`.
+    #[serde(default)]
+    pub algo: FingerprintAlgo,
+    /// If &gt; 0, hash only the first N bytes of each bronze file (escape hatch for huge files).
+    /// **Danger:** partial hash can collide if files share a common prefix.
+    #[serde(default)]
+    pub max_bytes_per_file: u64,
+}
+
+impl Default for FingerprintConfig {
+    fn default() -> Self {
+        Self {
+            mode: FingerprintMode::PathStat,
+            algo: FingerprintAlgo::Blake3,
+            max_bytes_per_file: 0,
+        }
+    }
+}
+
+impl FingerprintConfig {
+    /// Apply env overrides: `RBT_FINGERPRINT_MODE`, `RBT_FINGERPRINT_ALGO`,
+    /// `RBT_FINGERPRINT_MAX_BYTES`.
+    pub fn with_env_overrides(mut self) -> anyhow::Result<Self> {
+        if let Ok(m) = std::env::var("RBT_FINGERPRINT_MODE") {
+            if !m.trim().is_empty() {
+                self.mode = FingerprintMode::parse(&m)?;
+            }
+        }
+        if let Ok(a) = std::env::var("RBT_FINGERPRINT_ALGO") {
+            if !a.trim().is_empty() {
+                self.algo = FingerprintAlgo::parse(&a)?;
+            }
+        }
+        if let Ok(n) = std::env::var("RBT_FINGERPRINT_MAX_BYTES") {
+            if !n.trim().is_empty() {
+                self.max_bytes_per_file = n.trim().parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "E_RBT_FINGERPRINT_MODE: RBT_FINGERPRINT_MAX_BYTES must be u64, got '{n}'"
+                    )
+                })?;
+            }
+        }
+        Ok(self)
+    }
+}
+
 /// Optional scan / bronze ingest limits (`scan:` in yml).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanConfig {
@@ -265,6 +374,9 @@ pub struct RbtProjectConfig {
     /// Value contracts / enum registry (`contracts.enums`) for accepted_values + contract-diff.
     #[serde(default)]
     pub contracts: super::contracts::ContractsConfig,
+    /// Bronze fingerprint mode for skip-if-match (RBT-A4).
+    #[serde(default)]
+    pub fingerprint: FingerprintConfig,
 }
 
 impl Default for RbtProjectConfig {
@@ -308,6 +420,7 @@ impl Default for RbtProjectConfig {
             scan: ScanConfig::default(),
             roots: HashMap::new(),
             contracts: super::contracts::ContractsConfig::default(),
+            fingerprint: FingerprintConfig::default(),
         }
     }
 }
@@ -327,7 +440,7 @@ impl RbtProjectConfig {
                 format!(
                     "E_RBT_PROJECT_LOAD: failed to parse {}. \
                      Check required keys (name, version, models_dir, target_path) and \
-                     optional materialize:/scan:/roots:/layers:/contracts blocks.",
+                     optional materialize:/scan:/roots:/layers:/contracts:/fingerprint blocks.",
                     project_file.display()
                 )
             })?;
@@ -336,9 +449,12 @@ impl RbtProjectConfig {
             for (key, val) in defaults.layers {
                 config.layers.entry(key).or_insert(val);
             }
+            config.fingerprint = config.fingerprint.with_env_overrides()?;
             Ok(config)
         } else {
-            Ok(Self::default())
+            let mut config = Self::default();
+            config.fingerprint = config.fingerprint.with_env_overrides()?;
+            Ok(config)
         }
     }
 

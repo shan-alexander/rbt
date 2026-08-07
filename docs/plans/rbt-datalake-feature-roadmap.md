@@ -293,6 +293,9 @@ Host can read `.rbt/runs/*.json` and branch on `models[].phase` without parsing 
 
 ## 6. Feature RBT-A4 — Content-addressed bronze fingerprint
 
+> **Status:** **Implemented** (`fingerprint:` yml, path_stat + content_hash blake3/sha256,
+> skip mode-mismatch, CLI/env overrides, legacy `fnv1a64:` compat).
+
 ### Goal
 
 Configurable fingerprint modes so skip-if-match is correct when files are rewritten with same size/mtime or content changes without mtime reliability.

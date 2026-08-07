@@ -8,8 +8,8 @@ use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
 };
 use crate::core::receipt::{
-    bronze_fingerprint, effective_contract_version, now_unix_ms, ModelRunResult, RunReceipt,
-    RunStatus,
+    bronze_fingerprint, effective_contract_version, fingerprints_match_for_skip, now_unix_ms,
+    ModelRunResult, RunReceipt, RunStatus,
 };
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
@@ -367,7 +367,7 @@ impl TransformationEngine {
         if scope.skip_if_fingerprint_match {
             if let Some(prev) = RunReceipt::load_latest_for_scope(project_dir, &scope_key) {
                 if prev.status == RunStatus::Ok
-                    && prev.bronze_fingerprint == fp
+                    && fingerprints_match_for_skip(&prev.bronze_fingerprint, &fp)
                     && prev.contract_version == contract
                 {
                     let finished = now_unix_ms();

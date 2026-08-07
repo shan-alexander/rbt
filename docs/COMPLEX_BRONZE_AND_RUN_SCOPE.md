@@ -179,6 +179,32 @@ rbt run -p my_project --var report_date=2026-07-29 --receipt-json
 
 Bump `contract_version` in yml when silver SQL or bronze column meaning changes so skip does not return stale semantics.
 
+### Fingerprint modes (RBT-A4)
+
+```yaml
+# rbt_project.yml
+fingerprint:
+  mode: path_stat          # default: size + mtime (fast)
+  # mode: content_hash     # hash file bytes (mtime-safe)
+  algo: blake3             # blake3 | sha256 (content_hash only)
+  max_bytes_per_file: 0    # 0 = full file; >0 = hash first N bytes only (escape hatch)
+```
+
+```bash
+# one-shot override
+rbt run -p proj --skip-if-match --fingerprint-mode content_hash
+# or env
+RBT_FINGERPRINT_MODE=content_hash rbt run -p proj --skip-if-match
+```
+
+| Prefix | Meaning |
+|--------|---------|
+| `path_stat:fnv1a64:…` | Default (also accepts legacy bare `fnv1a64:…` on skip compare) |
+| `content:blake3:…` | Content hash with blake3 |
+| `content:sha256:…` | Content hash with sha256 |
+
+**Mode mismatch never skips** (e.g. previous path_stat vs current content_hash → always re-execute).
+
 ## 5. Example
 
 See [examples/complex_bronze_landing](../examples/complex_bronze_landing/): research-papers mini lakehouse — PubMed / Crossref / Europe PMC / arXiv landings → `stg_*` → gold `tf_paper_status` + Kimball star.

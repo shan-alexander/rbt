@@ -57,17 +57,19 @@ pub mod testing;
 
 pub use core::{
     apply_scope_to_frontmatter, bronze_fingerprint, contract_diff_to_bronze_diagnostics,
-    effective_contract_version, expand_braced_vars, model_has_test_contract, parse_logical_dtype,
-    parse_select_spec, resolve_scan_path, run_contract_diff, scan_path_exists, strip_contract_prefix,
+    effective_contract_version, expand_braced_vars, fingerprints_match_for_skip,
+    model_has_test_contract, parse_fingerprint_prefix, parse_logical_dtype, parse_select_spec,
+    resolve_scan_path, run_contract_diff, scan_path_exists, strip_contract_prefix,
     try_apply_scope_to_frontmatter, AcceptedValuesEntry, BronzeCheckMode, BronzeDiagnostic,
     BronzeValidationReport, ColumnMeta, ContractDiffColumn, ContractDiffReport, ContractsConfig,
-    DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe, IcebergConfig, IcebergWriteMode,
-    Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode,
-    ModelRunResult, ModelTests, OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig,
-    RbtTemplateEngine, RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus,
-    ScanConfig, ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser,
-    StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
-    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe, FingerprintAlgo, FingerprintConfig,
+    FingerprintMode, IcebergConfig, IcebergWriteMode, Materialization, MaterializeConfig,
+    MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult, ModelTests, OnMissing,
+    OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine, RefBackend,
+    RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig, ScopeValue,
+    SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
+    DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
+    DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 
 pub use engine::{

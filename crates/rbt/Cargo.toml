@@ -49,6 +49,8 @@ toml = "0.8"
 globset = "0.4"
 futures = { workspace = true }
 tempfile = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
 
 # cli
 clap = { workspace = true }

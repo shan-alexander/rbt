@@ -40,6 +40,10 @@ struct RunScopeArgs {
     /// Emit run receipt JSON to stdout after success.
     #[arg(long, default_value_t = false)]
     receipt_json: bool,
+    /// Override bronze fingerprint mode for this run: `path_stat` | `content_hash` (RBT-A4).
+    /// Also: env `RBT_FINGERPRINT_MODE`. Project default in `fingerprint.mode` yml.
+    #[arg(long, value_name = "MODE")]
+    fingerprint_mode: Option<String>,
 }
 
 impl RunScopeArgs {
@@ -53,6 +57,17 @@ impl RunScopeArgs {
         scope.extend_from_kv_pairs(self.vars.iter().map(String::as_str))?;
         scope.extend_from_var_files(self.var_files.iter().map(String::as_str))?;
         Ok(scope)
+    }
+
+    /// Apply CLI fingerprint mode onto a loaded project config (after `RbtProjectConfig::load`).
+    fn apply_fingerprint_override(
+        &self,
+        config: &mut rbt::RbtProjectConfig,
+    ) -> Result<()> {
+        if let Some(ref m) = self.fingerprint_mode {
+            config.fingerprint.mode = rbt::FingerprintMode::parse(m)?;
+        }
+        Ok(())
     }
 }
 
@@ -331,7 +346,8 @@ async fn main() -> Result<()> {
             }
             let start = Instant::now();
 
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let mut config = RbtProjectConfig::load(&project_dir)?;
+            scope.apply_fingerprint_override(&mut config)?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
             let dag = full
                 .apply_select(select.as_deref(), SelectMode::Execute)
@@ -439,13 +455,14 @@ async fn main() -> Result<()> {
                 (None, None) => None,
             };
             let run_scope = scope.to_scope()?;
+            let mut config = RbtProjectConfig::load(&project_dir)?;
+            scope.apply_fingerprint_override(&mut config)?;
 
             println!(
                 "[rbt] Testing project {:?} (select={:?})...",
                 project_dir, select
             );
 
-            let config = RbtProjectConfig::load(&project_dir)?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
 
             // Default: models that declare tests or grain/unique_key

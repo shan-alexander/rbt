@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (RBT-A4 — content-addressed bronze fingerprints)
+
+- `fingerprint:` in `rbt_project.yml`: `mode` (`path_stat` \| `content_hash`), `algo`
+  (`blake3` \| `sha256`), `max_bytes_per_file`
+- Fingerprint prefixes: `path_stat:fnv1a64:…`, `content:blake3:…`, `content:sha256:…`
+- Legacy bare `fnv1a64:…` still matches path_stat on skip
+- Mode mismatch forces re-execute (no false skip)
+- CLI `--fingerprint-mode`; env `RBT_FINGERPRINT_MODE` / `_ALGO` / `_MAX_BYTES`
+
 ### Added (RBT-A3 — phased publish metadata on receipts)
 
 - Frontmatter `phase:` (optional free-form) + existing `tags:` flow into receipts

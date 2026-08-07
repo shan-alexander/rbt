@@ -133,6 +133,19 @@ rbt run -p proj --var report_date=2026-08-07 --receipt-json
 # dump full on-disk receipt (also written under .rbt/runs/)
 ```
 
+### Bronze fingerprint modes (**A4**)
+
+```yaml
+fingerprint:
+  mode: path_stat       # default (size+mtime)
+  # mode: content_hash  # hash bytes (mtime-safe)
+  algo: blake3
+```
+
+```bash
+rbt run -p proj --skip-if-match --fingerprint-mode content_hash
+```
+
 ### Contracts registry (optional enums)
 
 Closed vocabularies in `rbt_project.yml` (`contracts.enums`) + model

@@ -29,13 +29,15 @@ pub use paths::{
     validate_glob_patterns,
 };
 pub use project::{
-    IcebergConfig, IcebergWriteMode, MaterializeConfig, MaterializeMode, RbtProjectConfig,
-    RefBackend, RefStrategy, ScanConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
-    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode,
+    MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend, RefStrategy, ScanConfig,
+    DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
+    DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 pub use receipt::{
     apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version,
-    try_apply_scope_to_frontmatter, ModelRunResult, RunReceipt, RunStatus,
+    fingerprints_match_for_skip, parse_fingerprint_prefix, try_apply_scope_to_frontmatter,
+    ModelRunResult, RunReceipt, RunStatus,
 };
 pub use run_scope::{
     expand_braced_vars, fnv1a64, OnMissing, RunScope, ScopeValue, DEFAULT_MULTI_VAR_LIMIT,

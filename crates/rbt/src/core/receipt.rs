@@ -6,16 +6,20 @@
 
 use crate::core::dag::ModelDag;
 use crate::core::frontmatter::StagingFrontmatter;
-use crate::core::project::RbtProjectConfig;
+use crate::core::project::{
+    FingerprintAlgo, FingerprintConfig, FingerprintMode, RbtProjectConfig,
+};
 use crate::core::run_scope::{fnv1a64, RunScope};
 use crate::scan::{LakeScanner, ScanRequest};
 use anyhow::{Context, Result};
-use tracing;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing;
 
 /// Machine-readable result of one `rbt run` (or library execute with receipts enabled).
 ///
@@ -164,21 +168,78 @@ pub fn effective_contract_version(config: &RbtProjectConfig, scope: &RunScope) -
         .unwrap_or_else(|| "0".into())
 }
 
-/// Build a stable bronze fingerprint for the DAG under this scope.
+/// Prefix kind for a fingerprint string (RBT-A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FingerprintPrefix {
+    /// Current path_stat mode (`path_stat:fnv1a64:…`) or legacy bare `fnv1a64:…`.
+    PathStat,
+    ContentBlake3,
+    ContentSha256,
+    Unknown,
+}
+
+/// Parse the mode prefix of a stored fingerprint (for skip compatibility).
+pub fn parse_fingerprint_prefix(fp: &str) -> FingerprintPrefix {
+    if fp.starts_with("path_stat:fnv1a64:") || fp.starts_with("fnv1a64:") {
+        FingerprintPrefix::PathStat
+    } else if fp.starts_with("content:blake3:") {
+        FingerprintPrefix::ContentBlake3
+    } else if fp.starts_with("content:sha256:") {
+        FingerprintPrefix::ContentSha256
+    } else {
+        FingerprintPrefix::Unknown
+    }
+}
+
+/// Whether previous and current fingerprints allow skip-if-match.
 ///
-/// Manifest lines: `model\\tschema.table\\trel_or_abs\\tsize\\tmtime_secs` sorted, plus
-/// `contract_version=…`. Fingerprint is `fnv1a64:` + hex of FNV over the manifest.
+/// Mode mismatch (e.g. path_stat vs content) → **false** (force re-execute).
+/// Legacy `fnv1a64:X` is treated as path_stat and matches `path_stat:fnv1a64:X`.
+pub fn fingerprints_match_for_skip(previous: &str, current: &str) -> bool {
+    if previous == current {
+        return true;
+    }
+    let p = parse_fingerprint_prefix(previous);
+    let c = parse_fingerprint_prefix(current);
+    if p == FingerprintPrefix::Unknown || c == FingerprintPrefix::Unknown || p != c {
+        return false;
+    }
+    // Normalize legacy path_stat bare form
+    let pn = previous
+        .strip_prefix("path_stat:")
+        .unwrap_or(previous);
+    let cn = current.strip_prefix("path_stat:").unwrap_or(current);
+    pn == cn
+}
+
+/// Build a stable bronze fingerprint for the DAG under this scope (RBT-A4).
+///
+/// **path_stat** (default): sorted lines of `model\\trel\\tsize\\tmtime` + contract/scope
+/// → `path_stat:fnv1a64:{hex}` (legacy bare `fnv1a64:` still accepted on skip compare).
+///
+/// **content_hash**: sorted lines of `model\\trel\\t{file_digest}` + contract/scope
+/// → `content:blake3:{hex}` or `content:sha256:{hex}`.
 pub fn bronze_fingerprint(
     dag: &ModelDag,
     project_dir: &Path,
     config: &RbtProjectConfig,
     scope: &RunScope,
 ) -> Result<String> {
+    bronze_fingerprint_with(dag, project_dir, config, scope, &config.fingerprint)
+}
+
+/// Explicit fingerprint config (tests / CLI override).
+pub fn bronze_fingerprint_with(
+    dag: &ModelDag,
+    project_dir: &Path,
+    config: &RbtProjectConfig,
+    scope: &RunScope,
+    fp_cfg: &FingerprintConfig,
+) -> Result<String> {
     let contract = effective_contract_version(config, scope);
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("contract_version={contract}"));
-    // A1: multi-value sets must participate in skip identity even when file lists match
-    // (e.g. empty on_missing runs). Canonical sorted key=value&… line.
+    // A1: multi-value sets must participate in skip identity even when file lists match.
     {
         let mut parts: Vec<String> = scope
             .vars
@@ -187,6 +248,13 @@ pub fn bronze_fingerprint(
             .collect();
         parts.sort();
         lines.push(format!("scope_vars={}", parts.join("&")));
+    }
+    lines.push(format!("fp_mode={}", fp_cfg.mode.as_str()));
+    if matches!(fp_cfg.mode, FingerprintMode::ContentHash) {
+        lines.push(format!("fp_algo={}", fp_cfg.algo.as_str()));
+        if fp_cfg.max_bytes_per_file > 0 {
+            lines.push(format!("fp_max_bytes={}", fp_cfg.max_bytes_per_file));
+        }
     }
 
     for idx in dag.graph.node_indices() {
@@ -209,34 +277,42 @@ pub fn bronze_fingerprint(
             config.roots.clone(),
             &config.scan,
         )?;
-        // Soft list: missing/empty contributes a marker line, not an error.
         req.allow_empty = true;
         let scanner = LakeScanner::from_request(&req);
         match scanner.list_files(&req) {
             Ok((root, files)) => {
                 if files.is_empty() {
-                    lines.push(format!(
-                        "{}\tEMPTY\t{}",
-                        node.name,
-                        root.display()
-                    ));
+                    lines.push(format!("{}\tEMPTY\t{}", node.name, root.display()));
                 } else {
                     for f in files {
-                        let meta = fs::metadata(&f).ok();
-                        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                        let mtime = meta
-                            .and_then(|m| m.modified().ok())
-                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
                         let rel = f
                             .strip_prefix(&root)
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|_| f.display().to_string());
-                        lines.push(format!(
-                            "{}\t{}\t{}\t{}",
-                            node.name, rel, size, mtime
-                        ));
+                        match fp_cfg.mode {
+                            FingerprintMode::PathStat => {
+                                let meta = fs::metadata(&f).ok();
+                                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                                let mtime = meta
+                                    .and_then(|m| m.modified().ok())
+                                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                lines.push(format!(
+                                    "{}\t{}\t{}\t{}",
+                                    node.name, rel, size, mtime
+                                ));
+                            }
+                            FingerprintMode::ContentHash => {
+                                let digest = hash_file_hex(&f, fp_cfg).with_context(|| {
+                                    format!(
+                                        "E_RBT_FINGERPRINT: content hash {}",
+                                        f.display()
+                                    )
+                                })?;
+                                lines.push(format!("{}\t{}\t{}", node.name, rel, digest));
+                            }
+                        }
                     }
                 }
             }
@@ -248,8 +324,64 @@ pub fn bronze_fingerprint(
 
     lines.sort();
     let manifest = lines.join("\n");
-    let digest = fnv1a64(manifest.as_bytes());
-    Ok(format!("fnv1a64:{digest:016x}"))
+    match fp_cfg.mode {
+        FingerprintMode::PathStat => {
+            let digest = fnv1a64(manifest.as_bytes());
+            Ok(format!("path_stat:fnv1a64:{digest:016x}"))
+        }
+        FingerprintMode::ContentHash => match fp_cfg.algo {
+            FingerprintAlgo::Blake3 => {
+                let h = blake3::hash(manifest.as_bytes());
+                Ok(format!("content:blake3:{}", h.to_hex()))
+            }
+            FingerprintAlgo::Sha256 => {
+                let mut h = Sha256::new();
+                h.update(manifest.as_bytes());
+                Ok(format!("content:sha256:{:x}", h.finalize()))
+            }
+        },
+    }
+}
+
+fn hash_file_hex(path: &Path, fp_cfg: &FingerprintConfig) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("E_RBT_FINGERPRINT: open {}", path.display()))?;
+    let limit = fp_cfg.max_bytes_per_file;
+    let mut buf = [0u8; 64 * 1024];
+    let mut remaining = if limit == 0 {
+        u64::MAX
+    } else {
+        limit
+    };
+
+    match fp_cfg.algo {
+        FingerprintAlgo::Blake3 => {
+            let mut hasher = blake3::Hasher::new();
+            while remaining > 0 {
+                let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+                let n = file.read(&mut buf[..to_read])?;
+                if n == 0 {
+                    break;
+                }
+                hasher.write_all(&buf[..n])?;
+                remaining = remaining.saturating_sub(n as u64);
+            }
+            Ok(hasher.finalize().to_hex().to_string())
+        }
+        FingerprintAlgo::Sha256 => {
+            let mut hasher = Sha256::new();
+            while remaining > 0 {
+                let to_read = std::cmp::min(buf.len() as u64, remaining) as usize;
+                let n = file.read(&mut buf[..to_read])?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+                remaining = remaining.saturating_sub(n as u64);
+            }
+            Ok(format!("{:x}", hasher.finalize()))
+        }
+    }
 }
 
 /// Clone frontmatter with run-scope templates and effective partition filters applied.
@@ -417,10 +549,76 @@ mod tests {
             .unwrap();
         let f1 = bronze_fingerprint(&dag, dir.path(), &config, &s1).unwrap();
         let f2 = bronze_fingerprint(&dag, dir.path(), &config, &s2).unwrap();
+        assert!(f1.starts_with("path_stat:fnv1a64:"));
         assert_ne!(
             f1, f2,
             "multi vs single scope must change fingerprint even with empty bronze"
         );
+    }
+
+    #[test]
+    fn fingerprints_match_legacy_and_mode_mismatch() {
+        assert!(fingerprints_match_for_skip(
+            "fnv1a64:abcdef0123456789",
+            "path_stat:fnv1a64:abcdef0123456789"
+        ));
+        assert!(!fingerprints_match_for_skip(
+            "path_stat:fnv1a64:aaaaaaaaaaaaaaaa",
+            "content:blake3:bbbb"
+        ));
+        assert!(fingerprints_match_for_skip(
+            "content:blake3:deadbeef",
+            "content:blake3:deadbeef"
+        ));
+    }
+
+    #[test]
+    fn content_hash_stable_across_rewrite() {
+        use crate::core::dag::{Materialization, ModelDag};
+        use crate::core::project::{
+            FingerprintAlgo, FingerprintConfig, FingerprintMode, RbtProjectConfig,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let bronze = dir.path().join("bronze");
+        fs::create_dir_all(&bronze).unwrap();
+        let f = bronze.join("works.jsonl");
+        fs::write(&f, "{\"id\":1}\n").unwrap();
+
+        let mut config = RbtProjectConfig::default();
+        config.fingerprint = FingerprintConfig {
+            mode: FingerprintMode::ContentHash,
+            algo: FingerprintAlgo::Blake3,
+            max_bytes_per_file: 0,
+        };
+
+        let sql = r#"---
+source_format: jsonl
+scan_path: bronze
+path_glob: works.jsonl
+---
+SELECT 1 AS x
+"#;
+        let mut dag = ModelDag::new();
+        dag.add_model("stg_x", sql, Materialization::Table, "rbt")
+            .unwrap();
+        dag.build_graph().unwrap();
+
+        let scope = RunScope::new();
+        let fp1 = bronze_fingerprint_with(&dag, dir.path(), &config, &scope, &config.fingerprint)
+            .unwrap();
+        assert!(fp1.starts_with("content:blake3:"), "{fp1}");
+
+        // Rewrite identical bytes (mtime may change) — content fingerprint stable
+        fs::write(&f, "{\"id\":1}\n").unwrap();
+        let fp2 = bronze_fingerprint_with(&dag, dir.path(), &config, &scope, &config.fingerprint)
+            .unwrap();
+        assert_eq!(fp1, fp2, "content hash must ignore mtime when content identical");
+
+        fs::write(&f, "{\"id\":2}\n").unwrap();
+        let fp3 = bronze_fingerprint_with(&dag, dir.path(), &config, &scope, &config.fingerprint)
+            .unwrap();
+        assert_ne!(fp1, fp3, "content change must change fingerprint");
     }
 
     #[test]
