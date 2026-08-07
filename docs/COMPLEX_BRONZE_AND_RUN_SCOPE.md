@@ -242,6 +242,36 @@ RBT_FINGERPRINT_MODE=content_hash rbt run -p proj --skip-if-match
 
 **Mode mismatch never skips** (e.g. previous path_stat vs current content_hash → always re-execute).
 
+### Keyed upsert — Type-1 entity registry (RBT-A7)
+
+Entity-grain tables: one row per natural key; re-runs upsert; unchanged attributes only
+refresh **touch** columns (e.g. watermark).
+
+```yaml
+---
+materialization: keyed_upsert   # aliases: upsert | scd1 | type1
+unique_key: [entity_id]         # required, ≥1
+touch_columns: [last_seen_at]   # optional; empty = touch is no-op
+compare_columns: [status, tier] # optional; default = all non-key non-touch cols
+---
+SELECT entity_id, status, tier, report_date AS last_seen_at FROM …
+```
+
+| Case | Action |
+|------|--------|
+| Key missing | insert full row |
+| Compare cols equal (NULL-safe) | update only `touch_columns` |
+| Else | replace all non-key columns |
+| Keys not in this batch | kept |
+
+v1: collect SQL + existing Parquet in memory, atomic full rewrite. Cap:
+`RBT_UPSERT_MAX_ROWS` (default 2_000_000) → `E_RBT_UPSERT_TOO_LARGE`.
+
+Receipt `models[]` fields: `rows_inserted`, `rows_updated`, `rows_touched`.
+
+Showcase: [examples/entity_registry](../examples/entity_registry/).  
+Measure: `rbt measure --scenario entity_registry_upsert`.
+
 ### Parts-only publish / consolidate (RBT-A5)
 
 Hosts can keep **parts directories** as the source of truth without rewriting a monolithic

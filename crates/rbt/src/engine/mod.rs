@@ -14,10 +14,11 @@ use crate::core::receipt::{
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
     consolidate_parts_to_parquet, incremental_ref_path, load_parquet_batches,
-    materialize_incremental_append_stream, materialize_scoped_replace_stream,
-    materialize_table_parts_only_stream, resolve_part_keys, scope_part_id, uses_parts_directory,
-    materialize_stream, new_wap_run_id, sibling_iceberg_dir, stamp_batch, wap_publish,
-    LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
+    materialize_incremental_append_stream, materialize_keyed_upsert,
+    materialize_scoped_replace_stream, materialize_table_parts_only_stream, resolve_part_keys,
+    scope_part_id, uses_parts_directory, materialize_stream, new_wap_run_id, sibling_iceberg_dir,
+    stamp_batch, wap_publish, LineageStamp, MaterializeWriteOptions, MultiFormatWriter,
+    StreamWriteStats, WapModelPaths,
 };
 use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
@@ -546,6 +547,7 @@ impl TransformationEngine {
                     (dest_path.clone(), None)
                 };
 
+                let mut upsert_for_model: Option<crate::materializer::UpsertStats> = None;
                 let (row_count, write_stats) = match (
                     &model.materialization,
                     &model.output_format,
@@ -667,6 +669,71 @@ impl TransformationEngine {
                         (stats.rows, Some(stats))
                     }
                     (
+                        Materialization::KeyedUpsert,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        _,
+                    ) => {
+                        // RBT-A7: collect SQL (v1 memory bound), upsert vs existing parquet, rewrite.
+                        let fm = model.frontmatter.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "E_RBT_UPSERT_KEY: model '{}': keyed_upsert requires frontmatter \
+                                 with unique_key",
+                                model.name
+                            )
+                        })?;
+                        let upsert_cfg = fm.keyed_upsert_config().with_context(|| {
+                            format!(
+                                "E_RBT_UPSERT_KEY: model '{}' keyed_upsert config invalid",
+                                model.name
+                            )
+                        })?;
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let mut batches = df.collect().await.with_context(|| {
+                            format!("E_RBT_SQL: collect for keyed_upsert model '{}'", model.name)
+                        })?;
+                        if let Some(ref lin) = write_opts.lineage {
+                            batches = batches
+                                .iter()
+                                .map(|b| stamp_batch(b, lin))
+                                .collect::<Result<Vec<_>>>()?;
+                        }
+                        if let Some(ref d) = write_opts.declared_schema {
+                            batches = batches
+                                .iter()
+                                .map(|b| {
+                                    crate::core::schema_emit::ensure_declared_columns(b, d.as_ref())
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                        }
+                        let (stats, upsert_stats) = materialize_keyed_upsert(
+                            &dest_path,
+                            &batches,
+                            &upsert_cfg,
+                            &write_opts,
+                            &assertions,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_UPSERT_SCHEMA: model '{}' keyed_upsert failed",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        tracing::info!(
+                            model = %model.name,
+                            inserted = upsert_stats.rows_inserted,
+                            updated = upsert_stats.rows_updated,
+                            touched = upsert_stats.rows_touched,
+                            kept = upsert_stats.rows_kept,
+                            total = upsert_stats.total_rows,
+                            "keyed_upsert complete"
+                        );
+                        upsert_for_model = Some(upsert_stats);
+                        (stats.rows, Some(stats))
+                    }
+                    (
                         Materialization::IncrementalMerge,
                         _,
                         _,
@@ -675,6 +742,18 @@ impl TransformationEngine {
                             "E_RBT_INCREMENTAL: model '{}': incremental_merge is not implemented yet \
                              (use incremental_append or scoped_replace for part files)",
                             model.name
+                        );
+                    }
+                    (
+                        Materialization::KeyedUpsert,
+                        fmt,
+                        _,
+                    ) => {
+                        bail!(
+                            "E_RBT_UPSERT_SCHEMA: model '{}': keyed_upsert requires parquet \
+                             (got {:?})",
+                            model.name,
+                            fmt
                         );
                     }
                     (
@@ -831,14 +910,22 @@ impl TransformationEngine {
                         )
                     })
                     .unwrap_or((None, Vec::new()));
-                model_results.push(ModelRunResult::success(
+                let mut mrr = ModelRunResult::success(
                     model.name.clone(),
                     row_count,
                     Some(dest_path.display().to_string()),
                     phase,
                     tags,
                     Some(elapsed_ms),
-                ));
+                );
+                if let Some(u) = upsert_for_model {
+                    mrr = mrr.with_upsert_stats(
+                        u.rows_inserted,
+                        u.rows_updated,
+                        u.rows_touched,
+                    );
+                }
+                model_results.push(mrr);
             }
         }
 

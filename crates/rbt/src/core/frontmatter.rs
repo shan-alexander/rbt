@@ -323,8 +323,17 @@ pub struct StagingFrontmatter {
     #[serde(default)]
     pub grain: Option<Vec<String>>,
     /// Primary uniqueness contract (usually same as grain for staging facts).
+    /// Required (non-empty) for `materialization: keyed_upsert` (RBT-A7).
     #[serde(default)]
     pub unique_key: Option<Vec<String>>,
+    /// Columns updated on touch-only upserts when compare attrs are unchanged (RBT-A7).
+    /// May be empty (then touch-only becomes a no-op write for that key).
+    #[serde(default)]
+    pub touch_columns: Option<Vec<String>>,
+    /// Attribute columns compared NULL-safe to decide touch vs full replace (RBT-A7).
+    /// Default when omitted: all non-key, non-touch columns present in the SQL result.
+    #[serde(default)]
+    pub compare_columns: Option<Vec<String>>,
     /// Free-form tags for selection / docs / receipt metadata (RBT-A3).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
@@ -332,7 +341,8 @@ pub struct StagingFrontmatter {
     /// Written onto run receipts under `models[].phase` — engine does not interpret values.
     #[serde(default)]
     pub phase: Option<String>,
-    /// Materialization hint: `table` | `view` | `incremental_append` | `scoped_replace`.
+    /// Materialization hint: `table` | `view` | `incremental_append` | `scoped_replace` |
+    /// `keyed_upsert`.
     #[serde(default)]
     pub materialization: Option<String>,
     /// Post-materialization assertions.
@@ -394,6 +404,16 @@ impl StagingFrontmatter {
     /// [`crate::core::schema_emit`] (RBT-A6).
     pub fn empty_frame_schema(&self) -> Result<SchemaRef> {
         crate::core::schema_emit::declared_schema_for_frontmatter(self)
+    }
+
+    /// Validate / resolve keyed upsert config from frontmatter (RBT-A7).
+    ///
+    /// * `unique_key` required, ≥1 column, non-empty names  
+    /// * `touch_columns` optional (default empty)  
+    /// * `compare_columns` optional (resolved later against schema if omitted)  
+    /// * key / touch / compare must be pairwise disjoint when compare is explicit
+    pub fn keyed_upsert_config(&self) -> Result<crate::materializer::upsert::UpsertConfig> {
+        crate::materializer::upsert::UpsertConfig::from_frontmatter(self)
     }
 }
 

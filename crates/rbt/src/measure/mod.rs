@@ -28,6 +28,8 @@ pub const SCENARIO_INCREMENTAL_APPEND: &str = "incremental_append";
 pub const SCENARIO_STREAM_VS_COLLECT: &str = "stream_vs_collect";
 pub const SCENARIO_WHALE_SYNTHETIC: &str = "whale_synthetic";
 pub const SCENARIO_COMPLEX_BRONZE: &str = "complex_bronze";
+/// Synthetic N-key Type-1 upsert (RBT-A7); env `RBT_MEASURE_UPSERT_KEYS`.
+pub const SCENARIO_ENTITY_REGISTRY_UPSERT: &str = "entity_registry_upsert";
 
 /// Default synthetic row count for whale scenario (override with `RBT_MEASURE_ROWS`).
 pub const DEFAULT_WHALE_ROWS: usize = 100_000;
@@ -117,6 +119,9 @@ pub async fn run_measure_scenario(
         }
         SCENARIO_COMPLEX_BRONZE | "complex" | "multi_artifact" => {
             measure_complex_bronze(project_dir, output_dir).await
+        }
+        SCENARIO_ENTITY_REGISTRY_UPSERT | "keyed_upsert" | "upsert" => {
+            measure_entity_registry_upsert(output_dir).await
         }
         other => bail!(
             "E_RBT_MEASURE: unknown scenario '{other}'. Built-ins: {}",
@@ -620,7 +625,145 @@ pub fn list_scenarios() -> Vec<&'static str> {
         SCENARIO_STREAM_VS_COLLECT,
         SCENARIO_WHALE_SYNTHETIC,
         SCENARIO_COMPLEX_BRONZE,
+        SCENARIO_ENTITY_REGISTRY_UPSERT,
     ]
+}
+
+/// Synthetic entity registry: first pass inserts N keys; second pass touch-only.
+async fn measure_entity_registry_upsert(output_dir: &Path) -> Result<MeasureReport> {
+    use crate::engine::TransformationEngine;
+    use std::io::Write;
+
+    let n = env_usize("RBT_MEASURE_UPSERT_KEYS", 5_000);
+    let root = output_dir.join("entity_registry_upsert_measure");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("lake/bronze"))?;
+    fs::create_dir_all(root.join("models/marts"))?;
+    fs::create_dir_all(root.join("lake/gold"))?;
+
+    let bronze_path = root.join("lake/bronze/sightings.jsonl");
+    {
+        let mut f = fs::File::create(&bronze_path)?;
+        for i in 0..n {
+            writeln!(
+                f,
+                r#"{{"entity_id":"e{i}","status":"ok","tier":"A","seen_at":"d1"}}"#
+            )?;
+        }
+    }
+
+    fs::write(
+        root.join("rbt_project.yml"),
+        r#"
+name: entity_registry_upsert_measure
+version: "1"
+contract_version: "a7-measure"
+models_dir: models
+target_path: lake/gold
+roots:
+  lake: lake
+layers:
+  marts:
+    path: models/marts
+    target_path: lake/gold
+    default_format: parquet
+"#,
+    )?;
+
+    fs::write(
+        root.join("models/marts/dim_entity.sql"),
+        r#"---
+materialization: keyed_upsert
+unique_key: [entity_id]
+touch_columns: [last_seen_at]
+compare_columns: [status, tier]
+source_format: jsonl
+scan_path: $lake/bronze/sightings.jsonl
+source_name: bronze
+source_table: sightings
+---
+SELECT entity_id, status, tier, seen_at AS last_seen_at
+FROM {{ source('bronze', 'sightings') }}
+"#,
+    )?;
+
+    let config = RbtProjectConfig::load(&root)?;
+    let dag = config.build_dag(&root, None)?;
+    let engine = TransformationEngine::new();
+    let out = root.join("out");
+    let mut scope = RunScope::new();
+    scope.write_receipt = true;
+
+    let rss0 = read_peak_rss_kb();
+    let start = Instant::now();
+    let s1 = engine
+        .execute_dag_with_scope(&dag, &root, &out, &config, &scope)
+        .await
+        .context("E_RBT_MEASURE: upsert first pass (insert)")?;
+
+    {
+        let mut f = fs::File::create(&bronze_path)?;
+        for i in 0..n {
+            writeln!(
+                f,
+                r#"{{"entity_id":"e{i}","status":"ok","tier":"A","seen_at":"d2"}}"#
+            )?;
+        }
+    }
+    let s2 = engine
+        .execute_dag_with_scope(&dag, &root, &out, &config, &scope)
+        .await
+        .context("E_RBT_MEASURE: upsert second pass (touch)")?;
+    let wall_ms = start.elapsed().as_millis();
+    let rss1 = read_peak_rss_kb();
+
+    let m1 = s1.model_results.iter().find(|m| m.name == "dim_entity");
+    let m2 = s2.model_results.iter().find(|m| m.name == "dim_entity");
+
+    let mut notes = vec![
+        format!("synthetic keys N={n}"),
+        "pass1: insert all; pass2: touch-only (same attrs)".into(),
+        format!(
+            "pass1 rows_inserted={:?} total={}",
+            m1.and_then(|m| m.rows_inserted),
+            s1.total_rows_produced
+        ),
+        format!(
+            "pass2 rows_touched={:?} rows_updated={:?} total={}",
+            m2.and_then(|m| m.rows_touched),
+            m2.and_then(|m| m.rows_updated),
+            s2.total_rows_produced
+        ),
+    ];
+
+    let ok = m1.and_then(|m| m.rows_inserted).unwrap_or(0) == n
+        && m2.and_then(|m| m.rows_touched).unwrap_or(0) == n
+        && m2.and_then(|m| m.rows_updated).unwrap_or(1) == 0;
+
+    if !ok {
+        notes.push("expected pass1 all inserts, pass2 all touches".into());
+    }
+
+    Ok(MeasureReport {
+        scenario: SCENARIO_ENTITY_REGISTRY_UPSERT.into(),
+        project: config.name,
+        package_version: crate::VERSION.into(),
+        wall_ms,
+        models_executed: s1.models_executed + s2.models_executed,
+        total_rows: s2.total_rows_produced,
+        bronze_sources: s1.bronze_sources_registered,
+        peak_rss_kb: rss1.or(rss0),
+        notes,
+        ok,
+        error: if ok {
+            None
+        } else {
+            Some("upsert measure counters mismatch".into())
+        },
+        mode_compare: None,
+        synthetic_rows: Some(n),
+        synthetic_parts: None,
+    })
 }
 
 #[cfg(test)]
@@ -651,5 +794,15 @@ mod tests {
         let report = measure_stream_vs_collect(&root, out.path()).await.unwrap();
         assert!(report.ok, "{:?}", report.error);
         assert!(report.mode_compare.is_some());
+    }
+
+    #[tokio::test]
+    async fn entity_registry_upsert_small_ok() {
+        std::env::set_var("RBT_MEASURE_UPSERT_KEYS", "50");
+        let dir = tempfile::tempdir().unwrap();
+        let report = measure_entity_registry_upsert(dir.path()).await.unwrap();
+        assert!(report.ok, "{:?} notes={:?}", report.error, report.notes);
+        assert_eq!(report.synthetic_rows, Some(50));
+        std::env::remove_var("RBT_MEASURE_UPSERT_KEYS");
     }
 }

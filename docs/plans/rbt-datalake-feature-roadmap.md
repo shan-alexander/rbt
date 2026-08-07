@@ -415,6 +415,9 @@ Consumers can rely on physical schema stability across partial runs.
 
 ## 9. Feature RBT-A7 — Keyed upsert materialization (Type-1)
 
+> **Status:** **Implemented** on Unreleased (`keyed_upsert`, `materializer/upsert`,
+> receipt metrics, `examples/entity_registry`, measure `entity_registry_upsert`).
+
 ### Goal
 
 Support **entity-grain** tables: one row per natural key; re-runs upsert; if non-key attributes unchanged, only update **touch** columns (e.g. watermark).

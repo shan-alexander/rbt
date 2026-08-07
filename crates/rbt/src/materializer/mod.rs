@@ -7,6 +7,7 @@ pub mod iceberg_catalog;
 pub mod incremental;
 pub mod lineage;
 pub mod stream;
+pub mod upsert;
 pub mod wap;
 
 pub use iceberg_catalog::{
@@ -18,6 +19,10 @@ pub use incremental::{
     materialize_incremental_append_stream, materialize_scoped_replace_stream,
     materialize_table_parts_only_stream, parts_dir_for_parquet, resolve_part_keys, scope_part_id,
     uses_parts_directory, IncrementalManifest,
+};
+pub use upsert::{
+    materialize_keyed_upsert, upsert_batches, UpsertConfig, UpsertResult, UpsertStats,
+    DEFAULT_UPSERT_MAX_ROWS,
 };
 pub use lineage::{stamp_batch, stamped_schema, LineageStamp};
 pub use stream::{

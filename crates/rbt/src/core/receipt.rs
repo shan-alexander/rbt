@@ -84,6 +84,13 @@ pub struct ModelRunResult {
     pub output_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Keyed upsert counters (RBT-A7); omitted for non-upsert materializations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_inserted: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_updated: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_touched: Option<usize>,
 }
 
 fn default_model_status() -> String {
@@ -108,7 +115,17 @@ impl ModelRunResult {
             elapsed_ms,
             output_path,
             error: None,
+            rows_inserted: None,
+            rows_updated: None,
+            rows_touched: None,
         }
+    }
+
+    pub fn with_upsert_stats(mut self, inserted: usize, updated: usize, touched: usize) -> Self {
+        self.rows_inserted = Some(inserted);
+        self.rows_updated = Some(updated);
+        self.rows_touched = Some(touched);
+        self
     }
 }
 

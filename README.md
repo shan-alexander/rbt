@@ -173,6 +173,23 @@ on_missing: empty   # bronze: zero-row typed frame when scan empty
 Zero-row SQL and missing SELECT columns still publish declared fields (null-typed).
 See [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md) dtype map.
 
+### Keyed upsert / entity registry (**A7**)
+
+```yaml
+materialization: keyed_upsert
+unique_key: [entity_id]
+touch_columns: [last_seen_at]
+compare_columns: [status, tier]
+```
+
+```bash
+rbt run -p examples/entity_registry --json
+rbt measure -p examples/entity_registry --scenario entity_registry_upsert
+```
+
+Same attrs → touch only; attr change → full non-key replace. Receipt:
+`rows_inserted` / `rows_updated` / `rows_touched`.
+
 ### Contracts registry (optional enums)
 
 Closed vocabularies in `rbt_project.yml` (`contracts.enums`) + model

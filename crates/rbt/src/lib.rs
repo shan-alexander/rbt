@@ -84,20 +84,22 @@ pub use engine::udf::{register_builtin_udfs, register_scalar_udf, BUILTIN_UDF_NA
 
 pub use materializer::{
     clear_incremental_parts, consolidate_parts_to_parquet, incremental_ref_path,
-    materialize_incremental_append_stream, materialize_scoped_replace_stream,
-    materialize_table_parts_only_stream, materialize_stream, new_wap_run_id, parts_dir_for_parquet,
-    resolve_part_keys, scope_part_id, sibling_iceberg_dir, stamp_batch, uses_parts_directory,
-    verify_iceberg_catalog_table, wap_publish, write_iceberg_catalog_batches, write_iceberg_fs_table,
-    write_parquet_stream, IcebergCatalogOptions, IcebergCatalogWriteStats, IncrementalManifest,
-    LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapAuditLog,
-    WapMaterializer, WapModelPaths, WapPhase, WapStatus,
+    materialize_incremental_append_stream, materialize_keyed_upsert,
+    materialize_scoped_replace_stream, materialize_table_parts_only_stream, materialize_stream,
+    new_wap_run_id, parts_dir_for_parquet, resolve_part_keys, scope_part_id, sibling_iceberg_dir,
+    stamp_batch, upsert_batches, uses_parts_directory, verify_iceberg_catalog_table, wap_publish,
+    write_iceberg_catalog_batches, write_iceberg_fs_table, write_parquet_stream,
+    IcebergCatalogOptions, IcebergCatalogWriteStats, IncrementalManifest, LineageStamp,
+    MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, UpsertConfig, UpsertResult,
+    UpsertStats, WapAuditLog, WapMaterializer, WapModelPaths, WapPhase, WapStatus,
+    DEFAULT_UPSERT_MAX_ROWS,
 };
 pub use scan::parts::{is_parts_directory, list_part_files, PartsManifest};
 pub use measure::{
     default_report_path, list_scenarios, run_measure_scenario, write_measure_report, MeasureReport,
-    ModeCompare, SCENARIO_COMPLEX_BRONZE, SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE,
-    SCENARIO_STREAM_VS_COLLECT, SCENARIO_VALIDATE_DX, SCENARIO_WHALE_SYNTHETIC, DEFAULT_WHALE_PARTS,
-    DEFAULT_WHALE_ROWS,
+    ModeCompare, SCENARIO_COMPLEX_BRONZE, SCENARIO_ENTITY_REGISTRY_UPSERT,
+    SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE, SCENARIO_STREAM_VS_COLLECT,
+    SCENARIO_VALIDATE_DX, SCENARIO_WHALE_SYNTHETIC, DEFAULT_WHALE_PARTS, DEFAULT_WHALE_ROWS,
 };
 
 pub use json::{JShiftExtractor, JsonExtractSpec};

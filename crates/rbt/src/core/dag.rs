@@ -19,6 +19,8 @@ pub enum Materialization {
     /// RBT-A2: deterministic part file per scope key; re-run replaces that part only.
     ScopedReplace,
     IncrementalMerge,
+    /// RBT-A7: Type-1 entity-grain upsert by `unique_key` (touch-only when attrs unchanged).
+    KeyedUpsert,
     /// Native zero-copy metadata table clone (zero disk byte duplication)
     ZeroCopyClone,
 }
@@ -33,10 +35,13 @@ pub fn parse_materialization_hint(s: &str) -> Result<Materialization> {
             Ok(Materialization::ScopedReplace)
         }
         "incremental_merge" | "merge" => Ok(Materialization::IncrementalMerge),
+        "keyed_upsert" | "upsert" | "scd1" | "type1" | "type_1" => {
+            Ok(Materialization::KeyedUpsert)
+        }
         "zero_copy_clone" | "clone" => Ok(Materialization::ZeroCopyClone),
         other => bail!(
             "E_RBT_MATERIALIZATION: unknown materialization '{other}' \
-             (table | view | incremental_append | scoped_replace | incremental_merge)"
+             (table | view | incremental_append | scoped_replace | keyed_upsert | incremental_merge)"
         ),
     }
 }

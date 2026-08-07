@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (RBT-A7 — keyed upsert / Type-1 entity grain)
+
+- `materialization: keyed_upsert` (aliases: `upsert`, `scd1`, `type1`)
+- Frontmatter: `unique_key` (required), `touch_columns`, `compare_columns`
+- Pure in-memory upsert engine (`materializer/upsert.rs`) with NULL-safe compare
+- v1: collect SQL + existing Parquet, atomic full rewrite; `RBT_UPSERT_MAX_ROWS`
+- Receipt metrics: `rows_inserted`, `rows_updated`, `rows_touched`
+- Example: `examples/entity_registry`; measure: `entity_registry_upsert`
+- Codes: `E_RBT_UPSERT_KEY`, `E_RBT_UPSERT_TOO_LARGE`, `E_RBT_UPSERT_SCHEMA`
+
 ### Added (RBT-A6 — declared schema emit)
 
 - `core/schema_emit`: shared helpers — `try_declared_schema`, `empty_batch_for_frontmatter`,

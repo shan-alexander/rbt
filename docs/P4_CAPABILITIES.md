@@ -44,6 +44,18 @@ Manifest: `model.parts/_rbt_manifest.json` (`parts`, `total_rows`, `updated_at_m
 `part_key`; re-runs replace that part only (peers kept). See
 [COMPLEX_BRONZE_AND_RUN_SCOPE.md](COMPLEX_BRONZE_AND_RUN_SCOPE.md).
 
+### Keyed upsert (RBT-A7)
+
+```yaml
+materialization: keyed_upsert
+unique_key: [entity_id]
+touch_columns: [last_seen_at]
+compare_columns: [a, b]   # optional
+```
+
+Type-1 entity grain: insert / touch-only / full non-key update. v1 in-memory +
+single Parquet rewrite. See [COMPLEX_BRONZE_AND_RUN_SCOPE.md](COMPLEX_BRONZE_AND_RUN_SCOPE.md).
+
 ### Consolidate policy (RBT-A5)
 
 ```yaml
