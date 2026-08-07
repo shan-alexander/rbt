@@ -679,19 +679,74 @@ Optional: SQLite as **bench baseline only** (not product). Prefer proving lake-n
 | PR9 | A9 per-entity execution helper |
 | PR10 | A10 bronze adapter trait + ergonomics (txt/jsonl/xml path) |
 | PR11 | A11–A13 docs + lint |
+| PR12 | A14 tag select design (research only) |
+| PR13 | A15 multi-phase design (research only) |
 
 ---
 
-## 19. Out of scope for this roadmap (host systems)
+## 19. Research spikes (appended — research before implement)
 
-- Durable orchestration (Restate/Temporal/Airflow).  
+### RBT-A14 — Tag-based model selection (`--select tag:…`) **[research spike]**
+
+**Idea:** dbt-like selection on frontmatter `tags:`:
+
+```bash
+rbt run -p proj --select tag:nightly
+rbt run -p proj --select tag:stage,tag:finance
+rbt run -p proj --select +tag:mart   # ? ancestry rules TBD
+```
+
+**Why research first**
+
+| Question | Why it matters |
+|----------|----------------|
+| Tag ∩ name selectors | How does `tag:x,stg_foo` union/intersect with `+` / `name+`? |
+| Layer defaults | Should `tag:gold` imply marts only, or any model tagged gold? |
+| Empty tag | Fail vs no-op when no models match? |
+| Overlap with `phase` | Phase is receipt metadata; tags may be both select *and* receipt — document dual role |
+| Performance | Tag index at DAG build vs scan all frontmatter |
+
+**Out of spike scope:** implementing selection (do that only after a short design note in `docs/analysis/` or ADR).
+
+**Suggested spike deliverable:** 1–2 page design: grammar for `parse_select_spec`, examples, open questions; **no** code required.
+
+---
+
+### RBT-A15 — Ordered multi-phase runs in one process **[research spike]**
+
+**Idea:** one `rbt run` executes models in host-defined **phases** (e.g. inventory → product → gold), possibly stopping or emitting intermediate receipts between phases.
+
+**Why research first (do not implement yet)**
+
+| Risk | Detail |
+|------|--------|
+| Becomes a mini orchestrator | Competes with Restate/Temporal; dilutes “SQL DAG on lake files” identity |
+| Phase ordering | Graph order vs explicit phase order; cross-phase `ref()` |
+| Failure policy | Continue after phase fail? Partial success status? |
+| Relation to A3 | A3 only *labels* models with `phase:`; A15 would *drive* execution by phase |
+| Relation to A9 | Per-entity failure maps may compose better than multi-phase in-process |
+
+**Spike questions**
+
+1. Is multi-phase a **host loop** (N× `rbt run --select tag:phase_N`) better than in-process?  
+2. If in-process: frontmatter `phase:` order list in `rbt_project.yml`?  
+3. Intermediate receipts / WAP boundaries per phase?  
+4. How does this interact with fingerprint skip (skip whole run vs per phase)?
+
+**Suggested spike deliverable:** recommendation: **host loop vs in-process**, with non-goals; only then a later epic if in-process wins.
+
+---
+
+## 20. Out of scope for this roadmap (host systems)
+
+- Durable orchestration (Restate/Temporal/Airflow) — unless A15 research reverses this for a *thin* multi-phase mode.  
 - Product lane routing (thresholds, “whale”, mime).  
 - Business quarantine rules.  
 - Renaming host bronze directories.
 
 ---
 
-## 20. Quick reference — error codes to introduce
+## 21. Quick reference — error codes to introduce
 
 | Code | Use |
 |------|-----|
@@ -699,6 +754,7 @@ Optional: SQLite as **bench baseline only** (not product). Prefer proving lake-n
 | `E_RBT_VAR_FILE` | `--var-file` IO/parse |
 | `E_RBT_VAR_LIMIT` | Too many multi values |
 | `E_RBT_PART_KEY` | Invalid part_key |
+| `E_RBT_PART_KEY_MULTI` | Reserved if multi part_key is ever rejected (today multi is **allowed** — one part for whole multi set) |
 | `E_RBT_MANIFEST` | Parts manifest corrupt |
 | `E_RBT_FINGERPRINT_MODE` | Unknown mode |
 | `E_RBT_CONSOLIDATE` | Illegal consolidate/materialization combo |

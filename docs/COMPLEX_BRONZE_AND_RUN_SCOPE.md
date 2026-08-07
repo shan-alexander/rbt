@@ -167,9 +167,15 @@ Skip path (`--skip-if-match`): new receipt with `status: skipped`, empty `models
 rbt run -p my_project --var report_date=2026-07-29 --skip-if-match
 # Identical bronze + contract → SKIPPED materialize; new receipt with status=skipped
 
+# Compact run summary for hosts (A3.5) — models[] with phase/tags/elapsed_ms
+rbt run -p my_project --var report_date=2026-07-29 --json
+
+# Full on-disk receipt body to stdout (path still under .rbt/runs/)
 rbt run -p my_project --var report_date=2026-07-29 --receipt-json
-# Print full receipt JSON (includes models[].phase)
 ```
+
+`--json` is a **summary** (`ok`, `wall_ms`, `models[]`, fingerprint, receipt_path).  
+`--receipt-json` dumps the **full** written receipt file. Prefer `--json` for CI/orchestrators.
 
 Bump `contract_version` in yml when silver SQL or bronze column meaning changes so skip does not return stale semantics.
 

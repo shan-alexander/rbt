@@ -10,7 +10,8 @@ All notable changes to this project are documented in this file.
 - Receipt `models[]` entries: `name`, `status`, `row_count`, `phase`, `tags`,
   `elapsed_ms`, `output_path` (JSON key renamed from `model_results`; still reads legacy)
 - `schema_version: 2`; skip receipts keep empty `models`
-- CLI `--receipt-json` already prints the full receipt for host integration
+- CLI **`rbt run --json`**: compact run summary to stdout (`models[]`, `wall_ms`, fingerprint)
+- CLI `--receipt-json`: full on-disk receipt body (debug); prefer `--json` for orchestrators
 
 ### Added (RBT-A2 — scoped_replace materialization)
 

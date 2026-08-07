@@ -154,6 +154,10 @@ enum Commands {
         /// Pre-flight bronze path check before execution (default: fail)
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
+        /// Emit machine-readable run summary JSON to stdout (A3.5). Suppresses most human banners.
+        /// Includes models[] (phase/tags/elapsed_ms). Full on-disk receipt still written when enabled.
+        #[arg(long, default_value_t = false)]
+        json: bool,
         #[command(flatten)]
         scope: RunScopeArgs,
     },
@@ -314,13 +318,17 @@ async fn main() -> Result<()> {
             output_dir,
             format,
             bronze_check,
+            json,
             scope,
         } => {
             let run_scope = scope.to_scope()?;
-            println!(
-                "[rbt] Executing pipeline from {:?} (select: {:?}, format: {:?}, output: {:?}, bronze_check={:?}, vars={:?})...",
-                project_dir, select, format, output_dir, bronze_check, run_scope.vars
-            );
+            let quiet = json; // machine summary owns stdout
+            if !quiet {
+                println!(
+                    "[rbt] Executing pipeline from {:?} (select: {:?}, format: {:?}, output: {:?}, bronze_check={:?}, vars={:?})...",
+                    project_dir, select, format, output_dir, bronze_check, run_scope.vars
+                );
+            }
             let start = Instant::now();
 
             let config = RbtProjectConfig::load(&project_dir)?;
@@ -344,45 +352,74 @@ async fn main() -> Result<()> {
                 );
             }
 
-            println!(
-                "[rbt] Running {} model(s): {:?}",
-                dag.node_map.len(),
-                dag.topological_sequence()?
-                    .iter()
-                    .map(|m| m.name.as_str())
-                    .collect::<Vec<_>>()
-            );
+            if !quiet {
+                println!(
+                    "[rbt] Running {} model(s): {:?}",
+                    dag.node_map.len(),
+                    dag.topological_sequence()?
+                        .iter()
+                        .map(|m| m.name.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
 
             let engine = TransformationEngine::new();
             let summary = engine
                 .execute_dag_with_scope(&dag, &project_dir, &output_dir, &config, &run_scope)
                 .await?;
             let duration = start.elapsed();
+            let wall_ms = duration.as_millis();
 
-            if summary.skipped {
-                println!(
-                    "[rbt] SKIPPED materialize (fingerprint match) in {:.2?} — {}",
-                    duration,
-                    summary.skip_reason.as_deref().unwrap_or("identical bronze")
-                );
+            if json {
+                // A3.5: compact run summary for hosts (serde_json — not jshift; jshift is bronze extract).
+                let body = serde_json::json!({
+                    "ok": !summary.skipped || summary.skip_reason.is_some(),
+                    "skipped": summary.skipped,
+                    "skip_reason": summary.skip_reason,
+                    "run_id": summary.run_id,
+                    "project": config.name,
+                    "package_version": rbt::VERSION,
+                    "models_executed": summary.models_executed,
+                    "total_rows": summary.total_rows_produced,
+                    "bronze_sources": summary.bronze_sources_registered,
+                    "bronze_fingerprint": summary.bronze_fingerprint,
+                    "receipt_path": summary.receipt_path.as_ref().map(|p| p.display().to_string()),
+                    "wall_ms": wall_ms,
+                    "models": summary.model_results,
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
             } else {
-                println!(
-                    "[rbt] Completed {} models ({} rows, {} bronze sources) in {:.2?}",
-                    summary.models_executed,
-                    summary.total_rows_produced,
-                    summary.bronze_sources_registered,
-                    duration
-                );
+                if summary.skipped {
+                    println!(
+                        "[rbt] SKIPPED materialize (fingerprint match) in {:.2?} — {}",
+                        duration,
+                        summary.skip_reason.as_deref().unwrap_or("identical bronze")
+                    );
+                } else {
+                    println!(
+                        "[rbt] Completed {} models ({} rows, {} bronze sources) in {:.2?}",
+                        summary.models_executed,
+                        summary.total_rows_produced,
+                        summary.bronze_sources_registered,
+                        duration
+                    );
+                }
+                if let Some(ref fp) = summary.bronze_fingerprint {
+                    println!("[rbt] bronze_fingerprint={fp}");
+                }
+                if let Some(ref p) = summary.receipt_path {
+                    println!("[rbt] receipt={}", p.display());
+                }
             }
-            if let Some(ref fp) = summary.bronze_fingerprint {
-                println!("[rbt] bronze_fingerprint={fp}");
-            }
-            if let Some(ref p) = summary.receipt_path {
-                println!("[rbt] receipt={}", p.display());
-            }
+            // Full on-disk receipt dump (may coexist with --json for debugging)
             if scope.receipt_json {
                 if let Some(ref p) = summary.receipt_path {
-                    print!("{}", std::fs::read_to_string(p)?);
+                    if json {
+                        // avoid mixing two JSON docs on stdout; put full receipt path only in summary
+                        eprintln!("[rbt] full receipt at {}", p.display());
+                    } else {
+                        print!("{}", std::fs::read_to_string(p)?);
+                    }
                 }
             }
         }

@@ -126,8 +126,11 @@ tags: [stage, early]
 ```
 
 ```bash
+rbt run -p proj --var report_date=2026-08-07 --json
+# compact run summary JSON (models[].phase / tags / elapsed_ms) on stdout
+
 rbt run -p proj --var report_date=2026-08-07 --receipt-json
-# → .rbt/runs/{run_id}.json with models[].phase / tags / elapsed_ms
+# dump full on-disk receipt (also written under .rbt/runs/)
 ```
 
 ### Contracts registry (optional enums)
