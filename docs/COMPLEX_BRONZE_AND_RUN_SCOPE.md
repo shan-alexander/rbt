@@ -242,19 +242,23 @@ RBT_FINGERPRINT_MODE=content_hash rbt run -p proj --skip-if-match
 
 **Mode mismatch never skips** (e.g. previous path_stat vs current content_hash → always re-execute).
 
-### Keyed upsert — Type-1 entity registry (RBT-A7)
+### Keyed upsert — durable entity-grain merge (RBT-A7)
 
-Entity-grain tables: one row per natural key; re-runs upsert; unchanged attributes only
-refresh **touch** columns (e.g. watermark).
+**General** merge primitive: candidates in, peers kept, touch vs update by compare cols.
+Type-1 dims / entity registries are common consumers — not the only use.
+
+**Pattern (playbook):** stage = event log → transform = latest-per-entity **candidates**
+→ dim = `keyed_upsert` durable store. Do **not** keyed_upsert the log.
 
 ```yaml
 ---
 materialization: keyed_upsert   # aliases: upsert | scd1 | type1
-unique_key: [entity_id]         # required, ≥1
+unique_key: [entity_id]         # optional if grain: set — defaults to grain
 touch_columns: [last_seen_at]   # optional; empty = touch is no-op
 compare_columns: [status, tier] # optional; default = all non-key non-touch cols
+grain: [entity_id]
 ---
-SELECT entity_id, status, tier, report_date AS last_seen_at FROM …
+SELECT entity_id, status, tier, last_seen_at FROM {{ ref('tf_entity_current') }}
 ```
 
 | Case | Action |
@@ -262,14 +266,16 @@ SELECT entity_id, status, tier, report_date AS last_seen_at FROM …
 | Key missing | insert full row |
 | Compare cols equal (NULL-safe) | update only `touch_columns` |
 | Else | replace all non-key columns |
-| Keys not in this batch | kept |
+| Keys not in this batch | **kept** (why not `materialization: table`) |
+| Duplicate keys in candidates | **fail** `E_RBT_UPSERT_KEY` (no silent last-wins) |
 
 v1: collect SQL + existing Parquet in memory, atomic full rewrite. Cap:
 `RBT_UPSERT_MAX_ROWS` (default 2_000_000) → `E_RBT_UPSERT_TOO_LARGE`.
 
-Receipt `models[]` fields: `rows_inserted`, `rows_updated`, `rows_touched`.
+Receipt `models[]`: `rows_inserted`, `rows_updated`, `rows_touched`.  
+Hygiene: `W_RBT_UPSERT_HINT` when a mart/dim looks entity-grained but uses `table`.
 
-Showcase: [examples/entity_registry](../examples/entity_registry/).  
+Showcase: [examples/entity_registry](../examples/entity_registry/) (`scripts/demo_upsert.sh`).  
 Measure: `rbt measure --scenario entity_registry_upsert`.
 
 ### Parts-only publish / consolidate (RBT-A5)

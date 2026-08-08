@@ -636,6 +636,43 @@ impl ModelDag {
                 }
             }
 
+            // Entity-grained table materialization: suggest keyed_upsert (peer retention).
+            // keyed_upsert is a general merge primitive — Type-1 dims are a common consumer.
+            let is_table = matches!(
+                node.materialization,
+                Materialization::Table | Materialization::View
+            );
+            let looks_entity_grain = fm
+                .unique_key
+                .as_ref()
+                .map(|u| !u.is_empty())
+                .unwrap_or(false)
+                || fm
+                    .grain
+                    .as_ref()
+                    .map(|g| !g.is_empty() && g.len() <= 3)
+                    .unwrap_or(false);
+            let looks_dim_or_mart = matches!(node.layer, ModelLayer::Mart)
+                || node.name.starts_with("dim_")
+                || node.name.starts_with("fct_")
+                || node.name.contains("registry")
+                || node.name.contains("_current");
+            if is_table && looks_entity_grain && looks_dim_or_mart {
+                report.diagnostics.push(BronzeDiagnostic {
+                    model: node.name.clone(),
+                    severity: DiagnosticSeverity::Warning,
+                    code: "W_RBT_UPSERT_HINT",
+                    message: format!(
+                        "model looks entity-grained (grain/unique_key present) with \
+                         materialization: {:?}. Full table refresh rewrites from this run's \
+                         SQL only — peers absent from the candidate set are dropped. \
+                         For durable registries / Type-1 dims, prefer \
+                         materialization: keyed_upsert with unique_key (defaults to grain).",
+                        node.materialization
+                    ),
+                });
+            }
+
             // Fact-like models: recommend relationship tests when none
             if node.name.starts_with("fact_") || node.name.starts_with("fct_") {
                 let has_rel = fm

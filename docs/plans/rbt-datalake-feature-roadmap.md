@@ -81,16 +81,18 @@ RBT-A3 (receipt phase tags) ──► works anytime after A4 polish
 
 RBT-A5 (parts-only / consolidate policy)
 
-RBT-A7 (keyed_upsert on Parquet/parts) ──► measure packs R1–R5 (lake-native first)
-                                      └──► RBT-A8 *research only* (see §10 — do **not** ship SQLite)
+RBT-A7 (keyed_upsert) ──► A8 research benches (no SQLite product)
+                      └──► A16 grain/SK · A17 latest_per · A18 model_type
+                           · A19 SCD2 · A20 first-class star roles
 
 RBT-A10 (bronze adapters / ergonomics) — parallel track; core value-prop
 RBT-A11 / A12 / A13 — after A2/A5 or parallel if staffed
 ```
 
 **MVP slice for hosts that do partial multi-entity runs:** A1 → A2 → A4 → A3.  
-**MVP slice for entity registry tables:** A7 (Parquet/parts upsert) → benches; **not** SQLite.  
-**MVP slice for multi-format bronze:** A10 (adapters + ergonomics).
+**MVP slice for entity registry tables:** A7 (Parquet keyed_upsert) + entity_registry playbook.  
+**MVP slice for multi-format bronze:** A10 (adapters + ergonomics).  
+**MVP slice for star-schema DX:** A18 model_type + A16 SK + A19 SCD2 (after A7 hardened).
 
 ---
 
@@ -416,7 +418,12 @@ Consumers can rely on physical schema stability across partial runs.
 ## 9. Feature RBT-A7 — Keyed upsert materialization (Type-1)
 
 > **Status:** **Implemented** on Unreleased (`keyed_upsert`, `materializer/upsert`,
-> receipt metrics, `examples/entity_registry`, measure `entity_registry_upsert`).
+> receipt metrics, multi-day `examples/entity_registry` playbook, measure
+> `entity_registry_upsert`, fail-closed duplicate candidates, `unique_key` defaults to
+> `grain`, `W_RBT_UPSERT_HINT`).  
+> **Not Type-1-only:** `keyed_upsert` is a general entity-key merge primitive; Type-1
+> dims / registries are a common consumer. Do **not** auto-infer materialization from
+> “looks like type1.”
 
 ### Goal
 
@@ -460,11 +467,201 @@ SELECT entity_id, a, b, c, report_date AS last_seen_at FROM …
 
 ### Acceptance
 
-Re-run with same attrs only changes touch column; attr change overwrites.
+Re-run with same attrs only changes touch column; attr change overwrites.  
+Partial candidate sets **keep** peers (demo day 2 keeps beta).  
+Duplicate keys in candidates fail closed.
 
 ### Error codes
 
-`E_RBT_UPSERT_KEY`, `E_RBT_UPSERT_TOO_LARGE`, `E_RBT_UPSERT_SCHEMA`.
+`E_RBT_UPSERT_KEY`, `E_RBT_UPSERT_TOO_LARGE`, `E_RBT_UPSERT_SCHEMA`.  
+Hygiene: `W_RBT_UPSERT_HINT` (entity-grained `table` on mart/dim).
+
+### Follow-ons
+
+See **RBT-A16** (grain → unique_key / surrogate SK), **RBT-A17** (`latest_per` macro),
+**RBT-A18–A20** (first-class model types, SCD2, star roles).
+
+---
+
+## 9b. Feature RBT-A16 — Grain-first keys (unique_key + surrogate SK)
+
+### Context (Kimball)
+
+From `docs/concepts/star-schema-data-modeling-rules.md`: grain is primary; surrogate key
+inputs are exactly the grain-defining natural keys. Today rbt has optional `grain` and
+`unique_key` as parallel column-name lists for tests/upsert — **no** auto SK column.
+
+### What we ship now vs later
+
+| Concern | Now (A7 polish) | Later (this epic) |
+|---------|-----------------|-------------------|
+| Upsert **match columns** | `unique_key` **defaults to `grain`** when omitted | Keep natural-key match (not hash match) |
+| Surrogate key **column** (`entity_sk`) | Not generated | Deterministic hash of grain **values** at materialize (or SQL helper) |
+| Random hashes | `scope_part_id` FNV is scope identity, **not** grain SK | Document separation |
+
+### Design recommendation (argue, then implement in this epic)
+
+**Do match upsert on natural grain columns** (`entity_id`, …), not on a precomputed hash:
+
+1. Debuggable: failures show business keys, not opaque digests.  
+2. Algorithm stability: changing hash version would orphan the whole dim.  
+3. Collision policy is a non-issue for natural-key equality.  
+4. Kimball separates **identity** (NK / grain) from **surrogate** (SK for FKs).
+
+**Do generate optional surrogate SK** as `hash(grain values)` (blake3/fnv documented) when
+`surrogate_key: entity_sk` (or auto `*_sk`) is requested — for fact FK joins, not for
+upsert matching.
+
+### Microtasks
+
+| ID | Task | Detail |
+|----|------|--------|
+| **RBT-A16.1** | Default unique_key ← grain | **Done** in A7 polish for `keyed_upsert`. |
+| **RBT-A16.2** | Validate grain ⊆ SQL schema | Compile/run check. |
+| **RBT-A16.3** | `surrogate_key:` frontmatter | Name of SK column to emit. |
+| **RBT-A16.4** | Deterministic SK function | `rbt_grain_sk(cols…)` UDF or materialize stamp; document algo + version prefix. |
+| **RBT-A16.5** | Unknown member | Optional SK=-1 / special row for dims (star rules). |
+| **RBT-A16.6** | Docs | Star-schema concept cross-link; never “unique_key is a random hash.” |
+
+### Acceptance
+
+Authors declare `grain`; upsert works without repeating `unique_key`; optional SK is
+stable hash of grain values for FK assembly.
+
+---
+
+## 9c. Feature RBT-A17 — `{{ rbt.latest_per(...) }}` candidate macro
+
+### Goal
+
+Common pattern for current-snapshot candidates (tf before keyed_upsert dim):
+
+```sql
+{{ rbt.latest_per(
+     ref('stg_entity_sightings'),
+     partition_by=['entity_id'],
+     order_by='seen_at DESC'
+) }}
+```
+
+Expands to portable DataFusion SQL (`ROW_NUMBER` + filter). Optional: if used as the
+**entire** model body with `materialization: keyed_upsert`, default `unique_key` from
+`partition_by` and reduce required frontmatter (still explicit materialization).
+
+### Microtasks
+
+| ID | Task | Detail |
+|----|------|--------|
+| **RBT-A17.1** | Template function in Jinja/SQL compile | `rbt.latest_per` only (no arbitrary engine magic). |
+| **RBT-A17.2** | Expand to CTE | Document generated SQL in `rbt explain`. |
+| **RBT-A17.3** | Optional frontmatter fill | If model is pure latest_per + keyed_upsert, default unique_key/partition. |
+| **RBT-A17.4** | Example | Rewrite `tf_entity_current` to use macro **and** keep plain SQL variant in docs. |
+
+### Acceptance
+
+One-liner candidates + full SQL both first-class; explain shows expansion.
+
+---
+
+## 9d. Feature RBT-A18 — First-class `model_type` (dim / fact / obt / tf / stg / tbl)
+
+### Goal
+
+Make star / medallion roles **explicit contracts** in frontmatter and Rust types — not
+only name prefixes (`dim_`, `stg_`).
+
+```yaml
+model_type: dim          # dim | fact | obt | tf | stg | tbl
+# tbl = generic / fallback table (random utility tables)
+scd: type1               # dim only: type1 | type2 | none  (optional until A19)
+```
+
+### Naming: bronze → silver
+
+| Proposal | Meaning |
+|----------|---------|
+| **`stg` (stage)** | **Recommended product name** for silver landing from bronze — already `stg_*` |
+| `bronze_transform` | Reject as primary: confuses bronze (raw) with silver work |
+| `ingest` / `landing` | Optional alias for stg with scan contract |
+
+Stage models are first-class: scan contract + event/log grain + usually `table` or
+`incremental_append` / `scoped_replace` — **not** keyed_upsert (logs).
+
+### Snapshot / PIT first-class?
+
+| Kind | Grain | Persist | First-class? |
+|------|-------|---------|--------------|
+| **Event / transaction log** | many rows per entity | stg append/table | via `model_type: stg` + grain |
+| **Current snapshot** | one row per entity “now” | often `keyed_upsert` | `model_type: dim` + `scd: type1` or `model_type: tbl` + keyed_upsert |
+| **Point-in-time / as-of** | entity × effective window | SCD2 | `model_type: dim` + `scd: type2` (A19) |
+| **Periodic snapshot fact** | entity × period | fact | `model_type: fact` + grain includes period |
+
+Recommend: **do not** invent a separate `model_type: pit` until SCD2 lands; express PIT as
+dim SCD2 or fact periodic snapshot with declared grain.
+
+### Microtasks
+
+| ID | Task | Detail |
+|----|------|--------|
+| **RBT-A18.1** | Enum `ModelType` | Rust + serde frontmatter; required or default from name prefix. |
+| **RBT-A18.2** | Prefix inference | `dim_`→dim, `fact_`/`fct_`→fact, `obt_`→obt, `tf_`/`int_`→tf, `stg_`→stg, else `tbl`. |
+| **RBT-A18.3** | Require when ambiguous | `tbl_*` or no prefix → require `model_type:`. |
+| **RBT-A18.4** | Layer lint by type | dim/fact/obt mart layer; stg staging; tf transforms. |
+| **RBT-A18.5** | Docs + star-schema concept link | |
+| **RBT-A18.6** | `rbt explain` shows type | |
+
+### Acceptance
+
+Every model has a resolved `ModelType`; hygiene rules key off type not only name hacks.
+
+---
+
+## 9e. Feature RBT-A19 — SCD2 dimensions (Type-2)
+
+### Goal
+
+First-class slowly changing dimensions: version rows with effective dating, current flag,
+stable natural key + versioned surrogate.
+
+Depends on A16 (SK), A18 (model_type/scd), star-schema rules §SCD.
+
+### Microtasks (sketch)
+
+| ID | Task | Detail |
+|----|------|--------|
+| **RBT-A19.1** | Frontmatter | `scd: type2`, `valid_from`/`valid_to`/`is_current` column names |
+| **RBT-A19.2** | Materialization | `scd2` or `keyed_upsert` mode — design ADR |
+| **RBT-A19.3** | Algorithm | close prior version, insert new, touch unchanged |
+| **RBT-A19.4** | Tests + example | multi-day attr change produces 2 versions |
+| **RBT-A19.5** | Facts | resolve FK as-of event time (separate microtask) |
+
+---
+
+## 9f. Feature RBT-A20 — First-class facts, OBTs, transforms (product surface)
+
+### Goal
+
+Treat **facts**, **OBTs**, and **transforms** as first-class citizens in docs, lint,
+materialization defaults, and library structs — same weight as dims and stage.
+
+| Type | Defaults / lint (sketch) |
+|------|---------------------------|
+| **fact** | grain required; thin; relationship tests to dims; no heavy windows (hygiene) |
+| **obt** | wide denormalized mart; document grain; often full table or scoped_replace |
+| **tf** | prep only; band rules already in engine; no mart scan contracts |
+| **stg** | scan contract optional but typical; log vs snapshot grain explicit |
+| **dim** | grain + SK; type1→keyed_upsert hint; type2→A19 |
+
+Align with `docs/concepts/star-schema-data-modeling-rules.md` (layers, grain, SCD, anti-patterns).
+
+### Microtasks
+
+| ID | Task | Detail |
+|----|------|--------|
+| **RBT-A20.1** | Structs | `DimContract`, `FactContract`, … or unified `ModelContract { type, grain, … }` |
+| **RBT-A20.2** | Hygiene packs | fact without relationships warn; dim without grain error optional |
+| **RBT-A20.3** | Docs chapter | “Modeling with rbt” walkthrough star |
+| **RBT-A20.4** | Example | expand entity_registry → mini star (dim + fact) |
 
 ---
 
@@ -686,13 +883,18 @@ Optional: SQLite as **bench baseline only** (not product). Prefer proving lake-n
 | PR4 | A3 receipt models[] phase/tags |
 | PR5 | A6 schema emit polish |
 | PR6 | A5 consolidate policy |
-| PR7 | A7 keyed_upsert + **Parquet/parts** (no SQLite) |
+| PR7 | A7 keyed_upsert + playbook + harden (dup keys, grain default, hint) |
 | PR8 | A8 research: benches R1–R5 lake-native (+ optional SQLite *baseline only*) |
 | PR9 | A9 per-entity execution helper |
 | PR10 | A10 bronze adapter trait + ergonomics (txt/jsonl/xml path) |
 | PR11 | A11–A13 docs + lint |
 | PR12 | A14 tag select design (research only) |
 | PR13 | A15 multi-phase design (research only) |
+| PR14 | A16 grain/SK |
+| PR15 | A17 latest_per macro |
+| PR16 | A18 model_type |
+| PR17 | A19 SCD2 |
+| PR18 | A20 fact/obt/tf first-class packs |
 
 ---
 

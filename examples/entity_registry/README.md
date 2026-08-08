@@ -1,60 +1,81 @@
-# A7 keyed upsert — entity registry
+# Entity registry playbook (keyed_upsert)
 
-Showcase for **RBT-A7**: Type-1 entity-grain table with touch-only updates.
+Teaches **why** `materialization: keyed_upsert` exists for durable entity-grain tables —
+not “copy 3 jsonl lines into parquet.”
 
-## Semantics
+## Architecture (Kimball-aligned)
 
-```yaml
-materialization: keyed_upsert
-unique_key: [entity_id]
-touch_columns: [last_seen_at]
-compare_columns: [status, tier]
+```text
+bronze sightings (daily landings, multi-day hive dirs)
+        │
+        ▼
+stg_entity_sightings     materialization: table
+  grain: (entity_id, seen_at)     ← EVENT LOG (many rows per entity)
+        │
+        ▼
+tf_entity_current        materialization: table
+  grain: (entity_id)              ← CANDIDATES = entities in *latest* report_date only
+  SQL: filter max(report_date) + ROW_NUMBER
+        │
+        ▼
+dim_entity               materialization: keyed_upsert
+  grain: (entity_id)              ← DURABLE registry (peers not in candidates KEPT)
+  unique_key / touch / compare
 ```
 
-| Situation | Result |
-|-----------|--------|
-| New `entity_id` | **insert** full row |
-| Same status/tier, new `last_seen_at` | **touch** only |
-| status or tier changed | **update** all non-key cols |
-| Keys not in this run | **kept** |
+| Layer | Role | Materialization |
+|-------|------|-----------------|
+| `stg_*` | Historical sighting log (all days) | `table` |
+| `tf_*` | Candidates from **latest landing day** only | `table` |
+| `dim_*` | Durable one-row-per-entity store | **`keyed_upsert`** |
 
-## Run
+Critical: candidates are **not** the full universe every run. Day 2 candidates are
+only acme+gamma; beta must survive via upsert keep, not by being re-emitted.
+
+SQL on the dim is intentionally plain `SELECT … FROM tf_*`.  
+**Merge policy lives in frontmatter** (same idea as dbt incremental config):  
+candidates in, peers kept, touch vs update decided by `compare_columns`.
+
+## Why not `materialization: table` on the dim?
+
+If day 2 only lands acme + gamma, a full-refresh dim built only from “today’s
+candidates” **drops beta**. `keyed_upsert` **keeps** beta and merges the candidate set.
+
+That peer-retention property is the product reason for the strategy.
+
+## Multi-day demo
 
 ```bash
 # from repo root
 cargo build -p rbt-datalake --release
-EX=examples/entity_registry
-
-# First pass: 3 inserts
-./target/release/rbt run -p $EX --format parquet --json
-
-# Same bronze again → 3 touches (attrs unchanged)
-./target/release/rbt run -p $EX --format parquet --json
-
-# Change one entity's status, re-run → 1 update + 2 touches
-# (edit lake/bronze/sightings.jsonl status for acme.com, then re-run)
+chmod +x examples/entity_registry/scripts/demo_upsert.sh
+./examples/entity_registry/scripts/demo_upsert.sh
 ```
 
-Receipt `models[]` for `dim_entity` includes:
+| Day | Candidates (tf) | Expected dim counters | Dim state |
+|-----|-----------------|----------------------|-----------|
+| 1 | acme, beta | insert=2 | 2 rows |
+| 2 | acme (touch), gamma (insert) | insert=1, touch=1 | 3 rows; **beta kept** |
+| 3 | acme only (status change) | update=1 | acme replaced; **beta+gamma kept** |
 
-```json
-"rows_inserted": 3,
-"rows_updated": 0,
-"rows_touched": 0
+Receipt fields: `rows_inserted`, `rows_updated`, `rows_touched`.
+
+## Frontmatter (dim)
+
+```yaml
+materialization: keyed_upsert   # not table — merge into existing dim
+unique_key: [entity_id]         # defaults to grain: when unique_key omitted
+touch_columns: [last_seen_at]   # watermark-style cols when attrs unchanged
+compare_columns: [status, tier] # NULL-safe; omit → all non-key non-touch
 ```
 
-## Measure
-
-```bash
-rbt measure -p examples/entity_registry --scenario entity_registry_upsert
-# or synthetic N keys (no project files required for core path):
-rbt measure -p examples/entity_registry --scenario entity_registry_upsert
-```
-
-Env: `RBT_MEASURE_UPSERT_KEYS` (default 5000).
+`keyed_upsert` is a **general** entity-key merge primitive (registries, current
+snapshots, host tables). Type-1 dims are a common consumer, not the only one.
 
 ## Notes
 
-- v1 is **in-memory collect** of existing + incoming; cap via `RBT_UPSERT_MAX_ROWS` (default 2_000_000).
-- Storage is a single Parquet file (full rewrite after upsert) — not parts.
-- Codes: `E_RBT_UPSERT_KEY`, `E_RBT_UPSERT_TOO_LARGE`, `E_RBT_UPSERT_SCHEMA`.
+- Incoming candidates must be **unique on `unique_key`** — duplicates fail closed
+  (`E_RBT_UPSERT_KEY`), not silent last-wins.
+- v1 memory bound: `RBT_UPSERT_MAX_ROWS` (default 2_000_000).
+- Hygiene: `W_RBT_UPSERT_HINT` when a mart/dim looks entity-grained but uses `table`.
+- Future: `{{ rbt.latest_per(...) }}` macro (roadmap RBT-A17) for the tf window pattern.

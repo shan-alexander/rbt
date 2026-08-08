@@ -45,9 +45,13 @@ pub struct UpsertConfig {
 
 impl UpsertConfig {
     pub fn from_frontmatter(fm: &StagingFrontmatter) -> Result<Self> {
+        // unique_key defaults to grain (natural key columns) when omitted.
+        // Note: this is the *match columns*, not a surrogate-key hash of the grain
+        // (surrogate SK generation is a separate epic — see roadmap RBT-A16).
         let unique_key: Vec<String> = fm
             .unique_key
             .clone()
+            .or_else(|| fm.grain.clone())
             .unwrap_or_default()
             .into_iter()
             .map(|s| s.trim().to_string())
@@ -55,8 +59,8 @@ impl UpsertConfig {
             .collect();
         if unique_key.is_empty() {
             bail!(
-                "E_RBT_UPSERT_KEY: materialization keyed_upsert requires non-empty unique_key: \
-                 (e.g. unique_key: [entity_id])"
+                "E_RBT_UPSERT_KEY: materialization keyed_upsert requires unique_key: or grain: \
+                 (e.g. grain: [entity_id] — unique_key defaults to grain when omitted)"
             );
         }
 
@@ -617,45 +621,49 @@ pub fn upsert_batches(
         }
     }
 
+    // Fail closed on duplicate keys in the candidate batch (no silent last-wins).
+    {
+        let mut seen_in = HashSet::new();
+        for r in 0..incoming.num_rows() {
+            let key = encode_key(incoming, r, &in_key_idxs)?;
+            if !seen_in.insert(key) {
+                bail!(
+                    "E_RBT_UPSERT_KEY: duplicate unique_key in incoming candidate batch at row {r}. \
+                     Candidate SQL must be unique on {:?}. Fix with latest-per-key \
+                     (ROW_NUMBER / QUALIFY) in a transform before keyed_upsert.",
+                    cfg.unique_key
+                );
+            }
+        }
+    }
+
     let mut stats = UpsertStats::default();
     let mut seen_incoming: HashSet<Vec<u8>> = HashSet::new();
 
     for r in 0..incoming.num_rows() {
         let key = encode_key(incoming, r, &in_key_idxs)?;
-        // Last incoming row wins for duplicate keys within the batch
-        let is_first_in_batch = seen_incoming.insert(key.clone());
+        seen_incoming.insert(key.clone());
 
         match store.get(&key) {
             None => {
                 store.insert(key.clone(), extract_row_map(incoming, r)?);
                 order.push(key);
-                if is_first_in_batch {
-                    stats.rows_inserted += 1;
-                }
+                stats.rows_inserted += 1;
             }
             Some(_old_map) => {
-                // Need base batch row for compare — re-read from existing/incoming store
-                // Compare using full batches is easier: find row in existing
-                // For simplicity, rebuild a 1-row batch from old map for compare.
-                // Actually compare using existing batch if key was from existing.
-                // Simpler path: materialize old row as batch once.
-                let old_batch = maps_to_batch(out_schema.clone(), &[store.get(&key).unwrap().clone()])?;
-                let attrs_equal =
-                    columns_equal(&old_batch, 0, incoming, r, &compare)?;
+                let old_batch =
+                    maps_to_batch(out_schema.clone(), &[store.get(&key).unwrap().clone()])?;
+                let attrs_equal = columns_equal(&old_batch, 0, incoming, r, &compare)?;
                 if attrs_equal {
                     let new_map =
                         touch_row_map(&old_batch, 0, incoming, r, &cfg.touch_columns)?;
                     store.insert(key, new_map);
-                    if is_first_in_batch {
-                        stats.rows_touched += 1;
-                    }
+                    stats.rows_touched += 1;
                 } else {
                     let new_map =
                         update_row_map(&old_batch, 0, incoming, r, &cfg.unique_key)?;
                     store.insert(key, new_map);
-                    if is_first_in_batch {
-                        stats.rows_updated += 1;
-                    }
+                    stats.rows_updated += 1;
                 }
             }
         }
@@ -935,6 +943,28 @@ mod tests {
         };
         let err = UpsertConfig::from_frontmatter(&fm).unwrap_err().to_string();
         assert!(err.contains("E_RBT_UPSERT_KEY"));
+    }
+
+    #[test]
+    fn unique_key_defaults_to_grain() {
+        let fm = StagingFrontmatter {
+            grain: Some(vec!["entity_id".into()]),
+            touch_columns: Some(vec!["last_seen".into()]),
+            ..Default::default()
+        };
+        let cfg = UpsertConfig::from_frontmatter(&fm).unwrap();
+        assert_eq!(cfg.unique_key, vec!["entity_id"]);
+    }
+
+    #[test]
+    fn duplicate_incoming_keys_fail_closed() {
+        let existing = RecordBatch::new_empty(batch_entities(&[]).schema());
+        let incoming = batch_entities(&[("a", "x", "d1"), ("a", "y", "d2")]);
+        let err = upsert_batches(&existing, &incoming, &cfg())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("E_RBT_UPSERT_KEY"));
+        assert!(err.contains("duplicate"));
     }
 
     #[test]

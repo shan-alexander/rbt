@@ -176,19 +176,20 @@ See [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md)
 ### Keyed upsert / entity registry (**A7**)
 
 ```yaml
-materialization: keyed_upsert
-unique_key: [entity_id]
+materialization: keyed_upsert   # general entity-key merge (not Type-1-only)
+grain: [entity_id]              # unique_key defaults to grain
 touch_columns: [last_seen_at]
 compare_columns: [status, tier]
 ```
 
 ```bash
-rbt run -p examples/entity_registry --json
+# Multi-day playbook: insert → touch+keep → update+keep
+./examples/entity_registry/scripts/demo_upsert.sh
 rbt measure -p examples/entity_registry --scenario entity_registry_upsert
 ```
 
-Same attrs → touch only; attr change → full non-key replace. Receipt:
-`rows_inserted` / `rows_updated` / `rows_touched`.
+Pattern: **stg event log → tf latest candidates → dim keyed_upsert**.  
+Peers absent from candidates are **kept** (unlike full `table` refresh).
 
 ### Contracts registry (optional enums)
 

@@ -4,15 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Added (RBT-A7 — keyed upsert / Type-1 entity grain)
+### Added (RBT-A7 — keyed upsert / entity-grain merge)
 
-- `materialization: keyed_upsert` (aliases: `upsert`, `scd1`, `type1`)
-- Frontmatter: `unique_key` (required), `touch_columns`, `compare_columns`
+- `materialization: keyed_upsert` (aliases: `upsert`, `scd1`, `type1`) — general merge
+  primitive (not Type-1-only); Type-1 dims are a common consumer
+- Frontmatter: `unique_key` (defaults to `grain` when omitted), `touch_columns`,
+  `compare_columns`
 - Pure in-memory upsert engine (`materializer/upsert.rs`) with NULL-safe compare
+- Fail closed on **duplicate keys** in candidate batch (`E_RBT_UPSERT_KEY`)
+- Hygiene: `W_RBT_UPSERT_HINT` for entity-grained mart/dim still using `table`
 - v1: collect SQL + existing Parquet, atomic full rewrite; `RBT_UPSERT_MAX_ROWS`
 - Receipt metrics: `rows_inserted`, `rows_updated`, `rows_touched`
-- Example: `examples/entity_registry`; measure: `entity_registry_upsert`
+- Example playbook: `examples/entity_registry` (stg log → tf latest → dim upsert;
+  `scripts/demo_upsert.sh` multi-day insert/touch/update/keep)
+- Measure: `entity_registry_upsert`
 - Codes: `E_RBT_UPSERT_KEY`, `E_RBT_UPSERT_TOO_LARGE`, `E_RBT_UPSERT_SCHEMA`
+- Roadmap: A16 grain/SK, A17 `latest_per`, A18 `model_type`, A19 SCD2, A20 fact/obt/tf
 
 ### Added (RBT-A6 — declared schema emit)
 
