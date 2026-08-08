@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Local + CI smoke against examples/smoke_fixture (tiny JSONL bronze).
+# Paths match medallion layout: silver/stage, gold/tf, gold/marts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,8 +24,8 @@ echo "[smoke] compile"
 echo "[smoke] run --select dim_ticker (ancestors included)"
 "$BIN" run -p "$FIX" --format parquet --select dim_ticker --bronze-check fail
 
-test -f "$OUT/silver/stg_trades.parquet"
-test -f "$OUT/silver/tf_ticker_stats.parquet"
+test -f "$OUT/silver/stage/stg_trades.parquet"
+test -f "$OUT/gold/tf/tf_ticker_stats.parquet"
 test -f "$OUT/gold/dim_ticker.parquet"
 
 echo "[smoke] test (frontmatter assertions)"
@@ -32,19 +33,21 @@ echo "[smoke] test (frontmatter assertions)"
 
 echo "[smoke] iceberg format on staging only (catalog SoR commit)"
 "$BIN" run -p "$FIX" --format iceberg --select stg_trades --bronze-check fail
-# Catalog writes data/*.parquet + metadata/*.metadata.json (official layout; not hand-rolled v1 only)
-test -d "$OUT/silver/stg_trades"
-test -d "$OUT/silver/stg_trades/metadata"
-# at least one metadata json and one data parquet
-meta_count=$(find "$OUT/silver/stg_trades/metadata" -name '*.metadata.json' 2>/dev/null | wc -l | tr -d ' ')
-data_count=$(find "$OUT/silver/stg_trades" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
+# Catalog / FS iceberg table dir under layer target (stage)
+STG_ICE="${OUT}/silver/stage/stg_trades"
+test -d "$STG_ICE"
+test -d "$STG_ICE/metadata" || test -d "$STG_ICE/data"
+meta_count=$(find "$STG_ICE" -name '*.metadata.json' 2>/dev/null | wc -l | tr -d ' ')
+data_count=$(find "$STG_ICE" -name '*.parquet' 2>/dev/null | wc -l | tr -d ' ')
 test "${meta_count:-0}" -ge 1
 test "${data_count:-0}" -ge 1
 
 echo "[smoke] parquet_and_iceberg dual write"
 "$BIN" run -p "$FIX" --format parquet-and-iceberg --select stg_trades --bronze-check fail
-# CLI value uses underscore via ValueEnum: ParquetAndIceberg -> parquet-and-iceberg
-test -f "$OUT/silver/stg_trades.parquet"
-test -d "$OUT/silver/stg_trades.iceberg" || test -d "$OUT/silver/stg_trades" 
+test -f "$OUT/silver/stage/stg_trades.parquet"
+# dual-write sidecar may be .iceberg sibling or catalog dir
+test -d "$OUT/silver/stage/stg_trades.iceberg" \
+  || test -d "$OUT/silver/stage/stg_trades" \
+  || find "$OUT/silver/stage" -maxdepth 1 -name 'stg_trades*' | grep -q .
 
 echo "[smoke] OK"

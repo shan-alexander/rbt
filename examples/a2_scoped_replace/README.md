@@ -17,34 +17,26 @@ lake/silver/stage/stg_entity_events.parts/
   _rbt_manifest.json
 ```
 
-## Demo
+## Demo (automated)
 
 ```bash
 # from repo root
 cargo build -p rbt-datalake --release
+./examples/a2_scoped_replace/scripts/demo_scoped_replace.sh
+```
+
+Script: land **a** (2 rows) → land **b** (1 row) → replace **a** with 3 rows →
+assert **2 parts** and `total_rows=4` (b kept). Fixtures under `fixtures/`.
+
+### Manual steps
+
+```bash
 RBT=./target/release/rbt
 EX=examples/a2_scoped_replace
 
-# 1) Land entity a
-$RBT run -p $EX --format parquet \
-  --var entity=a.com --var report_date=2026-08-07
-
-# 2) Land entity b (peer part)
-$RBT run -p $EX --format parquet \
-  --var entity=b.com --var report_date=2026-08-07
-
-# 3) Re-land entity a with more rows (edit bronze, then re-run)
-#    After rewrite, a's part is replaced; b's part unchanged.
-printf '%s\n' \
-  '{"event_id":"a1","entity":"a.com","payload":"alpha-v2","report_date":"2026-08-07"}' \
-  '{"event_id":"a2","entity":"a.com","payload":"alpha-v2-b","report_date":"2026-08-07"}' \
-  '{"event_id":"a3","entity":"a.com","payload":"alpha-v2-c","report_date":"2026-08-07"}' \
-  > $EX/lake/bronze/runs/entity=a.com/report_date=2026-08-07/events.jsonl
-
-$RBT run -p $EX --format parquet \
-  --var entity=a.com --var report_date=2026-08-07
-
-# Manifest should show 2 parts; total_rows = 3 (a) + 1 (b) = 4
+$RBT run -p $EX --format parquet --var entity=a.com --var report_date=2026-08-07
+$RBT run -p $EX --format parquet --var entity=b.com --var report_date=2026-08-07
+# then overwrite a's bronze with 3 rows and re-run a only
 cat $EX/lake/silver/stage/stg_entity_events.parts/_rbt_manifest.json
 ```
 

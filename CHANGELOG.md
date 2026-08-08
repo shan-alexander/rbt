@@ -87,6 +87,11 @@ All notable changes to this project are documented in this file.
 
 ### Examples
 
+- **`a1_multi_value_scope`** — multi-value `--var` / `--var-file` partition IN filter
+- **`a2_scoped_replace`** — peer-safe part replace; `scripts/demo_scoped_replace.sh`
+- **`entity_registry`** — multi-day keyed_upsert playbook (`scripts/demo_upsert.sh`)
+- **`scripts/smoke_feat_a1_a7.sh`** — combined feature smoke (A1+A2+A7)
+- **`examples/README.md`** — example catalog
 - **`complex_bronze_landing`** research mini-lake v2: dual tracks (**AI × semiconductors** +
   **AI agritech**), polite APIs (PubMed XML, Crossref JSON, Europe PMC JSON, **OpenAlex**,
   **Semantic Scholar** + seed, arXiv Atom + seed), `assets.jsonl` inventory, richer works
@@ -95,6 +100,8 @@ All notable changes to this project are documented in this file.
 - Example uses `contracts.enums` for `works.source` / `works.topic_track`.
 - Analysis: [docs/analysis/bronze-source-onboarding-friction.md](docs/analysis/bronze-source-onboarding-friction.md)
   — frictions + rbt product enhancements for bronze source growth.
+- Analysis: [docs/analysis/a10-bronze-to-silver-approach-…](docs/analysis/a10-bronze-to-silver-approach-adapters-silver-first-class.md)
+  — A10 approach (adapters + silver first-class roles); A9 deferred.
 
 ## [0.7.3] — 2026-08-02
 

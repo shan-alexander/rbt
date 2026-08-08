@@ -16,22 +16,30 @@ lake/bronze/runs/
 ```bash
 # from repo root
 cargo build -p rbt-datalake --release
+RBT=./target/release/rbt
+EX=examples/a1_multi_value_scope
 
-./target/release/rbt run -p examples/a1_multi_value_scope --format parquet \
+$RBT run -p $EX --format parquet \
   --var entity=a.com --var entity=b.com \
   --var report_date=2026-08-07
 
 # equivalent:
-./target/release/rbt run -p examples/a1_multi_value_scope --format parquet \
-  --var-file entity=examples/a1_multi_value_scope/entities.txt \
+$RBT run -p $EX --format parquet \
+  --var-file entity=$EX/entities.txt \
   --var report_date=2026-08-07
 
-./target/release/rbt run -p examples/a1_multi_value_scope --format parquet \
+$RBT run -p $EX --format parquet \
   --var 'entity:=["a.com","b.com"]' \
   --var report_date=2026-08-07
+
+# machine-readable summary
+$RBT run -p $EX --format parquet --json \
+  --var entity=a.com --var entity=b.com --var report_date=2026-08-07
 ```
 
 Expected: **`stg_events` has 3 rows** (a.com×2 + b.com×1). `c.com` never enters silver.
+
+Feature smoke (with A2 + A7): `bash scripts/smoke_feat_a1_a7.sh`
 
 ## Why this matters
 

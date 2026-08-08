@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.7.3`+ Unreleased.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), run scope, receipts, Iceberg-FS, measure packs. **A1** multi-value partition scope on the feat line.
+> **Status:** **`0.7.3`+ Unreleased (A1–A7 on `feat/a1-multi-value-scope`).** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit.
 
 ## Why rbt
 
@@ -73,6 +73,13 @@ Full market example (large Arrow IPC bronze):
 
 See [examples/smoke_fixture/README.md](examples/smoke_fixture/README.md) and
 [examples/full_e2e_rbt_example/README.md](examples/full_e2e_rbt_example/README.md).
+
+**Feature showcases (A1–A7):** [examples/README.md](examples/README.md)
+
+```bash
+bash scripts/smoke.sh              # CI baseline (smoke_fixture)
+bash scripts/smoke_feat_a1_a7.sh   # multi-value + scoped_replace + keyed_upsert demos
+```
 
 ## CLI
 
