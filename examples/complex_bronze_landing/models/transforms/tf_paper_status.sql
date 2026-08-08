@@ -1,8 +1,9 @@
 ---
 description: >
-  Gold transform: paper-level status for this run.
+  Gold transform: paper/unit-level landing status for this run.
   Refs silver stage endpoints only (stg_works, stg_plan, stg_failures).
-  Marks works as landed; planned units without a matching success stay planned_only / failed.
+  Marks works as success; failures as failed; planned units with neither
+  success nor failure as planned_only (lander gap).
 stage_mode: full_refresh
 grain: [unit_or_paper_id, report_date, run_id]
 tests:
@@ -19,10 +20,15 @@ SELECT
   w.title,
   w.abstract,
   w.authors_joined,
+  w.authors_json,
   w.author_count,
+  w.abstract_chars,
+  w.has_abstract,
   w.venue,
   w.year,
   w.url,
+  w.keywords_joined,
+  w.topic_track,
   w.domain,
   w.report_date,
   w.run_id,
@@ -40,10 +46,15 @@ SELECT
   CAST(NULL AS VARCHAR) AS title,
   CAST(NULL AS VARCHAR) AS abstract,
   CAST(NULL AS VARCHAR) AS authors_joined,
+  CAST(NULL AS VARCHAR) AS authors_json,
   CAST(NULL AS BIGINT) AS author_count,
+  CAST(NULL AS BIGINT) AS abstract_chars,
+  CAST(NULL AS BOOLEAN) AS has_abstract,
   CAST(NULL AS VARCHAR) AS venue,
   CAST(NULL AS VARCHAR) AS year,
   CAST(NULL AS VARCHAR) AS url,
+  CAST(NULL AS VARCHAR) AS keywords_joined,
+  CAST(NULL AS VARCHAR) AS topic_track,
   f.domain,
   f.report_date,
   f.run_id,
@@ -53,7 +64,7 @@ FROM {{ ref('stg_failures') }} f
 
 UNION ALL
 
--- Planned units with no success and no failure row → planned_only (gap in lander)
+-- Planned units with no success and no failure row → planned_only
 SELECT
   p.unit_id AS unit_or_paper_id,
   p.source,
@@ -61,10 +72,15 @@ SELECT
   CAST(NULL AS VARCHAR) AS title,
   CAST(NULL AS VARCHAR) AS abstract,
   CAST(NULL AS VARCHAR) AS authors_joined,
+  CAST(NULL AS VARCHAR) AS authors_json,
   CAST(NULL AS BIGINT) AS author_count,
+  CAST(NULL AS BIGINT) AS abstract_chars,
+  CAST(NULL AS BOOLEAN) AS has_abstract,
   CAST(NULL AS VARCHAR) AS venue,
   CAST(NULL AS VARCHAR) AS year,
   CAST(NULL AS VARCHAR) AS url,
+  CAST(NULL AS VARCHAR) AS keywords_joined,
+  p.topic_track,
   p.domain,
   p.report_date,
   p.run_id,

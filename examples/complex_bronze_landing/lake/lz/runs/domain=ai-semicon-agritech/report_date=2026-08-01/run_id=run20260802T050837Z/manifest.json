@@ -1,0 +1,41 @@
+{
+  "domain": "ai-semicon-agritech",
+  "report_date": "2026-08-01",
+  "run_id": "run20260802T050837Z",
+  "topic": "AI \u00d7 semiconductors / neuromorphic + AI in agritech",
+  "topic_tracks": [
+    "semicon",
+    "agritech"
+  ],
+  "sources": [
+    "pubmed",
+    "crossref",
+    "europepmc",
+    "openalex",
+    "semanticscholar",
+    "arxiv"
+  ],
+  "journals_crossref": [
+    "Nature Electronics",
+    "IEEE Transactions on Electron Devices",
+    "Applied Physics Letters",
+    "Computers and Electronics in Agriculture",
+    "Precision Agriculture"
+  ],
+  "counts": {
+    "plan": 15,
+    "works": 37,
+    "failures": 2,
+    "siteinfo": 9,
+    "assets": 88
+  },
+  "email": "rbt-datalake-examples@users.noreply.github.com",
+  "generated_at": "2026-08-02T05:08:50+00:00",
+  "tool": "rbt-complex-bronze-landing",
+  "notes": [
+    "Google Scholar / Examine.com not used as free paper sources (policy failure rows).",
+    "PubMed \u22643 req/s; arXiv ~3s + seed; Crossref/OpenAlex mailto; Europe PMC; S2 seed on 429.",
+    "Authors land as JSON arrays in bronze; silver uses authors_json + authors_joined + author_count.",
+    "Mixed bronze: jsonl, json, xml/atom, html, robots.txt \u2014 for path_glob demos."
+  ]
+}

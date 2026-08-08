@@ -2,11 +2,10 @@
 
 use crate::core::run_scope::OnMissing;
 use anyhow::{bail, Context, Result};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// How `rbt compile` treats missing/unresolvable bronze `scan_path` entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -154,6 +153,23 @@ impl RelationshipTest {
     }
 }
 
+/// One column's accepted_values: inline list **or** project contract enum name.
+///
+/// YAML:
+/// ```yaml
+/// accepted_values:
+///   source: works.source          # contracts.enums.works.source
+///   topic_track: [semicon, agritech]  # inline
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AcceptedValuesEntry {
+    /// Explicit allowed values.
+    List(Vec<String>),
+    /// Reference to `contracts.enums.<name>` (optional `$` / `$contract:` prefix).
+    Contract(String),
+}
+
 /// Declared data-quality tests for a model (run after materialization when present).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ModelTests {
@@ -163,9 +179,9 @@ pub struct ModelTests {
     /// Single column unique, or multi-column composite unique when len > 1.
     #[serde(default)]
     pub unique: Option<Vec<String>>,
-    /// Map of column → allowed string values.
+    /// Map of column → allowed values (inline list) or contract enum name (string).
     #[serde(default)]
-    pub accepted_values: Option<std::collections::HashMap<String, Vec<String>>>,
+    pub accepted_values: Option<std::collections::HashMap<String, AcceptedValuesEntry>>,
     /// FK-ish checks against already-materialised models (P6 / G6).
     #[serde(default)]
     pub relationships: Option<Vec<RelationshipTest>>,
@@ -264,10 +280,17 @@ pub struct StagingFrontmatter {
     /// When true, use scan→MemTable path even for formats that support DF listing.
     #[serde(default)]
     pub force_scan: Option<bool>,
-    /// Only scan hive-partitioned files whose path segments match these values.
+    /// Only scan hive-partitioned files whose path segments match these values (equality).
     /// Example: `{ timeframe: "1m" }` keeps `.../timeframe=1m/...` and skips `timeframe=1d`.
     #[serde(default)]
     pub require_partitions: Option<std::collections::HashMap<String, String>>,
+    /// Multi-value partition filter (**RBT-A1**): keep files where hive key is **in** the list.
+    ///
+    /// Filled by run scope when a var is multi (`--var entity=a --var entity=b`);
+    /// can also be set statically in frontmatter. Combined with
+    /// [`Self::require_partitions`] (equality) via AND.
+    #[serde(default)]
+    pub require_partitions_in: Option<std::collections::HashMap<String, Vec<String>>>,
     /// Inject `_source_path` (Utf8) with the absolute file path for each row.
     /// Enables "latest chunk wins" dedupe via `ORDER BY _source_path DESC`.
     #[serde(default)]
@@ -287,6 +310,10 @@ pub struct StagingFrontmatter {
     /// Also auto-detected when the resolved path is a parts directory.
     #[serde(default)]
     pub parts: Option<bool>,
+    /// RBT-A2: vars that form the scoped part identity (default: intersection of
+    /// `partition_by` and run-scope vars). Used by `materialization: scoped_replace`.
+    #[serde(default)]
+    pub part_key: Option<Vec<String>>,
     /// Stamp `_rbt_run_id`, `_rbt_contract_version`, `_rbt_model` (+ optional fingerprint)
     /// onto each output row at materialize time (P6 lineage).
     #[serde(default)]
@@ -296,12 +323,26 @@ pub struct StagingFrontmatter {
     #[serde(default)]
     pub grain: Option<Vec<String>>,
     /// Primary uniqueness contract (usually same as grain for staging facts).
+    /// Required (non-empty) for `materialization: keyed_upsert` (RBT-A7).
     #[serde(default)]
     pub unique_key: Option<Vec<String>>,
-    /// Free-form tags for selection / docs.
+    /// Columns updated on touch-only upserts when compare attrs are unchanged (RBT-A7).
+    /// May be empty (then touch-only becomes a no-op write for that key).
+    #[serde(default)]
+    pub touch_columns: Option<Vec<String>>,
+    /// Attribute columns compared NULL-safe to decide touch vs full replace (RBT-A7).
+    /// Default when omitted: all non-key, non-touch columns present in the SQL result.
+    #[serde(default)]
+    pub compare_columns: Option<Vec<String>>,
+    /// Free-form tags for selection / docs / receipt metadata (RBT-A3).
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// Materialization hint: `table` | `view` | `incremental_append` (engine may ignore for now).
+    /// Free-form publish phase for hosts (RBT-A3), e.g. `inventory` | `final`.
+    /// Written onto run receipts under `models[].phase` — engine does not interpret values.
+    #[serde(default)]
+    pub phase: Option<String>,
+    /// Materialization hint: `table` | `view` | `incremental_append` | `scoped_replace` |
+    /// `keyed_upsert`.
     #[serde(default)]
     pub materialization: Option<String>,
     /// Post-materialization assertions.
@@ -359,49 +400,20 @@ impl StagingFrontmatter {
     /// Build Arrow schema for empty bronze frames (`on_missing: empty`).
     ///
     /// Fields: declared `columns` with `dtype`, then any `partition_by` keys not already
-    /// present (Utf8), then optional `_source_path`.
+    /// present (Utf8), then optional `_source_path`. Shared with materialize via
+    /// [`crate::core::schema_emit`] (RBT-A6).
     pub fn empty_frame_schema(&self) -> Result<SchemaRef> {
-        let mut fields: Vec<Field> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        crate::core::schema_emit::declared_schema_for_frontmatter(self)
+    }
 
-        if let Some(cols) = &self.columns {
-            for (name, meta) in cols {
-                let dtype = meta
-                    .dtype
-                    .as_deref()
-                    .with_context(|| {
-                        format!(
-                            "E_RBT_EMPTY_SCHEMA: column '{name}' needs dtype: for on_missing: empty \
-                             (e.g. utf8, int64, float64, bool, binary, timestamp)"
-                        )
-                    })?;
-                let dt = parse_logical_dtype(dtype).with_context(|| {
-                    format!("E_RBT_EMPTY_SCHEMA: column '{name}' dtype '{dtype}'")
-                })?;
-                fields.push(Field::new(name, dt, true));
-                seen.insert(name.clone());
-            }
-        }
-
-        if let Some(parts) = &self.partition_by {
-            for p in parts {
-                if seen.insert(p.clone()) {
-                    fields.push(Field::new(p, DataType::Utf8, true));
-                }
-            }
-        }
-
-        if self.inject_source_path.unwrap_or(false) && seen.insert("_source_path".into()) {
-            fields.push(Field::new("_source_path", DataType::Utf8, true));
-        }
-
-        if fields.is_empty() {
-            bail!(
-                "E_RBT_EMPTY_SCHEMA: on_missing: empty requires columns with dtype \
-                 and/or partition_by (model scan contract has no schema fields)"
-            );
-        }
-        Ok(Arc::new(Schema::new(fields)))
+    /// Validate / resolve keyed upsert config from frontmatter (RBT-A7).
+    ///
+    /// * `unique_key` required, ≥1 column, non-empty names  
+    /// * `touch_columns` optional (default empty)  
+    /// * `compare_columns` optional (resolved later against schema if omitted)  
+    /// * key / touch / compare must be pairwise disjoint when compare is explicit
+    pub fn keyed_upsert_config(&self) -> Result<crate::materializer::upsert::UpsertConfig> {
+        crate::materializer::upsert::UpsertConfig::from_frontmatter(self)
     }
 }
 

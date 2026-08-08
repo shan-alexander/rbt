@@ -38,6 +38,40 @@ Manifest: `model.parts/_rbt_manifest.json` (`parts`, `total_rows`, `updated_at_m
 
 **Not shipped:** `incremental_merge` (row-level MERGE) — fails with `E_RBT_INCREMENTAL`.
 
+### Scoped replace (RBT-A2)
+
+`materialization: scoped_replace` writes `part-{scope_id}.parquet` keyed by run vars /
+`part_key`; re-runs replace that part only (peers kept). See
+[COMPLEX_BRONZE_AND_RUN_SCOPE.md](COMPLEX_BRONZE_AND_RUN_SCOPE.md).
+
+### Keyed upsert (RBT-A7)
+
+```yaml
+materialization: keyed_upsert
+# unique_key defaults to grain when omitted
+grain: [entity_id]
+touch_columns: [last_seen_at]
+compare_columns: [a, b]   # optional
+```
+
+Entity-key merge: insert / touch-only / full non-key update / **keep peers**.  
+Not Type-1-only. Pattern: stage log → tf latest-per-key candidates → dim keyed_upsert.  
+Duplicate candidates fail closed. See playbook `examples/entity_registry` and
+[COMPLEX_BRONZE_AND_RUN_SCOPE.md](COMPLEX_BRONZE_AND_RUN_SCOPE.md).
+
+### Consolidate policy (RBT-A5)
+
+```yaml
+materialize:
+  consolidate: auto    # never | always | auto
+```
+
+- **`auto`:** table → single file; incremental/scoped_replace → parts only.
+- **`never`:** table also publishes under `.parts/` only (`part-full.parquet`).
+- **`always`:** after parts writes, rebuild a convenience monolith parquet.
+
+Ops: `rbt consolidate -s <model>` merges parts → single file without deleting parts.
+
 ## 3. Write-Audit-Publish (WAP)
 
 ```yaml

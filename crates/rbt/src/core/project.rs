@@ -94,6 +94,53 @@ impl Default for IcebergConfig {
     }
 }
 
+/// Whether to rewrite a monolithic `model.parquet` from `.parts/` (RBT-A5).
+///
+/// | Value | Table materialization | incremental_append / scoped_replace |
+/// |-------|----------------------|-------------------------------------|
+/// | `auto` (default) | Single file | Parts only |
+/// | `never` | Parts only (one `part-full.parquet`) | Parts only |
+/// | `always` | Single file | Parts + rebuild single file after write |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsolidatePolicy {
+    #[default]
+    Auto,
+    Never,
+    Always,
+}
+
+impl ConsolidatePolicy {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "default" => Ok(Self::Auto),
+            "never" | "parts" | "parts_only" => Ok(Self::Never),
+            "always" | "monolith" | "single" => Ok(Self::Always),
+            other => anyhow::bail!(
+                "E_RBT_CONSOLIDATE: unknown consolidate '{other}' (auto | never | always)"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Never => "never",
+            Self::Always => "always",
+        }
+    }
+
+    /// Table strategy writes a single dest parquet file (not under .parts/).
+    pub fn table_writes_monolith(self) -> bool {
+        !matches!(self, Self::Never)
+    }
+
+    /// After parts strategies, also rebuild dest parquet from all parts.
+    pub fn parts_also_write_monolith(self) -> bool {
+        matches!(self, Self::Always)
+    }
+}
+
 /// Optional materialization / `ref()` registration policy (`materialize:` in yml).
 ///
 /// All fields are optional; omitting the whole block keeps lake-as-truth Parquet re-read
@@ -122,6 +169,9 @@ pub struct MaterializeConfig {
     /// Default false (stream still uses partial→rename atomicity without WAP dirs).
     #[serde(default)]
     pub wap: bool,
+    /// Parts vs monolith publish policy (RBT-A5). Default `auto`.
+    #[serde(default)]
+    pub consolidate: ConsolidatePolicy,
 }
 
 fn default_memtable_max_rows() -> usize {
@@ -146,12 +196,122 @@ impl Default for MaterializeConfig {
             max_row_group_bytes: DEFAULT_MAX_ROW_GROUP_BYTES,
             iceberg: IcebergConfig::default(),
             wap: false,
+            consolidate: ConsolidatePolicy::Auto,
         }
     }
 }
 
 /// Default max size for a single opaque protobuf bronze file (1 GiB).
 pub const DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// How bronze fingerprints are computed for skip-if-match (RBT-A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintMode {
+    /// Path + size + mtime (fast; default). Legacy receipts used bare `fnv1a64:…`.
+    #[default]
+    PathStat,
+    /// Hash file contents (correct when mtime/size are unreliable).
+    ContentHash,
+}
+
+impl FingerprintMode {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "path_stat" | "path-stat" | "stat" | "fnv" | "fnv1a64" => Ok(Self::PathStat),
+            "content_hash" | "content-hash" | "content" | "hash" => Ok(Self::ContentHash),
+            other => anyhow::bail!(
+                "E_RBT_FINGERPRINT_MODE: unknown mode '{other}' (path_stat | content_hash)"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PathStat => "path_stat",
+            Self::ContentHash => "content_hash",
+        }
+    }
+}
+
+/// Hash algorithm for [`FingerprintMode::ContentHash`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintAlgo {
+    #[default]
+    Blake3,
+    Sha256,
+}
+
+impl FingerprintAlgo {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "blake3" | "b3" => Ok(Self::Blake3),
+            "sha256" | "sha2" | "sha-256" => Ok(Self::Sha256),
+            other => anyhow::bail!(
+                "E_RBT_FINGERPRINT_MODE: unknown algo '{other}' (blake3 | sha256)"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blake3 => "blake3",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
+
+/// `fingerprint:` block in `rbt_project.yml` (RBT-A4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FingerprintConfig {
+    #[serde(default)]
+    pub mode: FingerprintMode,
+    /// Used when `mode: content_hash`.
+    #[serde(default)]
+    pub algo: FingerprintAlgo,
+    /// If &gt; 0, hash only the first N bytes of each bronze file (escape hatch for huge files).
+    /// **Danger:** partial hash can collide if files share a common prefix.
+    #[serde(default)]
+    pub max_bytes_per_file: u64,
+}
+
+impl Default for FingerprintConfig {
+    fn default() -> Self {
+        Self {
+            mode: FingerprintMode::PathStat,
+            algo: FingerprintAlgo::Blake3,
+            max_bytes_per_file: 0,
+        }
+    }
+}
+
+impl FingerprintConfig {
+    /// Apply env overrides: `RBT_FINGERPRINT_MODE`, `RBT_FINGERPRINT_ALGO`,
+    /// `RBT_FINGERPRINT_MAX_BYTES`.
+    pub fn with_env_overrides(mut self) -> anyhow::Result<Self> {
+        if let Ok(m) = std::env::var("RBT_FINGERPRINT_MODE") {
+            if !m.trim().is_empty() {
+                self.mode = FingerprintMode::parse(&m)?;
+            }
+        }
+        if let Ok(a) = std::env::var("RBT_FINGERPRINT_ALGO") {
+            if !a.trim().is_empty() {
+                self.algo = FingerprintAlgo::parse(&a)?;
+            }
+        }
+        if let Ok(n) = std::env::var("RBT_FINGERPRINT_MAX_BYTES") {
+            if !n.trim().is_empty() {
+                self.max_bytes_per_file = n.trim().parse().map_err(|_| {
+                    anyhow::anyhow!(
+                        "E_RBT_FINGERPRINT_MODE: RBT_FINGERPRINT_MAX_BYTES must be u64, got '{n}'"
+                    )
+                })?;
+            }
+        }
+        Ok(self)
+    }
+}
 
 /// Optional scan / bronze ingest limits (`scan:` in yml).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +422,12 @@ pub struct RbtProjectConfig {
     /// Referenced in paths as `$name` or `${name}` (e.g. `$nonprod_lake/lz/runs`).
     #[serde(default)]
     pub roots: HashMap<String, String>,
+    /// Value contracts / enum registry (`contracts.enums`) for accepted_values + contract-diff.
+    #[serde(default)]
+    pub contracts: super::contracts::ContractsConfig,
+    /// Bronze fingerprint mode for skip-if-match (RBT-A4).
+    #[serde(default)]
+    pub fingerprint: FingerprintConfig,
 }
 
 impl Default for RbtProjectConfig {
@@ -304,6 +470,8 @@ impl Default for RbtProjectConfig {
             materialize: MaterializeConfig::default(),
             scan: ScanConfig::default(),
             roots: HashMap::new(),
+            contracts: super::contracts::ContractsConfig::default(),
+            fingerprint: FingerprintConfig::default(),
         }
     }
 }
@@ -323,7 +491,7 @@ impl RbtProjectConfig {
                 format!(
                     "E_RBT_PROJECT_LOAD: failed to parse {}. \
                      Check required keys (name, version, models_dir, target_path) and \
-                     optional materialize:/scan:/roots:/layers blocks.",
+                     optional materialize:/scan:/roots:/layers:/contracts:/fingerprint blocks.",
                     project_file.display()
                 )
             })?;
@@ -332,9 +500,12 @@ impl RbtProjectConfig {
             for (key, val) in defaults.layers {
                 config.layers.entry(key).or_insert(val);
             }
+            config.fingerprint = config.fingerprint.with_env_overrides()?;
             Ok(config)
         } else {
-            Ok(Self::default())
+            let mut config = Self::default();
+            config.fingerprint = config.fingerprint.with_env_overrides()?;
+            Ok(config)
         }
     }
 
@@ -587,6 +758,30 @@ mod tests {
         assert_eq!(cfg.max_row_group_rows, DEFAULT_MAX_ROW_GROUP_ROWS);
         assert_eq!(cfg.choose_ref_backend(0), RefBackend::LakeFile);
         assert_eq!(cfg.choose_ref_backend(1_000_000), RefBackend::LakeFile);
+        assert_eq!(cfg.consolidate, ConsolidatePolicy::Auto);
+    }
+
+    #[test]
+    fn consolidate_policy_parse_and_yaml() -> Result<()> {
+        assert_eq!(ConsolidatePolicy::parse("never")?, ConsolidatePolicy::Never);
+        assert_eq!(ConsolidatePolicy::parse("ALWAYS")?, ConsolidatePolicy::Always);
+        assert_eq!(ConsolidatePolicy::parse("parts_only")?, ConsolidatePolicy::Never);
+        assert!(ConsolidatePolicy::Auto.table_writes_monolith());
+        assert!(!ConsolidatePolicy::Never.table_writes_monolith());
+        assert!(ConsolidatePolicy::Always.parts_also_write_monolith());
+        assert!(!ConsolidatePolicy::Auto.parts_also_write_monolith());
+
+        let yml = r#"
+name: t
+version: "1"
+models_dir: models
+target_path: lake/gold
+materialize:
+  consolidate: never
+"#;
+        let cfg: RbtProjectConfig = serde_yaml::from_str(yml)?;
+        assert_eq!(cfg.materialize.consolidate, ConsolidatePolicy::Never);
+        Ok(())
     }
 
     #[test]

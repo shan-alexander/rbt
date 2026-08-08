@@ -143,10 +143,12 @@ fn bench_bronze_scan(c: &mut Criterion) {
                     toml_rows_key: None,
                     partition_by: vec!["symbol".into(), "timeframe".into()],
                     require_partitions: require,
+                    require_partitions_in: HashMap::new(),
                     path_glob: vec![],
                     inject_source_path: true,
                     roots: HashMap::new(),
                     protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+                    allow_empty: false,
                 };
                 let scanner = LakeScanner::from_request(&req);
                 let batches = scanner.scan(&req).await.expect("scan 1d");
@@ -172,10 +174,12 @@ fn bench_bronze_scan(c: &mut Criterion) {
                     toml_rows_key: None,
                     partition_by: vec!["symbol".into(), "timeframe".into()],
                     require_partitions: require,
+                    require_partitions_in: HashMap::new(),
                     path_glob: vec![],
                     inject_source_path: true,
                     roots: HashMap::new(),
                     protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+                    allow_empty: false,
                 };
                 let scanner = LakeScanner::from_request(&req);
                 let batches = scanner.scan(&req).await.expect("scan 1m");
@@ -328,6 +332,123 @@ fn bench_materialize_synth(c: &mut Criterion) {
     g.finish();
 }
 
+/// RBT-A1: multi-value partition list_files / scan on synthetic hive tree.
+fn bench_a1_multi_value_scope(c: &mut Criterion) {
+    use rbt::{try_apply_scope_to_frontmatter, RunScope, StagingFrontmatter};
+
+    let temp = tempfile::tempdir().expect("tmpdir");
+    let root = temp.path();
+    // 200 entities × 1 jsonl file each
+    const N: usize = 200;
+    for i in 0..N {
+        let dir = root
+            .join(format!("entity=e{i:04}.com"))
+            .join("report_date=2026-08-07");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("events.jsonl"),
+            format!(
+                "{{\"event_id\":\"e{i}\",\"entity\":\"e{i:04}.com\",\"payload\":\"x\",\"report_date\":\"2026-08-07\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let fm = StagingFrontmatter {
+        source_format: Some(SourceFormat::Jsonl),
+        scan_path: Some(".".into()),
+        partition_by: Some(vec!["entity".into(), "report_date".into()]),
+        path_glob: Some(vec!["events.jsonl".into()]),
+        ..Default::default()
+    };
+
+    // Select half of entities via multi IN
+    let half: Vec<String> = (0..N / 2).map(|i| format!("e{i:04}.com")).collect();
+    let scope = RunScope::new()
+        .with_var_multi("entity", half)
+        .unwrap()
+        .with_var("report_date", "2026-08-07");
+    let fm_eff = try_apply_scope_to_frontmatter(&fm, &scope).unwrap();
+    let req = ScanRequest::from_frontmatter(root, &fm_eff).unwrap();
+
+    let mut g = c.benchmark_group("a1_multi_value_scope");
+    g.sample_size(30);
+    g.warm_up_time(Duration::from_secs(1));
+    g.measurement_time(Duration::from_secs(5));
+    g.throughput(Throughput::Elements(N as u64));
+
+    g.bench_function("list_files_200_entities_in_100", |b| {
+        let scanner = LakeScanner::from_request(&req);
+        b.iter(|| {
+            let (_root, files) = scanner.list_files(&req).expect("list");
+            black_box(files.len())
+        });
+    });
+
+    let runtime = rt();
+    g.bench_function("scan_jsonl_200_entities_in_100", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let scanner = LakeScanner::from_request(&req);
+                let batches = scanner.scan(&req).await.expect("scan");
+                let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                black_box(rows)
+            })
+        });
+    });
+
+    g.finish();
+}
+
+/// RBT-A2: replace same scope twice (write cost of one part overwrite).
+fn bench_a2_scoped_replace(c: &mut Criterion) {
+    use datafusion::prelude::SessionContext;
+    use rbt::{materialize_scoped_replace_stream, MaterializeWriteOptions};
+    use tempfile::tempdir;
+
+    let runtime = rt();
+    let mut g = c.benchmark_group("a2_scoped_replace");
+    g.sample_size(25);
+    g.warm_up_time(Duration::from_secs(1));
+    g.measurement_time(Duration::from_secs(5));
+
+    // 10 × 10 = 100 rows via portable CROSS JOIN of unions
+    let sql_100 = "SELECT a.n * 10 + b.n AS id FROM \
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 \
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) a \
+        CROSS JOIN \
+        (SELECT 0 AS n UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 \
+         UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) b";
+
+    g.bench_function("replace_same_scope_twice_100_rows", |b| {
+        b.iter(|| {
+            runtime.block_on(async {
+                let temp = tempdir().unwrap();
+                let dest = temp.path().join("stg.parquet");
+                let opts = MaterializeWriteOptions::default();
+                let ctx = SessionContext::new();
+                for _ in 0..2 {
+                    let stream = ctx
+                        .sql(sql_100)
+                        .await
+                        .unwrap()
+                        .execute_stream()
+                        .await
+                        .unwrap();
+                    let st = materialize_scoped_replace_stream(
+                        stream, &dest, &opts, &[], "benchscope",
+                    )
+                    .await
+                    .unwrap();
+                    black_box(st.rows);
+                }
+            })
+        });
+    });
+
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_compile,
@@ -336,5 +457,7 @@ criterion_group!(
     bench_bronze_scan,
     bench_run_e2e_select,
     bench_run_e2e_full,
+    bench_a1_multi_value_scope,
+    bench_a2_scoped_replace,
 );
 criterion_main!(benches);

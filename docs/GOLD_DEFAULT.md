@@ -137,7 +137,7 @@ Prefer **SK → SK** on facts after Unknown-aware dim join (`COALESCE(fk, -1)`).
 
 | Project | Topology |
 |---------|----------|
-| [complex_bronze_landing](../examples/complex_bronze_landing/) | Multi-artifact bronze → `stg_*` endpoints → gold `tf_unit_status` → dim/fact |
+| [complex_bronze_landing](../examples/complex_bronze_landing/) | Research papers mini-lake → `stg_*` → gold `tf_paper_status` / dims / facts |
 | [smoke_fixture](../examples/smoke_fixture/) | bronze → `stg_trades` → gold `tf_ticker_stats` → `dim_ticker` |
 | [full_e2e_rbt_example](../examples/full_e2e_rbt_example/) | bronze → `stg_ohlcv_*` → gold `tf_*` → dim/fact/obt |
 

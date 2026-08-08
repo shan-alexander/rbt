@@ -30,8 +30,11 @@ pub struct ScanRequest {
     pub toml_rows_key: Option<String>,
     /// Hive-style partition keys to inject as Utf8 columns from the file path.
     pub partition_by: Vec<String>,
-    /// Keep only files whose hive path matches these partition values.
+    /// Keep only files whose hive path matches these partition values (equality).
     pub require_partitions: std::collections::HashMap<String, String>,
+    /// Keep files whose hive path value is in the set for each key (**RBT-A1** multi-value).
+    /// Membership uses a `HashSet` when the allowed list is large (&gt;8).
+    pub require_partitions_in: std::collections::HashMap<String, Vec<String>>,
     /// Filename / relative globs under scan_path (OR). Empty = all format matches.
     pub path_glob: Vec<String>,
     /// Inject `_source_path` column (absolute path of the bronze file).
@@ -88,6 +91,7 @@ impl ScanRequest {
             toml_rows_key: fm.toml_rows_key.clone(),
             partition_by: fm.partition_by.clone().unwrap_or_default(),
             require_partitions: fm.require_partitions.clone().unwrap_or_default(),
+            require_partitions_in: fm.require_partitions_in.clone().unwrap_or_default(),
             path_glob,
             inject_source_path: fm.inject_source_path.unwrap_or(false),
             roots,
@@ -145,8 +149,15 @@ impl LakeScanner {
 
         let mut files = Vec::new();
         collect_files_for_format(&root, req.format, &mut files)?;
-        if !req.require_partitions.is_empty() {
-            files.retain(|f| path_matches_require_partitions(f, &root, &req.require_partitions));
+        if !req.require_partitions.is_empty() || !req.require_partitions_in.is_empty() {
+            files.retain(|f| {
+                path_matches_require_partitions(
+                    f,
+                    &root,
+                    &req.require_partitions,
+                    &req.require_partitions_in,
+                )
+            });
         }
         if !req.path_glob.is_empty() {
             let glob_set = PathGlobSet::compile(&req.path_glob)?;
@@ -158,13 +169,14 @@ impl LakeScanner {
             }
             bail!(
                 "E_RBT_BRONZE_SCAN_EMPTY: no {} files under {} after filters \
-                 (require_partitions={:?}, path_glob={:?}). \
+                 (require_partitions={:?}, require_partitions_in={:?}, path_glob={:?}). \
                  Hint: path_glob disables DataFusion listing pushdown and uses the \
                  scan→MemTable/spill path; check filename patterns and hive partitions, \
                  or set on_missing: empty for optional artifact families.",
                 req.format.as_str(),
                 root.display(),
                 req.require_partitions,
+                req.require_partitions_in,
                 req.path_glob
             );
         }
@@ -712,14 +724,30 @@ fn path_matches_require_partitions(
     file: &Path,
     root: &Path,
     require: &std::collections::HashMap<String, String>,
+    require_in: &std::collections::HashMap<String, Vec<String>>,
 ) -> bool {
-    if require.is_empty() {
+    if require.is_empty() && require_in.is_empty() {
         return true;
     }
     let parts = parse_hive_partitions(file, root);
-    require
+    let eq_ok = require
         .iter()
-        .all(|(k, v)| parts.get(k).map(|pv| pv == v).unwrap_or(false))
+        .all(|(k, v)| parts.get(k).map(|pv| pv == v).unwrap_or(false));
+    if !eq_ok {
+        return false;
+    }
+    // HashSet for multi-value membership (A1 showcase: large entity lists)
+    require_in.iter().all(|(k, allowed)| {
+        let Some(pv) = parts.get(k) else {
+            return false;
+        };
+        if allowed.len() <= 8 {
+            return allowed.iter().any(|a| a == pv);
+        }
+        let set: std::collections::HashSet<&str> =
+            allowed.iter().map(String::as_str).collect();
+        set.contains(pv.as_str())
+    })
 }
 
 /// Append hive partition columns (Utf8) for keys in `partition_by` that are not already present.
@@ -1048,6 +1076,47 @@ name = "toml_b"
         let schema = batches[0].schema();
         assert!(schema.index_of("timeframe").is_ok());
         assert!(schema.index_of("symbol").is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multi_value_partition_in_filter() -> Result<()> {
+        use crate::core::receipt::try_apply_scope_to_frontmatter;
+        use crate::core::run_scope::RunScope;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        for (entity, n) in [("a.com", 1usize), ("b.com", 2), ("c.com", 3)] {
+            let dir = root.join(format!("entity={entity}")).join("report_date=2026-08-07");
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("works.jsonl");
+            let mut body = String::new();
+            for i in 0..n {
+                body.push_str(&format!(
+                    "{{\"entity\":\"{entity}\",\"id\":{i},\"report_date\":\"2026-08-07\"}}\n"
+                ));
+            }
+            std::fs::write(&path, body)?;
+        }
+
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Jsonl),
+            scan_path: Some(".".into()),
+            partition_by: Some(vec!["entity".into(), "report_date".into()]),
+            path_glob: Some(vec!["works.jsonl".into()]),
+            ..Default::default()
+        };
+        let scope = RunScope::new()
+            .with_var_multi("entity", ["a.com", "b.com"])?
+            .with_var("report_date", "2026-08-07");
+        let fm_eff = try_apply_scope_to_frontmatter(&fm, &scope)?;
+        assert!(fm_eff.require_partitions_in.as_ref().unwrap().contains_key("entity"));
+        let req = ScanRequest::from_frontmatter(root, &fm_eff)?;
+        let scanner = LakeScanner::from_request(&req);
+        let batches = scanner.scan(&req).await?;
+        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // a.com=1 + b.com=2; c.com excluded
+        assert_eq!(rows, 3, "expected multi IN filter to drop c.com");
         Ok(())
     }
 

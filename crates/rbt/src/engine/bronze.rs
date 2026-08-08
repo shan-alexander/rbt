@@ -17,7 +17,6 @@
 
 use crate::core::dag::{ModelDag, ModelNode};
 use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
-use crate::core::receipt::apply_scope_to_frontmatter;
 use crate::core::run_scope::{OnMissing, RunScope};
 use crate::scan::{LakeScanner, ScanRequest};
 use anyhow::{bail, Context, Result};
@@ -175,8 +174,14 @@ pub async fn register_bronze_for_model_scoped(
 
     let default_scope = RunScope::default();
     let scope = scope.unwrap_or(&default_scope);
-    let fm = apply_scope_to_frontmatter(fm_raw, scope);
-    let fm = &fm;
+    let fm_owned = crate::core::receipt::try_apply_scope_to_frontmatter(fm_raw, scope)
+        .with_context(|| {
+            format!(
+                "E_RBT_VAR: apply run scope to bronze model '{}'",
+                node.name
+            )
+        })?;
+    let fm = &fm_owned;
 
     let (schema_name, table_name) = ModelDag::bronze_source_ident(node).with_context(|| {
         format!(
@@ -400,12 +405,10 @@ fn is_empty_or_missing_err(e: &anyhow::Error) -> bool {
         || s.contains("bronze scan produced zero batches")
 }
 
-/// Zero-row MemTable with declared schema; partition keys filled from run scope when present.
+/// Zero-row MemTable with declared schema (RBT-A6 `empty_batch_for_frontmatter`).
 fn empty_memtable(fm: &StagingFrontmatter, scope: &RunScope) -> Result<Arc<dyn TableProvider>> {
-    let schema = fm.empty_frame_schema()?;
-    // Empty batch — partition constants are for SQL via require_partitions on non-empty scans;
-    // empty frame still exposes partition columns as nullable Utf8 for outer joins.
-    let batch = RecordBatch::new_empty(schema.clone());
+    let batch = crate::core::schema_emit::empty_batch_for_frontmatter(fm)?;
+    let schema = batch.schema();
     let _ = scope; // reserved: future constant partition columns on empty frames
     let mem = MemTable::try_new(schema, vec![vec![batch]])
         .map_err(|e| anyhow::anyhow!("MemTable empty: {e}"))?;
@@ -425,6 +428,11 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
         .unwrap_or(false)
         || fm
             .require_partitions
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+        || fm
+            .require_partitions_in
             .as_ref()
             .map(|p| !p.is_empty())
             .unwrap_or(false)

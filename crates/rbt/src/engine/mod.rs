@@ -8,14 +8,17 @@ use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
 };
 use crate::core::receipt::{
-    bronze_fingerprint, effective_contract_version, now_unix_ms, ModelRunResult, RunReceipt,
-    RunStatus,
+    bronze_fingerprint, effective_contract_version, fingerprints_match_for_skip, now_unix_ms,
+    ModelRunResult, RunReceipt, RunStatus,
 };
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
-    incremental_ref_path, load_parquet_batches, materialize_incremental_append_stream,
-    materialize_stream, new_wap_run_id, sibling_iceberg_dir, stamp_batch, wap_publish,
-    LineageStamp, MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
+    consolidate_parts_to_parquet, incremental_ref_path, load_parquet_batches,
+    materialize_incremental_append_stream, materialize_keyed_upsert,
+    materialize_scoped_replace_stream, materialize_table_parts_only_stream, resolve_part_keys,
+    scope_part_id, uses_parts_directory, materialize_stream, new_wap_run_id, sibling_iceberg_dir,
+    stamp_batch, wap_publish, LineageStamp, MaterializeWriteOptions, MultiFormatWriter,
+    StreamWriteStats, WapModelPaths,
 };
 use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
@@ -315,9 +318,23 @@ impl TransformationEngine {
                 target.name
             )
         })?;
-        let batches = df.collect().await.with_context(|| {
+        let sql_schema: arrow::datatypes::SchemaRef = {
+            let df_schema = df.schema();
+            std::sync::Arc::new(df_schema.as_arrow().clone())
+        };
+        let mut batches = df.collect().await.with_context(|| {
             format!("E_RBT_PREVIEW: collect failed for model '{}'", target.name)
         })?;
+        // RBT-A6: preview also exposes declared columns when SQL is zero-row / missing cols.
+        let declared = target
+            .frontmatter
+            .as_ref()
+            .and_then(|fm| crate::core::schema_emit::try_declared_schema(fm).ok().flatten());
+        batches = crate::core::schema_emit::align_batches_to_declared(
+            &batches,
+            sql_schema.as_ref(),
+            declared.as_deref(),
+        )?;
         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
 
         Ok(PreviewResult {
@@ -366,7 +383,7 @@ impl TransformationEngine {
         if scope.skip_if_fingerprint_match {
             if let Some(prev) = RunReceipt::load_latest_for_scope(project_dir, &scope_key) {
                 if prev.status == RunStatus::Ok
-                    && prev.bronze_fingerprint == fp
+                    && fingerprints_match_for_skip(&prev.bronze_fingerprint, &fp)
                     && prev.contract_version == contract
                 {
                     let finished = now_unix_ms();
@@ -447,6 +464,7 @@ impl TransformationEngine {
 
             for model in tier {
                 tracing::info!("Executing model '{}'...", model.name);
+                let model_started = now_unix_ms();
 
                 // Late-bind: if this model carries frontmatter not registered yet
                 register_bronze_for_model_scoped(
@@ -474,7 +492,7 @@ impl TransformationEngine {
                     std::fs::create_dir_all(parent)?;
                 }
 
-                let (assertions, fail_on_error) = model_assertions(model);
+                let (assertions, fail_on_error) = model_assertions(model, config)?;
                 let mut write_opts =
                     MaterializeWriteOptions::from_config(materialize, fail_on_error);
                 if model
@@ -490,14 +508,31 @@ impl TransformationEngine {
                         bronze_fingerprint: Some(fp.clone()),
                     });
                 }
+                // RBT-A6: merge declared columns into published schema (zero-row + missing cols)
+                if let Some(fm) = model.frontmatter.as_ref() {
+                    if let Some(schema) = crate::core::schema_emit::try_declared_schema(fm)
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_SCHEMA_EMIT: model '{}' declared columns invalid",
+                                model.name
+                            )
+                        })?
+                    {
+                        write_opts = write_opts.with_declared_schema(schema);
+                    }
+                }
                 let mode = materialize.effective_mode();
 
                 // WAP: write to stage path first; publish only after audit.
+                // Parts strategies (incl. table + consolidate:never) skip WAP staging.
+                let table_parts_only = matches!(model.materialization, Materialization::Table)
+                    && !materialize.consolidate.table_writes_monolith();
                 let (write_path, wap_paths) = if let Some(ref run_id) = wap_run_id {
                     if matches!(
                         model.output_format,
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone
-                    ) && model.materialization != Materialization::IncrementalAppend
+                    ) && !uses_parts_directory(&model.materialization)
+                        && !table_parts_only
                     {
                         let paths =
                             WapModelPaths::for_model(project_dir, run_id, &model.name, &dest_path);
@@ -512,6 +547,7 @@ impl TransformationEngine {
                     (dest_path.clone(), None)
                 };
 
+                let mut upsert_for_model: Option<crate::materializer::UpsertStats> = None;
                 let (row_count, write_stats) = match (
                     &model.materialization,
                     &model.output_format,
@@ -540,6 +576,161 @@ impl TransformationEngine {
                             )
                         })?;
                         log_assertion_result(model, &stats, fail_on_error)?;
+                        maybe_consolidate_after_parts(
+                            materialize,
+                            &dest_path,
+                            &write_opts,
+                            &model.name,
+                        )
+                        .await?;
+                        (stats.rows, Some(stats))
+                    }
+                    (
+                        Materialization::ScopedReplace,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Stream,
+                    ) => {
+                        let contract = effective_contract_version(config, scope);
+                        let part_keys = resolve_part_keys(
+                            model
+                                .frontmatter
+                                .as_ref()
+                                .and_then(|f| f.part_key.as_deref()),
+                            model
+                                .frontmatter
+                                .as_ref()
+                                .and_then(|f| f.partition_by.as_deref()),
+                            scope,
+                        );
+                        let sid = scope_part_id(
+                            &model.name,
+                            &contract,
+                            &part_keys,
+                            scope,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_PART_KEY: model '{}' cannot build scope_id",
+                                model.name
+                            )
+                        })?;
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let stream = df.execute_stream().await?;
+                        let stats = materialize_scoped_replace_stream(
+                            stream,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                            &sid,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_INCREMENTAL: model '{}' scoped_replace failed (scope_id={sid})",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        maybe_consolidate_after_parts(
+                            materialize,
+                            &dest_path,
+                            &write_opts,
+                            &model.name,
+                        )
+                        .await?;
+                        (stats.rows, Some(stats))
+                    }
+                    (
+                        Materialization::Table,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Stream,
+                    ) if !materialize.consolidate.table_writes_monolith() => {
+                        // A5: consolidate: never → parts only for table
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let stream = df.execute_stream().await?;
+                        let stats = materialize_table_parts_only_stream(
+                            stream,
+                            &dest_path,
+                            &write_opts,
+                            &assertions,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_CONSOLIDATE: model '{}' table parts-only failed",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        (stats.rows, Some(stats))
+                    }
+                    (
+                        Materialization::KeyedUpsert,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        _,
+                    ) => {
+                        // RBT-A7: collect SQL (v1 memory bound), upsert vs existing parquet, rewrite.
+                        let fm = model.frontmatter.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "E_RBT_UPSERT_KEY: model '{}': keyed_upsert requires frontmatter \
+                                 with unique_key",
+                                model.name
+                            )
+                        })?;
+                        let upsert_cfg = fm.keyed_upsert_config().with_context(|| {
+                            format!(
+                                "E_RBT_UPSERT_KEY: model '{}' keyed_upsert config invalid",
+                                model.name
+                            )
+                        })?;
+                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
+                            format!("E_RBT_SQL: model '{}'", model.name)
+                        })?;
+                        let mut batches = df.collect().await.with_context(|| {
+                            format!("E_RBT_SQL: collect for keyed_upsert model '{}'", model.name)
+                        })?;
+                        if let Some(ref lin) = write_opts.lineage {
+                            batches = batches
+                                .iter()
+                                .map(|b| stamp_batch(b, lin))
+                                .collect::<Result<Vec<_>>>()?;
+                        }
+                        if let Some(ref d) = write_opts.declared_schema {
+                            batches = batches
+                                .iter()
+                                .map(|b| {
+                                    crate::core::schema_emit::ensure_declared_columns(b, d.as_ref())
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                        }
+                        let (stats, upsert_stats) = materialize_keyed_upsert(
+                            &dest_path,
+                            &batches,
+                            &upsert_cfg,
+                            &write_opts,
+                            &assertions,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_UPSERT_SCHEMA: model '{}' keyed_upsert failed",
+                                model.name
+                            )
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        tracing::info!(
+                            model = %model.name,
+                            inserted = upsert_stats.rows_inserted,
+                            updated = upsert_stats.rows_updated,
+                            touched = upsert_stats.rows_touched,
+                            kept = upsert_stats.rows_kept,
+                            total = upsert_stats.total_rows,
+                            "keyed_upsert complete"
+                        );
+                        upsert_for_model = Some(upsert_stats);
                         (stats.rows, Some(stats))
                     }
                     (
@@ -549,7 +740,43 @@ impl TransformationEngine {
                     ) => {
                         bail!(
                             "E_RBT_INCREMENTAL: model '{}': incremental_merge is not implemented yet \
-                             (use incremental_append for part-file appends)",
+                             (use incremental_append or scoped_replace for part files)",
+                            model.name
+                        );
+                    }
+                    (
+                        Materialization::KeyedUpsert,
+                        fmt,
+                        _,
+                    ) => {
+                        bail!(
+                            "E_RBT_UPSERT_SCHEMA: model '{}': keyed_upsert requires parquet \
+                             (got {:?})",
+                            model.name,
+                            fmt
+                        );
+                    }
+                    (
+                        Materialization::ScopedReplace | Materialization::IncrementalAppend,
+                        _,
+                        MaterializeMode::Collect,
+                    ) => {
+                        bail!(
+                            "E_RBT_INCREMENTAL: model '{}': parts strategies (scoped_replace / \
+                             incremental_append) require stream materialize mode \
+                             (set materialize.mode: stream or omit for default)",
+                            model.name
+                        );
+                    }
+                    (
+                        Materialization::Table,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+                        MaterializeMode::Collect,
+                    ) if !materialize.consolidate.table_writes_monolith() => {
+                        bail!(
+                            "E_RBT_CONSOLIDATE: model '{}': consolidate: never with table \
+                             materialization requires stream mode \
+                             (set materialize.mode: stream or omit for default)",
                             model.name
                         );
                     }
@@ -594,7 +821,17 @@ impl TransformationEngine {
                 }
 
                 // Expose model for downstream {{ ref() }} per project materialize policy.
+                // Parts strategies re-register even when this scope wrote 0 rows so peer
+                // parts remain visible to later models in the same run.
+                let parts_strategy = (uses_parts_directory(&model.materialization)
+                    || (matches!(model.materialization, Materialization::Table)
+                        && !materialize.consolidate.table_writes_monolith()))
+                    && matches!(
+                        model.output_format,
+                        OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+                    );
                 if row_count > 0
+                    || parts_strategy
                     || matches!(
                         model.output_format,
                         OutputFormat::Parquet
@@ -604,39 +841,41 @@ impl TransformationEngine {
                     )
                 {
                     let backend = materialize.choose_ref_backend(row_count);
-                    if row_count > 0 {
-                        let ref_path = if model.materialization == Materialization::IncrementalAppend
-                            && matches!(
-                                model.output_format,
-                                OutputFormat::Parquet | OutputFormat::ZeroCopyClone
-                            ) {
+                    if row_count > 0 || parts_strategy {
+                        let ref_path = if parts_strategy {
                             incremental_ref_path(&dest_path)
                         } else {
                             dest_path.clone()
                         };
-                        register_model_for_ref(
-                            &self.ctx,
-                            &model.name,
-                            &model.output_format,
-                            &ref_path,
-                            backend,
-                        )
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "E_RBT_REF_REGISTER: model '{}' (backend={:?}, rows={}, mode={:?})",
-                                model.name, backend, row_count, mode
+                        // Skip register if parts dir missing (never ran successfully)
+                        let should_register = !parts_strategy
+                            || ref_path.is_dir()
+                            || row_count > 0;
+                        if should_register {
+                            register_model_for_ref(
+                                &self.ctx,
+                                &model.name,
+                                &model.output_format,
+                                &ref_path,
+                                backend,
                             )
-                        })?;
-                        tracing::debug!(
-                            model = %model.name,
-                            rows = row_count,
-                            ?backend,
-                            ?mode,
-                            strategy = ?materialize.ref_strategy,
-                            mat = ?model.materialization,
-                            "registered model for ref()"
-                        );
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_REF_REGISTER: model '{}' (backend={:?}, rows={}, mode={:?})",
+                                    model.name, backend, row_count, mode
+                                )
+                            })?;
+                            tracing::debug!(
+                                model = %model.name,
+                                rows = row_count,
+                                ?backend,
+                                ?mode,
+                                strategy = ?materialize.ref_strategy,
+                                mat = ?model.materialization,
+                                "registered model for ref()"
+                            );
+                        }
                     }
                 }
 
@@ -659,11 +898,34 @@ impl TransformationEngine {
 
                 models_executed += 1;
                 total_rows_produced += row_count;
-                model_results.push(ModelRunResult {
-                    name: model.name.clone(),
-                    rows: row_count,
-                    output_path: Some(dest_path.display().to_string()),
-                });
+                let model_finished = now_unix_ms();
+                let elapsed_ms = model_finished.saturating_sub(model_started) as u64;
+                let (phase, tags) = model
+                    .frontmatter
+                    .as_ref()
+                    .map(|f| {
+                        (
+                            f.phase.clone(),
+                            f.tags.clone().unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or((None, Vec::new()));
+                let mut mrr = ModelRunResult::success(
+                    model.name.clone(),
+                    row_count,
+                    Some(dest_path.display().to_string()),
+                    phase,
+                    tags,
+                    Some(elapsed_ms),
+                );
+                if let Some(u) = upsert_for_model {
+                    mrr = mrr.with_upsert_stats(
+                        u.rows_inserted,
+                        u.rows_updated,
+                        u.rows_touched,
+                    );
+                }
+                model_results.push(mrr);
             }
         }
 
@@ -709,8 +971,39 @@ impl TransformationEngine {
     }
 }
 
+/// After parts strategies, optionally rebuild monolith when `consolidate: always`.
+async fn maybe_consolidate_after_parts(
+    materialize: &MaterializeConfig,
+    dest_path: &Path,
+    write_opts: &crate::materializer::MaterializeWriteOptions,
+    model_name: &str,
+) -> Result<()> {
+    if !materialize.consolidate.parts_also_write_monolith() {
+        return Ok(());
+    }
+    let stats = consolidate_parts_to_parquet(dest_path, write_opts)
+        .await
+        .with_context(|| {
+            format!(
+                "E_RBT_CONSOLIDATE: model '{model_name}' always-consolidate failed"
+            )
+        })?;
+    tracing::info!(
+        model = %model_name,
+        rows = stats.rows,
+        path = %dest_path.display(),
+        "consolidated parts → monolith parquet (consolidate: always)"
+    );
+    Ok(())
+}
+
 /// Build frontmatter assertion list + fail-on-error policy for a model.
-fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
+///
+/// Resolves `accepted_values` contract references via `config.contracts.enums`.
+fn model_assertions(
+    model: &ModelNode,
+    config: &RbtProjectConfig,
+) -> Result<(Vec<Assertion>, bool)> {
     let mut fail_on_error = true;
     let assertions = if let Some(fm) = model.frontmatter.as_ref() {
         if let Some(tests) = fm.tests.as_ref() {
@@ -723,10 +1016,25 @@ fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
                     .clone()
                     .or_else(|| fm.unique_key.clone())
                     .or_else(|| fm.grain.clone());
+                let resolved = if let Some(map) = tests.accepted_values.as_ref() {
+                    Some(
+                        config
+                            .contracts
+                            .resolve_accepted_values(map)
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_CONTRACT: resolve accepted_values for model '{}'",
+                                    model.name
+                                )
+                            })?,
+                    )
+                } else {
+                    None
+                };
                 assertions_from_model_tests(
                     tests.not_null.as_deref(),
                     unique.as_deref(),
-                    tests.accepted_values.as_ref(),
+                    resolved.as_ref(),
                 )
             }
         } else if let Some(uk) = fm
@@ -743,7 +1051,7 @@ fn model_assertions(model: &ModelNode) -> (Vec<Assertion>, bool) {
     } else {
         Vec::new()
     };
-    (assertions, fail_on_error)
+    Ok((assertions, fail_on_error))
 }
 
 fn log_assertion_result(
@@ -849,18 +1157,32 @@ async fn execute_model_collect(
     assertions: &[Assertion],
     fail_on_error: bool,
 ) -> Result<usize> {
+    use crate::core::schema_emit::align_batches_to_declared;
+    use crate::materializer::write_empty_parquet;
+    use datafusion::common::DFSchema;
+
     let df = ctx.sql(&model.compiled_sql).await.with_context(|| {
         format!(
             "E_RBT_SQL: execution failed for model '{}' (compiled: {})",
             model.name, model.compiled_sql
         )
     })?;
+    // DFSchema → Arrow Schema for declared merge on zero-row collect.
+    let sql_schema: arrow::datatypes::SchemaRef = {
+        let df_schema: &DFSchema = df.schema();
+        std::sync::Arc::new(df_schema.as_arrow().clone())
+    };
     let mut batches = df.collect().await.with_context(|| {
         format!(
             "E_RBT_SQL: collect failed for model '{}'",
             model.name
         )
     })?;
+    batches = align_batches_to_declared(
+        &batches,
+        sql_schema.as_ref(),
+        write_opts.declared_schema.as_deref(),
+    )?;
     if let Some(ref lin) = write_opts.lineage {
         batches = batches
             .iter()
@@ -869,8 +1191,27 @@ async fn execute_model_collect(
     }
     let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
 
-    MultiFormatWriter::write_batches(&batches, &model.output_format, dest_path)?;
-    // Prefer atomic parquet path for primary formats already handled inside MultiFormatWriter.
+    // Zero-row: still publish schema-stable parquet when we have a batch/schema (A6).
+    if row_count == 0
+        && matches!(
+            model.output_format,
+            OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+        )
+    {
+        let schema = batches
+            .first()
+            .map(|b| b.schema())
+            .unwrap_or(sql_schema);
+        write_empty_parquet(schema, dest_path, write_opts).with_context(|| {
+            format!(
+                "E_RBT_SCHEMA_EMIT: zero-row write for model '{}' → {}",
+                model.name,
+                dest_path.display()
+            )
+        })?;
+    } else {
+        MultiFormatWriter::write_batches(&batches, &model.output_format, dest_path)?;
+    }
 
     if !assertions.is_empty() {
         let result = RecordBatchValidator::validate_batches(&batches, assertions);
@@ -1345,6 +1686,185 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
             .await?;
         assert_eq!(summary.models_executed, 2);
         assert_eq!(summary.total_rows_produced, 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_zero_row_emits_declared_schema() -> Result<()> {
+        use crate::core::frontmatter::{ColumnMeta, StagingFrontmatter};
+        use crate::core::project::MaterializeConfig;
+        use arrow::datatypes::DataType;
+        use std::collections::BTreeMap;
+
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("stg_empty.parquet");
+        let mut dag = ModelDag::new();
+        // Zero-row SQL — only exposes `id` from SELECT; declared adds name + entity
+        let idx = dag.add_model_with_format(
+            "stg_empty",
+            "SELECT CAST(1 AS BIGINT) AS id WHERE false",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(dest.to_string_lossy().into()),
+            "",
+        )?;
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "id".into(),
+            ColumnMeta {
+                dtype: Some("int64".into()),
+                ..Default::default()
+            },
+        );
+        cols.insert(
+            "name".into(),
+            ColumnMeta {
+                dtype: Some("utf8".into()),
+                ..Default::default()
+            },
+        );
+        cols.insert(
+            "docs_only".into(),
+            ColumnMeta {
+                description: Some("no dtype — soft skip".into()),
+                ..Default::default()
+            },
+        );
+        dag.graph[idx].frontmatter = Some(StagingFrontmatter {
+            columns: Some(cols),
+            partition_by: Some(vec!["entity".into()]),
+            ..Default::default()
+        });
+        dag.build_graph()?;
+
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(
+                &dag,
+                temp.path(),
+                temp.path(),
+                &MaterializeConfig::default(),
+            )
+            .await?;
+        assert_eq!(summary.models_executed, 1);
+        assert_eq!(summary.total_rows_produced, 0);
+        assert!(dest.exists());
+
+        let file = std::fs::File::open(&dest)?;
+        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let schema = builder.schema();
+        assert_eq!(
+            schema.field_with_name("id").unwrap().data_type(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            schema.field_with_name("name").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        assert_eq!(
+            schema.field_with_name("entity").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        // docs_only without dtype must not appear
+        assert!(schema.index_of("docs_only").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_table_consolidate_never_parts_only_and_ref() -> Result<()> {
+        use crate::core::project::{ConsolidatePolicy, MaterializeConfig};
+        use crate::materializer::parts_dir_for_parquet;
+
+        let temp = tempfile::tempdir()?;
+        let stg = temp.path().join("stg_a.parquet");
+        let tf = temp.path().join("tf_b.parquet");
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_a",
+            "SELECT 1 AS id UNION ALL SELECT 2",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(stg.to_string_lossy().into()),
+            "",
+        )?;
+        dag.add_model_with_format(
+            "tf_b",
+            "SELECT count(*) AS c FROM {{ ref('stg_a') }}",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(tf.to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let mat = MaterializeConfig {
+            consolidate: ConsolidatePolicy::Never,
+            ..Default::default()
+        };
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat)
+            .await?;
+        assert_eq!(summary.models_executed, 2);
+        assert_eq!(summary.total_rows_produced, 3); // 2 upstream + 1 count row
+        assert!(!stg.exists(), "never must not write monolith for table");
+        let parts = parts_dir_for_parquet(&stg);
+        assert!(parts.join("part-full.parquet").exists());
+        // Project-level never applies to all table models; ref() still sees parts
+        assert!(!tf.exists());
+        assert!(parts_dir_for_parquet(&tf).join("part-full.parquet").exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_incremental_auto_no_monolith_always_writes_monolith() -> Result<()> {
+        use crate::core::project::{ConsolidatePolicy, MaterializeConfig};
+        use crate::materializer::parts_dir_for_parquet;
+
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("stg_inc.parquet");
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "stg_inc",
+            "SELECT 1 AS id UNION ALL SELECT 2",
+            Materialization::IncrementalAppend,
+            OutputFormat::Parquet,
+            Some(dest.to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        // auto: parts only, no monolith
+        let mat_auto = MaterializeConfig {
+            consolidate: ConsolidatePolicy::Auto,
+            ..Default::default()
+        };
+        let engine = TransformationEngine::new();
+        engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat_auto)
+            .await?;
+        assert!(!dest.exists());
+        assert!(parts_dir_for_parquet(&dest).join("part-0000000000001.parquet").exists()
+            || parts_dir_for_parquet(&dest)
+                .read_dir()?
+                .any(|e| e
+                    .ok()
+                    .map(|e| e.path().extension().and_then(|x| x.to_str()) == Some("parquet"))
+                    .unwrap_or(false)));
+
+        // always: parts + monolith rebuild
+        let mat_always = MaterializeConfig {
+            consolidate: ConsolidatePolicy::Always,
+            ..Default::default()
+        };
+        // clear and re-run with always
+        let _ = std::fs::remove_dir_all(parts_dir_for_parquet(&dest));
+        let _ = std::fs::remove_file(&dest);
+        engine
+            .execute_dag_with_materialize(&dag, temp.path(), temp.path(), &mat_always)
+            .await?;
+        assert!(dest.exists(), "always must rebuild monolith from parts");
+        assert!(parts_dir_for_parquet(&dest).is_dir());
         Ok(())
     }
 }

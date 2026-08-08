@@ -2,6 +2,107 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added (RBT-A7 — keyed upsert / entity-grain merge)
+
+- `materialization: keyed_upsert` (aliases: `upsert`, `scd1`, `type1`) — general merge
+  primitive (not Type-1-only); Type-1 dims are a common consumer
+- Frontmatter: `unique_key` (defaults to `grain` when omitted), `touch_columns`,
+  `compare_columns`
+- Pure in-memory upsert engine (`materializer/upsert.rs`) with NULL-safe compare
+- Fail closed on **duplicate keys** in candidate batch (`E_RBT_UPSERT_KEY`)
+- Hygiene: `W_RBT_UPSERT_HINT` for entity-grained mart/dim still using `table`
+- v1: collect SQL + existing Parquet, atomic full rewrite; `RBT_UPSERT_MAX_ROWS`
+- Receipt metrics: `rows_inserted`, `rows_updated`, `rows_touched`
+- Example playbook: `examples/entity_registry` (stg log → tf latest → dim upsert;
+  `scripts/demo_upsert.sh` multi-day insert/touch/update/keep)
+- Measure: `entity_registry_upsert`
+- Codes: `E_RBT_UPSERT_KEY`, `E_RBT_UPSERT_TOO_LARGE`, `E_RBT_UPSERT_SCHEMA`
+- Roadmap: A16 grain/SK, A17 `latest_per`, A18 `model_type`, A19 SCD2, A20 fact/obt/tf
+
+### Added (RBT-A6 — declared schema emit)
+
+- `core/schema_emit`: shared helpers — `try_declared_schema`, `empty_batch_for_frontmatter`,
+  `ensure_declared_columns`, `merge_stream_and_declared`, `SUPPORTED_LOGICAL_DTYPES`
+- Zero-row SQL materialize writes Parquet with **declared** columns (not empty schema)
+- Non-empty materialize: keep SQL columns; append missing declared cols as nulls
+- Bronze `on_missing: empty` uses the same empty-batch helper (strict dtype on listed cols)
+- Preview applies the same schema merge; docs-only columns (no `dtype`) are soft-skipped
+- Docs: dtype map in `COMPLEX_BRONZE_AND_RUN_SCOPE.md`
+
+### Added (RBT-A5 — parts-only publish / consolidate policy)
+
+- `materialize.consolidate`: `auto` (default) | `never` | `always`
+  - `auto`: table → monolith; incremental_append / scoped_replace → parts only
+  - `never`: table also writes parts only (`part-full.parquet` under `.parts/`)
+  - `always`: after parts strategies, rebuild monolith parquet from parts
+- CLI **`rbt consolidate -s <model>`** (ops): rebuild monolith; parts remain authoritative
+- Code: `E_RBT_CONSOLIDATE`; `ref()` registers parts dir for table+never
+
+### Added (RBT-A4 — content-addressed bronze fingerprints)
+
+- `fingerprint:` in `rbt_project.yml`: `mode` (`path_stat` \| `content_hash`), `algo`
+  (`blake3` \| `sha256`), `max_bytes_per_file`
+- Fingerprint prefixes: `path_stat:fnv1a64:…`, `content:blake3:…`, `content:sha256:…`
+- Legacy bare `fnv1a64:…` still matches path_stat on skip
+- Mode mismatch forces re-execute (no false skip)
+- CLI `--fingerprint-mode`; env `RBT_FINGERPRINT_MODE` / `_ALGO` / `_MAX_BYTES`
+
+### Added (RBT-A3 — phased publish metadata on receipts)
+
+- Frontmatter `phase:` (optional free-form) + existing `tags:` flow into receipts
+- Receipt `models[]` entries: `name`, `status`, `row_count`, `phase`, `tags`,
+  `elapsed_ms`, `output_path` (JSON key renamed from `model_results`; still reads legacy)
+- `schema_version: 2`; skip receipts keep empty `models`
+- CLI **`rbt run --json`**: compact run summary to stdout (`models[]`, `wall_ms`, fingerprint)
+- CLI `--receipt-json`: full on-disk receipt body (debug); prefer `--json` for orchestrators
+
+### Added (RBT-A2 — scoped_replace materialization)
+
+- `materialization: scoped_replace` — deterministic `part-{scope_id}.parquet` under
+  `{model}.parts/`; re-run of the same scope **replaces** that part only
+- `part_key:` frontmatter (default: `partition_by` ∩ run vars); `scope_part_id` FNV hex
+- Manifest `part_rows` map for accurate totals after replace
+- Peer scopes untouched; `ref()` still lists the parts directory
+
+### Added (RBT-A1 — multi-value partition scope)
+
+- **`ScopeValue`**: run vars are scalar or multi (`Single` / `Multi`)
+- **Repeated `--var key=v`**, **`--var key:=["a","b"]`**, **`--var-file key=path`**
+- Multi partition vars → `require_partitions_in` (hive path **IN** filter); scalar still equality
+- Path templates refuse multi-value keys (`E_RBT_VAR_MULTI`); use partition filters instead
+- Receipts serialize multi vars as JSON arrays; `scope_key` is multi-aware
+- Limit: `DEFAULT_MULTI_VAR_LIMIT` (100_000) → `E_RBT_VAR_LIMIT`
+
+### Added (P0 contracts + contract-diff)
+
+- **`contracts.enums`** in `rbt_project.yml`: named value registries with `values`, `on_new`
+  (`fail`|`warn`|`allow`), optional `labels`, optional `probe: { model, column }`
+- Frontmatter `tests.accepted_values` may reference a contract by name
+  (`source: works.source`) or keep an inline list
+- **`rbt validate --contract-diff`**: sample bronze (jsonl/json) for registered enums and
+  report `new_in_bronze` vs registry; optional `--var` partition filters
+- Codes: `E_RBT_CONTRACT_NEW_VALUE`, `W_RBT_CONTRACT_NEW_VALUE`, `E_RBT_CONTRACT_UNKNOWN`, …
+
+### Examples
+
+- **`a1_multi_value_scope`** — multi-value `--var` / `--var-file` partition IN filter
+- **`a2_scoped_replace`** — peer-safe part replace; `scripts/demo_scoped_replace.sh`
+- **`entity_registry`** — multi-day keyed_upsert playbook (`scripts/demo_upsert.sh`)
+- **`scripts/smoke_feat_a1_a7.sh`** — combined feature smoke (A1+A2+A7)
+- **`examples/README.md`** — example catalog
+- **`complex_bronze_landing`** research mini-lake v2: dual tracks (**AI × semiconductors** +
+  **AI agritech**), polite APIs (PubMed XML, Crossref JSON, Europe PMC JSON, **OpenAlex**,
+  **Semantic Scholar** + seed, arXiv Atom + seed), `assets.jsonl` inventory, richer works
+  schema (`authors_json`, abstracts, keywords, `topic_track`), gold `tf_source_run_stats` +
+  `dim_topic` + `fact_source_run`. Policy skips: Google Scholar + Examine.com (not free papers).
+- Example uses `contracts.enums` for `works.source` / `works.topic_track`.
+- Analysis: [docs/analysis/bronze-source-onboarding-friction.md](docs/analysis/bronze-source-onboarding-friction.md)
+  — frictions + rbt product enhancements for bronze source growth.
+- Analysis: [docs/analysis/a10-bronze-to-silver-approach-…](docs/analysis/a10-bronze-to-silver-approach-adapters-silver-first-class.md)
+  — A10 approach (adapters + silver first-class roles); A9 deferred.
+
 ## [0.7.3] — 2026-08-02
 
 ### Examples

@@ -1,0 +1,15 @@
+# RBT-A2 showcase: scoped_replace — re-run one entity without growing append parts
+name: a2_scoped_replace
+version: "1.0.0"
+contract_version: "a2-v1"
+models_dir: models
+target_path: $lake/silver/stage
+
+roots:
+  lake: lake
+
+layers:
+  staging:
+    path: models/staging
+    target_path: $lake/silver/stage
+    default_format: parquet

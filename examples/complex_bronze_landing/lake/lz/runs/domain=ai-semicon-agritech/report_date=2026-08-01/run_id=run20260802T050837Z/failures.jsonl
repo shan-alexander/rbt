@@ -1,0 +1,2 @@
+{"unit_id": "robots:https://scholar.google.com", "source": "robots", "error": "skipped: Google Scholar has no public API; scraping disallowed (policy)", "domain": "ai-semicon-agritech", "report_date": "2026-08-01", "run_id": "run20260802T050837Z"}
+{"unit_id": "api:https://examine.com", "source": "policy", "error": "skipped: Examine.com is commercial nutrition evidence (request/API key); not a free academic papers source for this lake", "domain": "ai-semicon-agritech", "report_date": "2026-08-01", "run_id": "run20260802T050837Z"}

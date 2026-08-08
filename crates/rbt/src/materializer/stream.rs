@@ -43,6 +43,9 @@ pub struct MaterializeWriteOptions {
     pub iceberg_namespace: String,
     /// When set, stamp lineage columns onto each batch before write (P6).
     pub lineage: Option<LineageStamp>,
+    /// Declared frontmatter schema to merge into the writer (RBT-A6).
+    /// Missing declared columns are added as nulls; zero-row writes keep full schema.
+    pub declared_schema: Option<SchemaRef>,
 }
 
 impl Default for MaterializeWriteOptions {
@@ -54,6 +57,7 @@ impl Default for MaterializeWriteOptions {
             iceberg_mode: crate::core::project::IcebergWriteMode::Catalog,
             iceberg_namespace: "rbt".into(),
             lineage: None,
+            declared_schema: None,
         }
     }
 }
@@ -67,11 +71,17 @@ impl MaterializeWriteOptions {
             iceberg_mode: cfg.iceberg.mode,
             iceberg_namespace: cfg.iceberg.namespace.clone(),
             lineage: None,
+            declared_schema: None,
         }
     }
 
     pub fn with_lineage(mut self, stamp: LineageStamp) -> Self {
         self.lineage = Some(stamp);
+        self
+    }
+
+    pub fn with_declared_schema(mut self, schema: SchemaRef) -> Self {
+        self.declared_schema = Some(schema);
         self
     }
 }
@@ -199,17 +209,28 @@ pub async fn materialize_stream(
 }
 
 /// Stream write Parquet with atomic publish + optional streaming assertions.
+///
+/// When [`MaterializeWriteOptions::declared_schema`] is set (RBT-A6), the writer
+/// schema is the SQL stream schema merged with declared fields; each batch gets
+/// missing declared columns as nulls. Zero-row runs still publish a schema-stable file.
 pub async fn write_parquet_stream(
     stream: &mut SendableRecordBatchStream,
     destination_path: &Path,
     opts: &MaterializeWriteOptions,
     assertions: &[Assertion],
 ) -> Result<StreamWriteStats> {
+    use crate::core::schema_emit::{ensure_declared_columns, merge_stream_and_declared};
+
     let base_schema = stream.schema();
-    let schema: SchemaRef = if let Some(ref lin) = opts.lineage {
-        stamped_schema(base_schema.as_ref(), lin)
+    let with_declared: SchemaRef = if let Some(ref d) = opts.declared_schema {
+        merge_stream_and_declared(base_schema.as_ref(), d.as_ref())
     } else {
         base_schema.clone()
+    };
+    let schema: SchemaRef = if let Some(ref lin) = opts.lineage {
+        stamped_schema(with_declared.as_ref(), lin)
+    } else {
+        with_declared
     };
     let partial = partial_path_for(destination_path);
     remove_if_exists(&partial);
@@ -243,6 +264,9 @@ pub async fn write_parquet_stream(
             })?;
             if batch.num_rows() == 0 && batch.num_columns() == 0 {
                 continue;
+            }
+            if let Some(ref d) = opts.declared_schema {
+                batch = ensure_declared_columns(&batch, d.as_ref())?;
             }
             if let Some(ref lin) = opts.lineage {
                 batch = stamp_batch(&batch, lin)?;

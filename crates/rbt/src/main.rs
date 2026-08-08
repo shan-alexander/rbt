@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rbt::{
-    model_has_test_contract, BronzeCheckMode, OutputFormat, RbtProjectConfig, RunScope, SelectMode,
+    consolidate_parts_to_parquet, model_has_test_contract, parts_dir_for_parquet, run_contract_diff,
+    BronzeCheckMode, MaterializeWriteOptions, OutputFormat, RbtProjectConfig, RunScope, SelectMode,
     TransformationEngine,
 };
 
@@ -15,10 +16,16 @@ use tracing_subscriber::EnvFilter;
 struct RunScopeArgs {
     /// Run variable / partition bind (`key=value`). Repeatable.
     ///
-    /// Merges into `require_partitions` for keys listed in model `partition_by`,
-    /// and expands `{key}` / `${key}` in scan_path and partition values.
+    /// Repeated keys with different values become a multi-value set (RBT-A1):
+    /// `--var entity=a.com --var entity=b.com` → partition filter `entity IN (...)`.
+    /// JSON array form: `--var entity:=["a.com","b.com"]`.
+    /// Merges into `require_partitions` / `require_partitions_in` for keys in
+    /// model `partition_by`. Expands `{key}` / `${key}` in paths (**scalar only**).
     #[arg(long = "var", value_name = "KEY=VALUE")]
     vars: Vec<String>,
+    /// Load multi-value var from a file (`key=path`, one value per line, `#` comments).
+    #[arg(long = "var-file", value_name = "KEY=PATH")]
+    var_files: Vec<String>,
     /// Contract version for fingerprints (overrides `contract_version` in yml).
     #[arg(long)]
     contract_version: Option<String>,
@@ -34,6 +41,10 @@ struct RunScopeArgs {
     /// Emit run receipt JSON to stdout after success.
     #[arg(long, default_value_t = false)]
     receipt_json: bool,
+    /// Override bronze fingerprint mode for this run: `path_stat` | `content_hash` (RBT-A4).
+    /// Also: env `RBT_FINGERPRINT_MODE`. Project default in `fingerprint.mode` yml.
+    #[arg(long, value_name = "MODE")]
+    fingerprint_mode: Option<String>,
 }
 
 impl RunScopeArgs {
@@ -45,7 +56,19 @@ impl RunScopeArgs {
         scope.run_id = self.run_id.clone();
         scope.extend_from_env();
         scope.extend_from_kv_pairs(self.vars.iter().map(String::as_str))?;
+        scope.extend_from_var_files(self.var_files.iter().map(String::as_str))?;
         Ok(scope)
+    }
+
+    /// Apply CLI fingerprint mode onto a loaded project config (after `RbtProjectConfig::load`).
+    fn apply_fingerprint_override(
+        &self,
+        config: &mut rbt::RbtProjectConfig,
+    ) -> Result<()> {
+        if let Some(ref m) = self.fingerprint_mode {
+            config.fingerprint.mode = rbt::FingerprintMode::parse(m)?;
+        }
+        Ok(())
     }
 }
 
@@ -147,6 +170,10 @@ enum Commands {
         /// Pre-flight bronze path check before execution (default: fail)
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
+        /// Emit machine-readable run summary JSON to stdout (A3.5). Suppresses most human banners.
+        /// Includes models[] (phase/tags/elapsed_ms). Full on-disk receipt still written when enabled.
+        #[arg(long, default_value_t = false)]
+        json: bool,
         #[command(flatten)]
         scope: RunScopeArgs,
     },
@@ -177,9 +204,18 @@ enum Commands {
         select: Option<String>,
         #[arg(long, value_enum, default_value_t = CliBronzeCheck::Fail)]
         bronze_check: CliBronzeCheck,
+        /// Sample bronze for `contracts.enums` and report values missing from the registry
+        #[arg(long, default_value_t = false)]
+        contract_diff: bool,
         /// Emit JSON report to stdout (machine-readable)
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Optional run vars for contract-diff partition filters (`key=value`)
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Multi-value var from file for contract-diff (`key=path`)
+        #[arg(long = "var-file", value_name = "KEY=PATH")]
+        var_files: Vec<String>,
     },
     /// Explain a model: compiled SQL, deps, layer, bronze contract, output path
     Explain {
@@ -228,6 +264,20 @@ enum Commands {
     Bench {
         #[arg(short, long, default_value_t = 1000000)]
         num_rows: usize,
+    },
+    /// Rebuild a single monolith parquet from a model's `.parts/` directory (RBT-A5 ops)
+    Consolidate {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Single model name whose parts should be consolidated
+        #[arg(short = 's', long)]
+        select: String,
+        /// Fallback output dir when the model has no resolved `output_path`
+        #[arg(short, long, default_value = "./target/output")]
+        output_dir: PathBuf,
+        /// Emit JSON result to stdout
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -298,16 +348,21 @@ async fn main() -> Result<()> {
             output_dir,
             format,
             bronze_check,
+            json,
             scope,
         } => {
             let run_scope = scope.to_scope()?;
-            println!(
-                "[rbt] Executing pipeline from {:?} (select: {:?}, format: {:?}, output: {:?}, bronze_check={:?}, vars={:?})...",
-                project_dir, select, format, output_dir, bronze_check, run_scope.vars
-            );
+            let quiet = json; // machine summary owns stdout
+            if !quiet {
+                println!(
+                    "[rbt] Executing pipeline from {:?} (select: {:?}, format: {:?}, output: {:?}, bronze_check={:?}, vars={:?})...",
+                    project_dir, select, format, output_dir, bronze_check, run_scope.vars
+                );
+            }
             let start = Instant::now();
 
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let mut config = RbtProjectConfig::load(&project_dir)?;
+            scope.apply_fingerprint_override(&mut config)?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
             let dag = full
                 .apply_select(select.as_deref(), SelectMode::Execute)
@@ -328,45 +383,74 @@ async fn main() -> Result<()> {
                 );
             }
 
-            println!(
-                "[rbt] Running {} model(s): {:?}",
-                dag.node_map.len(),
-                dag.topological_sequence()?
-                    .iter()
-                    .map(|m| m.name.as_str())
-                    .collect::<Vec<_>>()
-            );
+            if !quiet {
+                println!(
+                    "[rbt] Running {} model(s): {:?}",
+                    dag.node_map.len(),
+                    dag.topological_sequence()?
+                        .iter()
+                        .map(|m| m.name.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
 
             let engine = TransformationEngine::new();
             let summary = engine
                 .execute_dag_with_scope(&dag, &project_dir, &output_dir, &config, &run_scope)
                 .await?;
             let duration = start.elapsed();
+            let wall_ms = duration.as_millis();
 
-            if summary.skipped {
-                println!(
-                    "[rbt] SKIPPED materialize (fingerprint match) in {:.2?} — {}",
-                    duration,
-                    summary.skip_reason.as_deref().unwrap_or("identical bronze")
-                );
+            if json {
+                // A3.5: compact run summary for hosts (serde_json — not jshift; jshift is bronze extract).
+                let body = serde_json::json!({
+                    "ok": !summary.skipped || summary.skip_reason.is_some(),
+                    "skipped": summary.skipped,
+                    "skip_reason": summary.skip_reason,
+                    "run_id": summary.run_id,
+                    "project": config.name,
+                    "package_version": rbt::VERSION,
+                    "models_executed": summary.models_executed,
+                    "total_rows": summary.total_rows_produced,
+                    "bronze_sources": summary.bronze_sources_registered,
+                    "bronze_fingerprint": summary.bronze_fingerprint,
+                    "receipt_path": summary.receipt_path.as_ref().map(|p| p.display().to_string()),
+                    "wall_ms": wall_ms,
+                    "models": summary.model_results,
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
             } else {
-                println!(
-                    "[rbt] Completed {} models ({} rows, {} bronze sources) in {:.2?}",
-                    summary.models_executed,
-                    summary.total_rows_produced,
-                    summary.bronze_sources_registered,
-                    duration
-                );
+                if summary.skipped {
+                    println!(
+                        "[rbt] SKIPPED materialize (fingerprint match) in {:.2?} — {}",
+                        duration,
+                        summary.skip_reason.as_deref().unwrap_or("identical bronze")
+                    );
+                } else {
+                    println!(
+                        "[rbt] Completed {} models ({} rows, {} bronze sources) in {:.2?}",
+                        summary.models_executed,
+                        summary.total_rows_produced,
+                        summary.bronze_sources_registered,
+                        duration
+                    );
+                }
+                if let Some(ref fp) = summary.bronze_fingerprint {
+                    println!("[rbt] bronze_fingerprint={fp}");
+                }
+                if let Some(ref p) = summary.receipt_path {
+                    println!("[rbt] receipt={}", p.display());
+                }
             }
-            if let Some(ref fp) = summary.bronze_fingerprint {
-                println!("[rbt] bronze_fingerprint={fp}");
-            }
-            if let Some(ref p) = summary.receipt_path {
-                println!("[rbt] receipt={}", p.display());
-            }
+            // Full on-disk receipt dump (may coexist with --json for debugging)
             if scope.receipt_json {
                 if let Some(ref p) = summary.receipt_path {
-                    print!("{}", std::fs::read_to_string(p)?);
+                    if json {
+                        // avoid mixing two JSON docs on stdout; put full receipt path only in summary
+                        eprintln!("[rbt] full receipt at {}", p.display());
+                    } else {
+                        print!("{}", std::fs::read_to_string(p)?);
+                    }
                 }
             }
         }
@@ -386,13 +470,14 @@ async fn main() -> Result<()> {
                 (None, None) => None,
             };
             let run_scope = scope.to_scope()?;
+            let mut config = RbtProjectConfig::load(&project_dir)?;
+            scope.apply_fingerprint_override(&mut config)?;
 
             println!(
                 "[rbt] Testing project {:?} (select={:?})...",
                 project_dir, select
             );
 
-            let config = RbtProjectConfig::load(&project_dir)?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
 
             // Default: models that declare tests or grain/unique_key
@@ -461,7 +546,10 @@ async fn main() -> Result<()> {
             project_dir,
             select,
             bronze_check,
+            contract_diff,
             json,
+            vars,
+            var_files,
         } => {
             let config = RbtProjectConfig::load(&project_dir)?;
             let full = config.build_dag(&project_dir, None)?;
@@ -472,6 +560,16 @@ async fn main() -> Result<()> {
                 bronze_check.into(),
                 &config.roots,
             )?;
+
+            let mut scope = RunScope::new();
+            scope.extend_from_kv_pairs(vars.iter().map(String::as_str))?;
+            scope.extend_from_var_files(var_files.iter().map(String::as_str))?;
+
+            let mut contract_diff_report = None;
+            if contract_diff {
+                contract_diff_report =
+                    Some(run_contract_diff(&project_dir, &config, &full, &scope)?);
+            }
 
             let mut issues: Vec<String> = Vec::new();
             for d in &report.diagnostics {
@@ -490,9 +588,21 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            if let Some(cd) = &contract_diff_report {
+                for d in &cd.diagnostics {
+                    issues.push(d.clone());
+                }
+                for n in &cd.notes {
+                    issues.push(format!("NOTE: {n}"));
+                }
+            }
 
             let ok = !report.has_errors()
-                && !issues.iter().any(|i| i.contains("E_RBT_VALIDATE_REF"));
+                && !issues.iter().any(|i| i.contains("E_RBT_VALIDATE_REF"))
+                && contract_diff_report
+                    .as_ref()
+                    .map(|c| c.ok && !c.has_errors())
+                    .unwrap_or(true);
 
             if json {
                 let body = serde_json::json!({
@@ -510,6 +620,7 @@ async fn main() -> Result<()> {
                     "tier_plan": tiers.iter().map(|t| {
                         t.iter().map(|m| m.name.clone()).collect::<Vec<_>>()
                     }).collect::<Vec<_>>(),
+                    "contract_diff": contract_diff_report,
                 });
                 println!("{}", serde_json::to_string_pretty(&body)?);
             } else {
@@ -527,8 +638,34 @@ async fn main() -> Result<()> {
                     eprintln!("{d}");
                 }
                 for i in &issues {
-                    if i.starts_with("E_RBT_VALIDATE") {
+                    if i.starts_with("E_RBT_VALIDATE")
+                        || i.starts_with("E_RBT_CONTRACT")
+                        || i.starts_with("W_RBT_CONTRACT")
+                        || i.starts_with("NOTE:")
+                    {
                         eprintln!("{i}");
+                    }
+                }
+                if let Some(cd) = &contract_diff_report {
+                    println!(
+                        "[rbt] contract-diff: {} enum(s), {} column probe(s)",
+                        cd.enums_checked,
+                        cd.columns.len()
+                    );
+                    for col in &cd.columns {
+                        println!(
+                            "  {} {}.{}: observed={} new_in_bronze={} files={} rows={}",
+                            col.enum_name,
+                            col.model,
+                            col.column,
+                            col.observed.len(),
+                            col.new_in_bronze.len(),
+                            col.files_sampled,
+                            col.rows_sampled
+                        );
+                        if !col.new_in_bronze.is_empty() {
+                            println!("    new: {:?}", col.new_in_bronze);
+                        }
                     }
                 }
                 if ok {
@@ -725,6 +862,63 @@ async fn main() -> Result<()> {
                 bail!(
                     "[rbt] measure scenario failed: {}",
                     report_data.error.unwrap_or_default()
+                );
+            }
+        }
+        Commands::Consolidate {
+            project_dir,
+            select,
+            output_dir,
+            json,
+        } => {
+            let config = RbtProjectConfig::load(&project_dir)?;
+            let full = config.build_dag(&project_dir, None)?;
+            let name = select.trim();
+            let node = full
+                .topological_sequence()?
+                .into_iter()
+                .find(|m| m.name == name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("E_RBT_CONSOLIDATE: unknown model '{name}'")
+                })?;
+            let dest_path = node
+                .output_path
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| output_dir.join(format!("{}.parquet", node.name)));
+            let parts = parts_dir_for_parquet(&dest_path);
+            if !parts.is_dir() {
+                bail!(
+                    "E_RBT_CONSOLIDATE: model '{name}' has no parts directory at {} \
+                     (run incremental_append / scoped_replace / consolidate:never first)",
+                    parts.display()
+                );
+            }
+            let write_opts = MaterializeWriteOptions::from_config(&config.materialize, true);
+            let stats = consolidate_parts_to_parquet(&dest_path, &write_opts)
+                .await
+                .with_context(|| {
+                    format!("E_RBT_CONSOLIDATE: consolidate model '{name}' failed")
+                })?;
+            if json {
+                let body = serde_json::json!({
+                    "ok": true,
+                    "model": name,
+                    "parts_dir": parts.display().to_string(),
+                    "monolith": dest_path.display().to_string(),
+                    "rows": stats.rows,
+                    "bytes_written": stats.bytes_written,
+                });
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!(
+                    "[rbt] consolidate model='{name}' rows={} → {}",
+                    stats.rows,
+                    dest_path.display()
+                );
+                println!(
+                    "  parts remain authoritative at {}; monolith is a convenience rebuild",
+                    parts.display()
                 );
             }
         }

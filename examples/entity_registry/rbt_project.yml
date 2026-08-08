@@ -1,0 +1,24 @@
+# RBT-A7 playbook: Type-1 entity registry via keyed_upsert
+# Stage = event log; transform = latest-per-entity candidates; dim = durable upsert.
+name: entity_registry
+version: "1.0.0"
+contract_version: "a7-v2"
+models_dir: models
+target_path: $lake/gold
+
+roots:
+  lake: lake
+
+layers:
+  staging:
+    path: models/staging
+    target_path: $lake/silver/stage
+    default_format: parquet
+  transforms:
+    path: models/transforms
+    target_path: $lake/silver/tf
+    default_format: parquet
+  marts:
+    path: models/marts
+    target_path: $lake/gold
+    default_format: parquet
