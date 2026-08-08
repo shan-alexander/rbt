@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.7.3`+ Unreleased (A1–A7 on `feat/a1-multi-value-scope`).** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit.
+> **Status:** **`0.8.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit.
 
 ## Why rbt
 
@@ -25,7 +25,7 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.5.0"
+rbt-datalake = "0.8.0"
 ```
 
 ```rust

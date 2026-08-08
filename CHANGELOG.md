@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-08
+
 ### Added (RBT-A7 — keyed upsert / entity-grain merge)
 
 - `materialization: keyed_upsert` (aliases: `upsert`, `scd1`, `type1`) — general merge
@@ -102,6 +104,10 @@ All notable changes to this project are documented in this file.
   — frictions + rbt product enhancements for bronze source growth.
 - Analysis: [docs/analysis/a10-bronze-to-silver-approach-…](docs/analysis/a10-bronze-to-silver-approach-adapters-silver-first-class.md)
   — A10 approach (adapters + silver first-class roles); A9 deferred.
+
+### Fixed
+
+- `scripts/smoke.sh` medallion output paths (`lake/silver/stage`, `lake/gold/tf`)
 
 ## [0.7.3] — 2026-08-02
 

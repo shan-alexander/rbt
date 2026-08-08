@@ -14,7 +14,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.7.3"
+//! rbt-datalake = "0.8.0"
 //! ```
 //!
 //! ## Quick start (library)
@@ -43,7 +43,7 @@
 //! `with_var_multi` bind hive **IN** filters. Showcase:
 //! `examples/a1_multi_value_scope`.
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.7.3")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.8.0")]
 
 pub mod core;
 pub mod engine;

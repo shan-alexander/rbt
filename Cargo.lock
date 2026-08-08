@@ -3341,7 +3341,7 @@ dependencies = [
 
 [[package]]
 name = "rbt-datalake"
-version = "0.7.3"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "arrow",
