@@ -5,7 +5,7 @@ node_type: analysis
 # A10 bronze-to-silver approach (adapters + silver first-class)
 
 ## Status
-planning (A9 skipped; A10 next)
+**Implemented** (adapter trait, registry, HTML/XML/robots, matrix + guide; A9 still skipped)
 
 ## Framing (lakehouse, not warehouse-first Kimball)
 

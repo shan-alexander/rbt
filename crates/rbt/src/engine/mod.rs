@@ -1,6 +1,7 @@
 //! `rbt::engine`: Apache DataFusion query engine integration, bronze registration, and DAG execution.
 
 pub mod bronze;
+pub mod stages;
 pub mod udf;
 
 use crate::core::dag::{Materialization, ModelDag, ModelNode, OutputFormat};
@@ -8,8 +9,7 @@ use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
 };
 use crate::core::receipt::{
-    bronze_fingerprint, effective_contract_version, fingerprints_match_for_skip, now_unix_ms,
-    ModelRunResult, RunReceipt, RunStatus,
+    effective_contract_version, now_unix_ms, ModelRunResult, RunReceipt, RunStatus,
 };
 use crate::core::run_scope::RunScope;
 use crate::materializer::{
@@ -454,62 +454,56 @@ impl TransformationEngine {
         let run_id = scope.resolve_run_id();
         let scope_key = scope.scope_key();
         let contract = effective_contract_version(config, scope);
-        let fp = bronze_fingerprint(dag, project_dir, config, scope)
-            .context("E_RBT_FINGERPRINT: bronze fingerprint failed")?;
 
-        if scope.skip_if_fingerprint_match {
-            if let Some(prev) = RunReceipt::load_latest_for_scope(project_dir, &scope_key) {
-                if prev.status == RunStatus::Ok
-                    && fingerprints_match_for_skip(&prev.bronze_fingerprint, &fp)
-                    && prev.contract_version == contract
-                {
-                    let finished = now_unix_ms();
-                    let mut summary = DagExecutionSummary {
-                        models_executed: 0,
-                        total_rows_produced: 0,
-                        bronze_sources_registered: 0,
-                        skipped: true,
-                        skip_reason: Some(
-                            "bronze fingerprint + contract_version match previous successful receipt"
-                                .into(),
-                        ),
-                        bronze_fingerprint: Some(fp.clone()),
-                        run_id: Some(run_id.clone()),
-                        receipt_path: None,
-                        model_results: Vec::new(),
-                    };
-                    if scope.write_receipt {
-                        let receipt = RunReceipt {
-                            schema_version: RunReceipt::SCHEMA_VERSION,
-                            run_id: run_id.clone(),
-                            project: config.name.clone(),
-                            package_version: crate::VERSION.into(),
-                            contract_version: contract.clone(),
-                            scope_key: scope_key.clone(),
-                            vars: scope.vars.clone(),
-                            status: RunStatus::Skipped,
-                            skipped: true,
-                            skip_reason: summary.skip_reason.clone(),
-                            bronze_fingerprint: fp.clone(),
-                            models_executed: 0,
-                            total_rows: 0,
-                            bronze_sources: 0,
-                            model_results: Vec::new(),
-                            started_unix_ms: started,
-                            finished_unix_ms: finished,
-                            wall_ms: finished.saturating_sub(started),
-                            error: None,
-                        };
-                        summary.receipt_path = Some(receipt.write(project_dir)?);
-                    }
-                    tracing::info!(
-                        "E_RBT_SKIP: identical bronze fingerprint for scope {scope_key}; skipping materialize"
-                    );
-                    return Ok(summary);
-                }
+        // Stage 1 — PlanSkip (named stage; same SoT as ops::plan_skip / CLI --skip-if-match)
+        let skip_plan = stages::stage_plan_skip(dag, project_dir, config, scope)
+            .context("E_RBT_FINGERPRINT: bronze fingerprint / plan_skip failed")?;
+        let fp = skip_plan.current_fingerprint.clone();
+
+        if scope.skip_if_fingerprint_match && skip_plan.should_skip {
+            let finished = now_unix_ms();
+            let mut summary = DagExecutionSummary {
+                models_executed: 0,
+                total_rows_produced: 0,
+                bronze_sources_registered: 0,
+                skipped: true,
+                skip_reason: Some(skip_plan.reason.clone()),
+                bronze_fingerprint: Some(fp.clone()),
+                run_id: Some(run_id.clone()),
+                receipt_path: None,
+                model_results: Vec::new(),
+            };
+            if scope.write_receipt {
+                let receipt = RunReceipt {
+                    schema_version: RunReceipt::SCHEMA_VERSION,
+                    run_id: run_id.clone(),
+                    project: config.name.clone(),
+                    package_version: crate::VERSION.into(),
+                    contract_version: contract.clone(),
+                    scope_key: scope_key.clone(),
+                    vars: scope.vars.clone(),
+                    status: RunStatus::Skipped,
+                    skipped: true,
+                    skip_reason: summary.skip_reason.clone(),
+                    bronze_fingerprint: fp.clone(),
+                    models_executed: 0,
+                    total_rows: 0,
+                    bronze_sources: 0,
+                    model_results: Vec::new(),
+                    started_unix_ms: started,
+                    finished_unix_ms: finished,
+                    wall_ms: finished.saturating_sub(started),
+                    error: None,
+                };
+                summary.receipt_path = Some(receipt.write(project_dir)?);
             }
+            tracing::info!(
+                "E_RBT_SKIP: identical bronze fingerprint for scope {scope_key}; skipping materialize"
+            );
+            return Ok(summary);
         }
 
+        // Stage 2 — RegisterBronze
         let mut registered = HashSet::new();
         let bronze_sources_registered = register_bronze_sources_for_dag_scoped(
             &self.ctx,

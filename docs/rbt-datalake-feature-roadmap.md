@@ -549,29 +549,30 @@ Host can quarantine failed entities and continue peers.
 
 ## 12. Feature RBT-A10 — Heterogeneous bronze → Arrow/Parquet adapters
 
+> **Status:** **Implemented** (adapter trait + registry, HTML/XML/robots, matrix + guide).  
+> Docs: [BRONZE_ADAPTER_MATRIX.md](BRONZE_ADAPTER_MATRIX.md) · [BRONZE_ADAPTERS.md](BRONZE_ADAPTERS.md).
+
 ### Goal
 
 Make non-parquet bronze a **first-class, documented, testable** path: HTML, XML, JSON, JSONL, protobuf, text (robots), etc. → Arrow batches → SQL → silver.
 
-### Current state
-
-`SourceFormat` enum + scanners; jshift for JSON edge paths; Arrow IPC; mixed quality across formats.
-
 ### Microtasks
 
-| ID | Task | Detail |
+| ID | Task | Status |
 |----|------|--------|
-| **RBT-A10.1** | Audit matrix | Table in docs: format × list_files × schema × empty × partition hive. Mark Done/Partial/Missing. |
-| **RBT-A10.2** | Adapter trait | `trait BronzeAdapter { fn name(&self); fn list(...); fn scan_batches(...) -> Stream; }` |
-| **RBT-A10.3** | Registry | Built-in adapters map; unknown format → `E_RBT_SOURCE_FORMAT`. |
-| **RBT-A10.4** | JSONL/JSON | Ensure edge extract + dtype; tests. |
-| **RBT-A10.5** | XML | Row projection via config xpath/jshift-like; or document “project pre-normalizes to jsonl”. If implementing: bounded memory. |
-| **RBT-A10.6** | HTML | Optional read as utf8 rows `{path, html}` for SQL regexp; not full DOM browser. |
-| **RBT-A10.7** | Protobuf | Existing max payload; document schema registry approach. |
-| **RBT-A10.8** | Text/robots | One row per file: path, body utf8, bytes. |
-| **RBT-A10.9** | Spill path | Large decode → temp Arrow IPC → DF (existing stream plan). |
-| **RBT-A10.10** | Example | Extend `complex_bronze_landing` or add adapter unit fixtures. |
-| **RBT-A10.11** | Docs guide | `docs/BRONZE_ADAPTERS.md` — how to add a new adapter in 1 PR. |
+| **RBT-A10.1** | Audit matrix | Done — `docs/BRONZE_ADAPTER_MATRIX.md` |
+| **RBT-A10.2** | Adapter trait | Done — `scan/adapter.rs` `BronzeAdapter` |
+| **RBT-A10.3** | Registry | Done — `adapter_for` / `E_RBT_SOURCE_FORMAT` |
+| **RBT-A10.4** | JSONL/JSON | Done — existing + jshift via adapter |
+| **RBT-A10.5** | XML | Done — whole-file opaque; structure via pre-normalize (documented) |
+| **RBT-A10.6** | HTML | Done — whole-file utf8 rows |
+| **RBT-A10.7** | Protobuf | Done — opaque + docs |
+| **RBT-A10.8** | Text/robots | Done — line txt + whole-file robots |
+| **RBT-A10.9** | Spill path | Done — existing Arrow IPC spill |
+| **RBT-A10.10** | Tests/fixtures | Done — adapter unit tests |
+| **RBT-A10.11** | Docs guide | Done — `docs/BRONZE_ADAPTERS.md` |
+
+Also: `ModelRole` vocabulary; execute Stage 1 uses `ops::plan_skip` (`engine/stages.rs`).
 
 ### Acceptance
 

@@ -74,7 +74,11 @@ pub enum ModelLayer {
 
 impl ModelLayer {
     pub fn from_name(name: &str) -> Self {
-        if name.starts_with("stg_") {
+        if name.starts_with("stg_")
+            || name.starts_with("seed_")
+            || name.starts_with("ref_")
+            || name.starts_with("lkp_")
+        {
             Self::Staging
         } else if name.starts_with("tf_") || name.starts_with("int_") {
             Self::Transform
@@ -86,6 +90,60 @@ impl ModelLayer {
             Self::Mart
         } else {
             Self::Transform
+        }
+    }
+}
+
+/// Silver/gold **role** vocabulary (RBT-A10) — orthogonal to medallion [`ModelLayer`].
+///
+/// Does not change materialization by itself; documents intent for humans and agents.
+/// Prefer gold prefixes (`dim_`/`fact_`/`obt_`) only on mart models.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRole {
+    /// Silver stage endpoint (`stg_*`): grain-honest usable table from bronze.
+    Stage,
+    /// Lookup / ref table (`ref_*` / `lkp_*`) — not a Kimball dim until gold.
+    Lookup,
+    /// Static seed (`seed_*`) small reference file.
+    Seed,
+    /// Intermediate transform (`tf_*` / `int_*`).
+    Transform,
+    /// Gold mart (`dim_*` / `fact_*` / `obt_*`).
+    Mart,
+    /// Unrecognized prefix — treat as transform.
+    Other,
+}
+
+impl ModelRole {
+    pub fn from_name(name: &str) -> Self {
+        if name.starts_with("stg_") {
+            Self::Stage
+        } else if name.starts_with("ref_") || name.starts_with("lkp_") {
+            Self::Lookup
+        } else if name.starts_with("seed_") {
+            Self::Seed
+        } else if name.starts_with("tf_") || name.starts_with("int_") {
+            Self::Transform
+        } else if name.starts_with("dim_")
+            || name.starts_with("fact_")
+            || name.starts_with("obt_")
+            || name.starts_with("fct_")
+        {
+            Self::Mart
+        } else {
+            Self::Other
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stage => "stage",
+            Self::Lookup => "lookup",
+            Self::Seed => "seed",
+            Self::Transform => "transform",
+            Self::Mart => "mart",
+            Self::Other => "other",
         }
     }
 }

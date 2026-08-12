@@ -122,7 +122,7 @@ pub use core::{
     ConsolidatePolicy, DagBuilder, DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe,
     FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode,
     Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode,
-    ModelRunResult, ModelSpec, ModelTests,
+    ModelRole, ModelRunResult, ModelSpec, ModelTests,
     OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
     RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
     ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
@@ -168,6 +168,9 @@ pub use measure::{
 pub use json::{JShiftExtractor, JsonExtractSpec};
 pub use ops::{
     keyed_upsert_model_spec, plan_skip, stage_model_spec, upsert_registry, SkipPlan,
+};
+pub use scan::adapter::{
+    adapter_for, builtin_adapters, read_with_adapter, BronzeAdapter,
 };
 pub use scan::{parse_hive_partitions, LakeScanner, ScanRequest};
 // parts re-exported above

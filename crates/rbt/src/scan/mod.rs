@@ -1,8 +1,12 @@
 //! `rbt::scan`: Multi-format bronze lake scanners producing Arrow `RecordBatch`es.
 //!
-//! Formats: JSONL (jshift), JSON, Parquet, CSV, Arrow IPC (file/stream), log, txt, TOML.
+//! Formats: JSONL (jshift), JSON, Parquet, CSV, Arrow IPC (file/stream), log, txt, TOML,
+//! protobuf, HTML, XML, robots (RBT-A10 adapters).
 //! Parts directories: [`parts`] for multi-file parquet tables (P6).
+//!
+//! Decode is pluggable via [`adapter::BronzeAdapter`]; see `docs/BRONZE_ADAPTERS.md`.
 
+pub mod adapter;
 pub mod parts;
 
 use crate::core::frontmatter::{SourceFormat, StagingFrontmatter};
@@ -418,39 +422,16 @@ impl LakeScanner {
     }
 
     fn read_file(&self, file_path: &Path, req: &ScanRequest) -> Result<Vec<RecordBatch>> {
-        match req.format {
-            SourceFormat::Parquet => read_parquet(file_path, None),
-            SourceFormat::Protobuf => Ok(vec![read_protobuf_opaque(
-                file_path,
-                req.protobuf_max_payload_bytes,
-            )?]),
-            SourceFormat::Csv => read_csv(file_path, None),
-            SourceFormat::Jsonl | SourceFormat::Json => {
-                if !self.paths.is_empty() {
-                    let schema = utf8_schema_from_paths(&self.paths);
-                    let bytes = std::fs::read(file_path)?;
-                    let extractor = crate::json::JShiftExtractor::new(self.paths.clone());
-                    // JSONL extractor works line-wise; for single JSON array, expand first
-                    if req.format == SourceFormat::Json {
-                        let expanded = expand_json_document_to_jsonl(&bytes)?;
-                        Ok(vec![extractor.extract_jsonl(&expanded, schema)?])
-                    } else {
-                        Ok(vec![extractor.extract_jsonl(&bytes, schema)?])
-                    }
-                } else {
-                    // Schema-free path: use Arrow JSON reader (line-delimited)
-                    read_json_arrow(file_path, req.format)
-                }
-            }
-            // Real lakes often write stream IPC with a `.arrow` extension.
-            SourceFormat::ArrowIpc | SourceFormat::ArrowIpcStream => read_arrow_ipc_auto(file_path),
-            SourceFormat::Log | SourceFormat::Txt => Ok(vec![read_line_oriented(file_path)?]),
-            SourceFormat::Toml => Ok(vec![read_toml(file_path, req.toml_rows_key.as_deref())?]),
+        // Prefer request paths; LakeScanner::paths is the legacy constructor field.
+        let mut req = req.clone();
+        if req.paths.is_empty() && !self.paths.is_empty() {
+            req.paths = self.paths.clone();
         }
+        adapter::read_with_adapter(file_path, &req)
     }
 }
 
-fn utf8_schema_from_paths(paths: &[String]) -> SchemaRef {
+pub(crate) fn utf8_schema_from_paths(paths: &[String]) -> SchemaRef {
     Arc::new(Schema::new(
         paths
             .iter()
@@ -459,7 +440,7 @@ fn utf8_schema_from_paths(paths: &[String]) -> SchemaRef {
     ))
 }
 
-fn expand_json_document_to_jsonl(bytes: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn expand_json_document_to_jsonl(bytes: &[u8]) -> Result<Vec<u8>> {
     let v: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| anyhow!("Invalid JSON document: {}", e))?;
     match v {
@@ -493,22 +474,9 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 
 fn extension_matches(format: SourceFormat, ext: &str) -> bool {
     let ext = ext.to_ascii_lowercase();
-    match format {
-        SourceFormat::Jsonl => matches!(ext.as_str(), "jsonl" | "ndjson"),
-        SourceFormat::Json => ext == "json",
-        SourceFormat::Parquet => matches!(ext.as_str(), "parquet" | "pq"),
-        SourceFormat::Csv => matches!(ext.as_str(), "csv" | "tsv"),
-        SourceFormat::ArrowIpc => matches!(ext.as_str(), "arrow" | "arrows" | "ipc" | "feather"),
-        SourceFormat::ArrowIpcStream => {
-            matches!(
-                ext.as_str(),
-                "arrow" | "arrows" | "ipc" | "arrows_stream" | "ipc_stream"
-            )
-        }
-        SourceFormat::Log => ext == "log",
-        SourceFormat::Txt => matches!(ext.as_str(), "txt" | "text" | "md"),
-        SourceFormat::Toml => ext == "toml",
-        SourceFormat::Protobuf => matches!(ext.as_str(), "pb" | "protobuf" | "protobin"),
+    match adapter::adapter_for(format) {
+        Ok(a) => a.extensions().iter().any(|e| *e == ext.as_str()),
+        Err(_) => false,
     }
 }
 
@@ -516,7 +484,7 @@ fn extension_matches(format: SourceFormat, ext: &str) -> bool {
 ///
 /// Typed message decode is intentionally deferred (schema registry / Rust models).
 /// `max_bytes` defaults to 1 GiB via project `scan.protobuf_max_payload_bytes`.
-fn read_protobuf_opaque(path: &Path, max_bytes: u64) -> Result<RecordBatch> {
+pub(crate) fn read_protobuf_opaque(path: &Path, max_bytes: u64) -> Result<RecordBatch> {
     let meta = std::fs::metadata(path).with_context(|| {
         format!(
             "E_RBT_PROTOBUF_IO: cannot stat protobuf file {}",
@@ -591,7 +559,7 @@ fn collect_files_for_format(
     );
 }
 
-fn read_parquet(path: &Path, projection: Option<SchemaRef>) -> Result<Vec<RecordBatch>> {
+pub(crate) fn read_parquet(path: &Path, projection: Option<SchemaRef>) -> Result<Vec<RecordBatch>> {
     let file = File::open(path)?;
     let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)?;
     let reader = if let Some(schema) = projection {
@@ -617,7 +585,7 @@ fn read_parquet(path: &Path, projection: Option<SchemaRef>) -> Result<Vec<Record
     Ok(batches)
 }
 
-fn read_csv(path: &Path, schema: Option<SchemaRef>) -> Result<Vec<RecordBatch>> {
+pub(crate) fn read_csv(path: &Path, schema: Option<SchemaRef>) -> Result<Vec<RecordBatch>> {
     let file = File::open(path)?;
     let mut batches = Vec::new();
     if let Some(schema) = schema {
@@ -643,7 +611,7 @@ fn read_csv(path: &Path, schema: Option<SchemaRef>) -> Result<Vec<RecordBatch>> 
     Ok(batches)
 }
 
-fn read_json_arrow(path: &Path, format: SourceFormat) -> Result<Vec<RecordBatch>> {
+pub(crate) fn read_json_arrow(path: &Path, format: SourceFormat) -> Result<Vec<RecordBatch>> {
     let data = std::fs::read(path)?;
     let data = if format == SourceFormat::Json {
         expand_json_document_to_jsonl(&data)?
@@ -688,7 +656,7 @@ fn read_arrow_ipc_stream(path: &Path) -> Result<Vec<RecordBatch>> {
 }
 
 /// Prefer random-access IPC file; fall back to stream (common for `.arrow` lake dumps).
-fn read_arrow_ipc_auto(path: &Path) -> Result<Vec<RecordBatch>> {
+pub(crate) fn read_arrow_ipc_auto(path: &Path) -> Result<Vec<RecordBatch>> {
     match read_arrow_ipc_file(path) {
         Ok(batches) => Ok(batches),
         Err(file_err) => read_arrow_ipc_stream(path).with_context(|| {
@@ -819,7 +787,7 @@ fn inject_source_path_column(batch: RecordBatch, file: &Path) -> Result<RecordBa
 
 /// Line-oriented bronze: `.log`, `.txt`, llms.txt-style docs.
 /// Schema: `line_no` Int64, `content` Utf8.
-fn read_line_oriented(path: &Path) -> Result<RecordBatch> {
+pub(crate) fn read_line_oriented(path: &Path) -> Result<RecordBatch> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut line_nos = Int64Builder::new();
@@ -844,7 +812,40 @@ fn read_line_oriented(path: &Path) -> Result<RecordBatch> {
     )?)
 }
 
-fn read_toml(path: &Path, rows_key: Option<&str>) -> Result<RecordBatch> {
+/// Whole-file UTF-8 bronze (HTML / XML / robots): one row per file.
+///
+/// Schema: `_source_path` Utf8, `{body_col}` Utf8, `byte_len` Int64.
+/// Not a DOM parser — hosts use SQL regexp or pre-normalize structured formats to JSONL.
+pub(crate) fn read_whole_file_utf8(path: &Path, body_col: &str) -> Result<RecordBatch> {
+    let bytes = std::fs::read(path).with_context(|| {
+        format!(
+            "E_RBT_BRONZE_IO: cannot read whole-file bronze {}",
+            path.display()
+        )
+    })?;
+    let body = String::from_utf8_lossy(&bytes);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("_source_path", DataType::Utf8, false),
+        Field::new(body_col, DataType::Utf8, false),
+        Field::new("byte_len", DataType::Int64, false),
+    ]));
+    let mut path_b = StringBuilder::new();
+    let mut body_b = StringBuilder::new();
+    let mut len_b = Int64Builder::new();
+    path_b.append_value(path.to_string_lossy().as_ref());
+    body_b.append_value(body.as_ref());
+    len_b.append_value(bytes.len() as i64);
+    Ok(RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(path_b.finish()) as ArrayRef,
+            Arc::new(body_b.finish()) as ArrayRef,
+            Arc::new(len_b.finish()) as ArrayRef,
+        ],
+    )?)
+}
+
+pub(crate) fn read_toml(path: &Path, rows_key: Option<&str>) -> Result<RecordBatch> {
     let text = std::fs::read_to_string(path)?;
     let value: toml::Value = text
         .parse()

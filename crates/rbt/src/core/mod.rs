@@ -17,7 +17,8 @@ pub use contracts::{
     ContractDiffColumn, ContractDiffReport, EnumContract, EnumProbe, OnNewPolicy,
 };
 pub use dag::{
-    parse_materialization_hint, Materialization, ModelDag, ModelLayer, ModelNode, OutputFormat,
+    parse_materialization_hint, Materialization, ModelDag, ModelLayer, ModelNode, ModelRole,
+    OutputFormat,
 };
 pub use dag_builder::{DagBuilder, ModelSpec};
 pub use frontmatter::{

@@ -779,6 +779,9 @@ Host can quarantine failed entities and continue peers.
 
 ## 12. Feature RBT-A10 — Heterogeneous bronze → Arrow/Parquet adapters
 
+> **Status:** **Implemented** — see [BRONZE_ADAPTERS.md](../BRONZE_ADAPTERS.md),
+> [BRONZE_ADAPTER_MATRIX.md](../BRONZE_ADAPTER_MATRIX.md), `scan/adapter.rs`.
+
 ### Goal
 
 Make non-parquet bronze a **first-class, documented, testable** path: HTML, XML, JSON, JSONL, protobuf, text (robots), etc. → Arrow batches → SQL → silver.

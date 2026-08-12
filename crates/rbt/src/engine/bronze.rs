@@ -451,7 +451,7 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
     {
         return true;
     }
-    // Nested hive dirs, stream IPC, and opaque protobuf need the scan path.
+    // Nested hive dirs, stream IPC, opaque/binary, and whole-file text need scan path.
     matches!(
         format,
         SourceFormat::Log
@@ -460,6 +460,9 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
             | SourceFormat::ArrowIpc
             | SourceFormat::ArrowIpcStream
             | SourceFormat::Protobuf
+            | SourceFormat::Html
+            | SourceFormat::Xml
+            | SourceFormat::Robots
     )
 }
 

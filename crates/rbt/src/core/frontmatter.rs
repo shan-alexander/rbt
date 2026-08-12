@@ -36,7 +36,7 @@ impl fmt::Display for BronzeCheckMode {
     }
 }
 
-/// Supported bronze file formats for staging lake scans.
+/// Supported bronze file formats for staging lake scans (RBT-A10 adapter registry).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceFormat {
@@ -65,9 +65,37 @@ pub enum SourceFormat {
     /// Typed decode of domain messages is a later step (Rust models / schema registry).
     #[serde(alias = "pb", alias = "proto")]
     Protobuf,
+    /// Whole-file HTML as one row (`html` Utf8 + path/len) for SQL regexp — not a browser.
+    Html,
+    /// Whole-file XML as one row (`xml` Utf8). Structure: pre-normalize to JSONL or SQL.
+    Xml,
+    /// Whole-file robots.txt-style body (`body` Utf8) — one row per file.
+    #[serde(alias = "robots_txt")]
+    Robots,
 }
 
 impl SourceFormat {
+    /// All formats (docs, registry exhaustiveness tests).
+    pub const ALL: &'static [SourceFormat] = &[
+        Self::Jsonl,
+        Self::Json,
+        Self::Parquet,
+        Self::Csv,
+        Self::ArrowIpc,
+        Self::ArrowIpcStream,
+        Self::Log,
+        Self::Txt,
+        Self::Toml,
+        Self::Protobuf,
+        Self::Html,
+        Self::Xml,
+        Self::Robots,
+    ];
+
+    pub fn all_names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|f| f.as_str()).collect()
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Jsonl => "jsonl",
@@ -80,6 +108,9 @@ impl SourceFormat {
             Self::Txt => "txt",
             Self::Toml => "toml",
             Self::Protobuf => "protobuf",
+            Self::Html => "html",
+            Self::Xml => "xml",
+            Self::Robots => "robots",
         }
     }
 
@@ -101,6 +132,9 @@ impl SourceFormat {
             "txt" | "text" | "md" => Some(Self::Txt),
             "toml" => Some(Self::Toml),
             "pb" | "protobuf" | "protobin" => Some(Self::Protobuf),
+            "html" | "htm" => Some(Self::Html),
+            "xml" => Some(Self::Xml),
+            "robots" => Some(Self::Robots),
             _ => None,
         }
     }
@@ -119,9 +153,13 @@ impl SourceFormat {
             "txt" | "text" => Ok(Self::Txt),
             "toml" => Ok(Self::Toml),
             "protobuf" | "pb" | "proto" | "protobin" => Ok(Self::Protobuf),
+            "html" | "htm" => Ok(Self::Html),
+            "xml" => Ok(Self::Xml),
+            "robots" | "robots_txt" => Ok(Self::Robots),
             other => bail!(
-                "Unknown source_format '{}'. Expected one of: jsonl, json, parquet, csv, arrow_ipc, arrow_ipc_stream, log, txt, toml, protobuf",
-                other
+                "E_RBT_SOURCE_FORMAT: unknown source_format '{}'. Expected one of: {}",
+                other,
+                Self::all_names().join(", ")
             ),
         }
     }
