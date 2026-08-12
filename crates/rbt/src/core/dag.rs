@@ -148,11 +148,34 @@ impl ModelRole {
     }
 }
 
+/// How a DAG node produces Arrow (ADR-003 Design A SQL vs Design B Rust).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelKind {
+    /// SQL text → DataFusion (default file models).
+    #[default]
+    Sql,
+    /// Host-registered [`crate::engine::rust_model::RustModel`] (Design B).
+    Rust,
+}
+
+impl ModelKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sql => "sql",
+            Self::Rust => "rust",
+        }
+    }
+}
+
 /// Pipeline Model Node definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelNode {
     pub name: String,
     pub description: Option<String>,
+    /// Model authoring kind (SQL default; Rust = Design B host node).
+    #[serde(default)]
+    pub kind: ModelKind,
     pub raw_sql: String,
     pub compiled_sql: String,
     pub materialization: Materialization,
@@ -221,6 +244,7 @@ impl ModelDag {
         let node = ModelNode {
             name: name.clone(),
             description,
+            kind: ModelKind::Sql,
             raw_sql: raw_sql.to_string(),
             compiled_sql,
             materialization,

@@ -116,9 +116,9 @@ SQL: `{{ ref() }}` / `{{ source() }}`. Rust models: explicit `refs` / `sources` 
 |-------|-------------|--------|
 | Document ADR | Seams designed | Done |
 | Design A MVP | Builtin + register path | **Shipped 0.5.0** — `rbt_upper` / `lower` / `trim` / `nullif_empty` |
-| Design B MVP | `RustModel` + registry; materialize + ref | Planned |
-| Project extension crate pattern | Sample + `output_schema` | Planned |
-| Stream outputs; optional Polars | Large-batch safe | Planned |
+| Design B MVP | `RustModel` + registry; materialize + ref | **Shipped** (B1–B2): `ModelKind::Rust`, `ModelSpec::rust`, `with_rust_model`, table/keyed_upsert parquet |
+| Project extension crate pattern | Sample + `output_schema` | Partial — library registry pattern live; file frontend later |
+| Stream outputs; optional Polars | Large-batch safe | Planned (B5) |
 | Optional `cdylib`; table UDFs | Plugin policy | Deferred |
 
 **Do not block** Iceberg SoR, bronze hardening, or memory-honest materialize on Design B.

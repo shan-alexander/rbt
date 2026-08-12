@@ -97,6 +97,7 @@ Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + worksp
 | Stage re-entry | `stage_register_bronze`, `stage_execute_tiers`, `stage_write_receipt` |
 | Host UDFs | `UdfPack`, `RbtEngineBuilder::with_udf_pack` ([ADR-008](docs/adr/ADR_008_UDF_HOST_SURFACE.md)) |
 | Bronze adapters | builtins + `register_host_adapter` / `register_named_adapter` — [BRONZE_ADAPTERS.md](docs/BRONZE_ADAPTERS.md) |
+| Design B Rust models | `RustModel` + `ModelSpec::rust` — whole-node Arrow transforms in the same DAG ([ADR-003](docs/adr/ADR_003_UDF_RSMODELS.md)) |
 
 ## CLI
 

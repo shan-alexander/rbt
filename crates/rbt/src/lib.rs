@@ -93,6 +93,7 @@
 //!
 //! Lake helpers: [`ops`] (`plan_skip`, `stage_model_spec`, `upsert_registry`).
 //! Bronze adapters: [`BronzeAdapter`], [`adapter_for`], [`read_with_adapter`].
+//! Design B Rust models: [`RustModel`], [`ModelSpec::rust`], [`RbtEngineBuilder::with_rust_model`].
 //!
 //! ## Run scope (A1)
 //!
@@ -122,7 +123,7 @@ pub use core::{
     BronzeValidationReport, ColumnMeta, ContractDiffColumn, ContractDiffReport, ContractsConfig,
     ConsolidatePolicy, DagBuilder, DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe,
     FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode,
-    Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode,
+    Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelKind, ModelLayer, ModelNode,
     ModelRole, ModelRunResult, ModelSpec, ModelTests,
     OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
     RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
@@ -139,6 +140,12 @@ pub use engine::{
     BronzeTableProvider, DagExecutionSummary, PreviewResult, RbtEngineBuilder,
     TransformationEngine,
 };
+pub use engine::rust_model::{
+    empty_batch_for_schema, schema_from_fields, validate_batches_schema, RustModel,
+    RustModelContext, RustModelOutput, RustModelRegistry,
+};
+/// Re-export for Design B implementors: `#[async_trait] impl RustModel for …`.
+pub use async_trait::async_trait;
 pub use engine::udf::{
     register_builtin_udfs, register_scalar_udf, register_udf_pack, UdfPack, BUILTIN_UDF_NAMES,
 };

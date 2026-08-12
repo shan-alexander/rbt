@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (Design B — Rust model nodes, ADR-003 B1–B2)
+
+- **`ModelKind::Rust`** on `ModelNode`; SQL remains default for file projects
+- **`RustModel` trait** (`async fn execute`) + `RustModelContext` / `RustModelOutput::Batches`
+- **Registry:** `RbtEngineBuilder::with_rust_model`, `TransformationEngine::register_rust_model`
+- **`ModelSpec::rust(name).refs([...]).sources([...])`** for programmatic DAGs
+- Materialize: **table** and **keyed_upsert** → Parquet; same `ref()` registration as SQL
+- Fail-closed: `E_RBT_RUST_MODEL`, `E_RBT_RUST_SCHEMA`, `E_RBT_RUST_MAT`
+- Re-export `async_trait` for host implementors
+- Plan: [docs/plans/design-b-rust-models.md](docs/plans/design-b-rust-models.md)
+
 ### Added (post-0.9.0 embed polish)
 
 - **L1.6** — [docs/EMBEDDING.md](docs/EMBEDDING.md): single-ABI rule, workspace pin recipe, feature profiles
@@ -15,7 +26,6 @@ All notable changes to this project are documented in this file.
 - **L1.9** — Stage re-entry: `stage_register_bronze`, `stage_execute_tiers` (`ExecuteTiersOptions`),
   `stage_write_receipt` (skip Stage 1 short-circuit; force model subgraph)
 - Roadmap: deferred **schema_digest / contract_version convention** (consider later)
-- Plan draft: [Design B Rust models](docs/plans/design-b-rust-models.md)
 
 ## [0.9.0] — 2026-08-12
 

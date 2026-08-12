@@ -23,15 +23,16 @@
 //! # }
 //! ```
 
-use super::dag::{Materialization, ModelDag, ModelLayer, ModelNode, OutputFormat};
+use super::dag::{Materialization, ModelDag, ModelKind, ModelLayer, ModelNode, OutputFormat};
 use super::frontmatter::StagingFrontmatter;
-use super::parser::SqlModelParser;
+use super::parser::{DependencyRef, SqlModelParser};
 use anyhow::{bail, Context, Result};
 
 /// Owned specification for one model node before it joins a [`ModelDag`].
 #[derive(Debug, Clone)]
 pub struct ModelSpec {
     pub name: String,
+    pub kind: ModelKind,
     pub raw_sql: String,
     pub materialization: Materialization,
     pub output_format: OutputFormat,
@@ -43,6 +44,10 @@ pub struct ModelSpec {
     pub compiled_sql_override: Option<String>,
     /// Catalog prefix for `{{ ref() }}` / `{{ source() }}` compile (default `"rbt"`).
     pub catalog_prefix: String,
+    /// Explicit model deps for Design B Rust nodes (and optional SQL override).
+    pub explicit_refs: Vec<String>,
+    /// Explicit bronze `source(schema, table)` deps for Rust nodes.
+    pub explicit_sources: Vec<(String, String)>,
 }
 
 impl ModelSpec {
@@ -50,6 +55,7 @@ impl ModelSpec {
     pub fn sql(name: impl Into<String>, raw_sql: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            kind: ModelKind::Sql,
             raw_sql: raw_sql.into(),
             materialization: Materialization::Table,
             output_format: OutputFormat::Parquet,
@@ -59,7 +65,48 @@ impl ModelSpec {
             description: None,
             compiled_sql_override: None,
             catalog_prefix: "rbt".into(),
+            explicit_refs: Vec::new(),
+            explicit_sources: Vec::new(),
         }
+    }
+
+    /// Design B Rust model — host implements [`crate::RustModel`] with the same `name`.
+    ///
+    /// Declare upstream models with [`.refs`](Self::refs); bronze via [`.sources`](Self::sources).
+    pub fn rust(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            kind: ModelKind::Rust,
+            raw_sql: String::new(),
+            materialization: Materialization::Table,
+            output_format: OutputFormat::Parquet,
+            output_path: None,
+            layer: None,
+            frontmatter: None,
+            description: None,
+            compiled_sql_override: None,
+            catalog_prefix: "rbt".into(),
+            explicit_refs: Vec::new(),
+            explicit_sources: Vec::new(),
+        }
+    }
+
+    /// Upstream model names this node depends on (`ref` edges).
+    pub fn refs(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.explicit_refs = names.into_iter().map(|s| s.into()).collect();
+        self
+    }
+
+    /// Bronze `source(schema, table)` dependencies for Rust models.
+    pub fn sources(
+        mut self,
+        sources: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        self.explicit_sources = sources
+            .into_iter()
+            .map(|(a, b)| (a.into(), b.into()))
+            .collect();
+        self
     }
 
     pub fn materialization(mut self, m: Materialization) -> Self {
@@ -109,6 +156,45 @@ impl ModelSpec {
             bail!("E_RBT_DAG_BUILDER: model name must be non-empty");
         }
 
+        let layer = self.layer.unwrap_or_else(|| ModelLayer::from_name(&name));
+
+        if self.kind == ModelKind::Rust {
+            let mut dependencies: Vec<DependencyRef> = self
+                .explicit_refs
+                .into_iter()
+                .map(DependencyRef::Model)
+                .collect();
+            for (source_name, table_name) in self.explicit_sources {
+                dependencies.push(DependencyRef::Source {
+                    source_name,
+                    table_name,
+                });
+            }
+            let description = self
+                .description
+                .or_else(|| self.frontmatter.as_ref().and_then(|f| f.description.clone()));
+            let materialization = self
+                .frontmatter
+                .as_ref()
+                .and_then(|f| f.materialization.as_deref())
+                .map(super::dag::parse_materialization_hint)
+                .transpose()?
+                .unwrap_or(self.materialization);
+            return Ok(ModelNode {
+                name,
+                description,
+                kind: ModelKind::Rust,
+                raw_sql: String::new(),
+                compiled_sql: String::new(),
+                materialization,
+                output_format: self.output_format,
+                output_path: self.output_path,
+                dependencies,
+                layer,
+                frontmatter: self.frontmatter,
+            });
+        }
+
         let (parsed_fm, pure_sql) = SqlModelParser::parse_frontmatter(&self.raw_sql)
             .map_err(|e| anyhow::anyhow!("E_RBT_DAG_BUILDER: model '{name}': {e}"))?;
 
@@ -124,8 +210,23 @@ impl ModelSpec {
             .description
             .or_else(|| frontmatter.as_ref().and_then(|f| f.description.clone()));
 
-        // Deps always come from pre-compile SQL (jinja `ref`/`source`); override only swaps body.
-        let dependencies = SqlModelParser::extract_dependencies(&pure_sql).unwrap_or_default();
+        // Deps from SQL jinja + any explicit_refs (host may add extra edges).
+        let mut dependencies = SqlModelParser::extract_dependencies(&pure_sql).unwrap_or_default();
+        for r in self.explicit_refs {
+            let d = DependencyRef::Model(r);
+            if !dependencies.contains(&d) {
+                dependencies.push(d);
+            }
+        }
+        for (source_name, table_name) in self.explicit_sources {
+            let d = DependencyRef::Source {
+                source_name,
+                table_name,
+            };
+            if !dependencies.contains(&d) {
+                dependencies.push(d);
+            }
+        }
 
         let compiled_sql = match self.compiled_sql_override {
             Some(c) => c,
@@ -133,11 +234,10 @@ impl ModelSpec {
                 .with_context(|| format!("E_RBT_DAG_BUILDER: compile SQL for model '{name}'"))?,
         };
 
-        let layer = self.layer.unwrap_or_else(|| ModelLayer::from_name(&name));
-
         Ok(ModelNode {
             name,
             description,
+            kind: ModelKind::Sql,
             raw_sql: self.raw_sql,
             compiled_sql,
             materialization,
@@ -214,6 +314,30 @@ mod tests {
         assert_eq!(tiers.len(), 2);
         assert_eq!(tiers[0][0].name, "stg_a");
         assert_eq!(tiers[1][0].name, "tf_b");
+        Ok(())
+    }
+
+    #[test]
+    fn builder_rust_model_refs() -> Result<()> {
+        use super::super::dag::ModelKind;
+        let dag = DagBuilder::new()
+            .model(
+                ModelSpec::sql("stg_a", "SELECT 1 AS id")
+                    .materialization(Materialization::Table)
+                    .output_path("/tmp/stg_a.parquet"),
+            )
+            .model(
+                ModelSpec::rust("tf_rust")
+                    .refs(["stg_a"])
+                    .layer(ModelLayer::Transform)
+                    .output_path("/tmp/tf_rust.parquet"),
+            )
+            .build()?;
+        let idx = dag.node_map["tf_rust"];
+        assert_eq!(dag.graph[idx].kind, ModelKind::Rust);
+        let tiers = dag.execution_tiers()?;
+        assert_eq!(tiers[0][0].name, "stg_a");
+        assert_eq!(tiers[1][0].name, "tf_rust");
         Ok(())
     }
 

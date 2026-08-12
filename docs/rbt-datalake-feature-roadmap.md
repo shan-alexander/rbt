@@ -602,6 +602,15 @@ Do **not** hardcode host vocabulary into core.
 | **L1.6** | Single-ABI embed guide + workspace recipe | Done — `docs/EMBEDDING.md` |
 | **L1.9** | Stage re-entry: register_bronze / execute_tiers / write_receipt | Done — `engine/stages.rs` + engine methods |
 
+## 12d. Design B — Rust models (ADR-003)
+
+| ID | Task | Status |
+|----|------|--------|
+| **B1** | `ModelKind`, `ModelSpec::rust`, engine registry | Done |
+| **B2** | Execute + table/keyed_upsert parquet + SQL `ref` | Done |
+| **B3** | Parts strategies for Rust outputs | Planned |
+| **B4–B6** | Receipt kind, stream output, file discovery | Planned — see [design-b-rust-models.md](plans/design-b-rust-models.md) |
+
 ---
 
 ## 13. Feature RBT-A11 — Iceberg snapshot honesty

@@ -1,10 +1,15 @@
 //! `rbt::engine`: Apache DataFusion query engine integration, bronze registration, and DAG execution.
 
 pub mod bronze;
+pub mod rust_model;
 pub mod stages;
 pub mod udf;
 
-use crate::core::dag::{Materialization, ModelDag, ModelNode, OutputFormat};
+use crate::core::dag::{Materialization, ModelDag, ModelKind, ModelNode, OutputFormat};
+use crate::engine::rust_model::{
+    empty_batch_for_schema, validate_batches_schema, RustModel, RustModelContext, RustModelOutput,
+    RustModelRegistry,
+};
 use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
 };
@@ -17,8 +22,8 @@ use crate::materializer::{
     materialize_incremental_append_stream, materialize_keyed_upsert,
     materialize_scoped_replace_stream, materialize_table_parts_only_stream, resolve_part_keys,
     scope_part_id, uses_parts_directory, materialize_stream, new_wap_run_id, sibling_iceberg_dir,
-    stamp_batch, wap_publish, LineageStamp, MaterializeWriteOptions, MultiFormatWriter,
-    StreamWriteStats, WapModelPaths,
+    stamp_batch, wap_publish, write_empty_parquet, write_parquet_batches_atomic, LineageStamp,
+    MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
 };
 use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
@@ -110,6 +115,8 @@ pub struct RbtEngineBuilder {
     catalogs: Vec<(String, Arc<dyn Catalog>)>,
     /// Host UDF registration (Design A / L1.5). Runs after builtins on build.
     udf_hooks: Vec<Box<dyn FnOnce(&SessionContext) -> Result<()> + Send>>,
+    /// Design B Rust models registered at build.
+    rust_models: Vec<Arc<dyn RustModel>>,
 }
 
 impl Default for RbtEngineBuilder {
@@ -118,6 +125,7 @@ impl Default for RbtEngineBuilder {
             #[cfg(feature = "iceberg")]
             catalogs: Vec::new(),
             udf_hooks: Vec::new(),
+            rust_models: Vec::new(),
         }
     }
 }
@@ -154,10 +162,28 @@ impl RbtEngineBuilder {
         self.with_udfs(move |ctx| pack.register(ctx))
     }
 
+    /// Register a Design B [`RustModel`] (host whole-node transform).
+    pub fn with_rust_model<M>(mut self, model: M) -> Self
+    where
+        M: RustModel + 'static,
+    {
+        self.rust_models.push(Arc::new(model));
+        self
+    }
+
+    /// Register an already-`Arc`'d Design B model.
+    pub fn with_rust_model_arc(mut self, model: Arc<dyn RustModel>) -> Self {
+        self.rust_models.push(model);
+        self
+    }
+
     pub async fn build(self) -> Result<TransformationEngine> {
         let engine = TransformationEngine::new();
         for hook in self.udf_hooks {
             hook(&engine.ctx)?;
+        }
+        for m in self.rust_models {
+            engine.register_rust_model(m)?;
         }
         #[cfg(feature = "iceberg")]
         for (name, cat) in self.catalogs {
@@ -173,6 +199,8 @@ pub struct TransformationEngine {
     ///
     /// Avoids re-reading `rbt_project.yml` once per bronze model on large DAGs.
     project_cache: Mutex<Option<(PathBuf, Arc<RbtProjectConfig>)>>,
+    /// Design B host Rust models (name → impl).
+    rust_models: Mutex<RustModelRegistry>,
 }
 
 impl Default for TransformationEngine {
@@ -190,6 +218,191 @@ impl TransformationEngine {
         Self {
             ctx,
             project_cache: Mutex::new(None),
+            rust_models: Mutex::new(RustModelRegistry::new()),
+        }
+    }
+
+    /// Register a Design B [`RustModel`] on the live engine.
+    pub fn register_rust_model(&self, model: Arc<dyn RustModel>) -> Result<()> {
+        self.rust_models
+            .lock()
+            .map_err(|_| anyhow::anyhow!("E_RBT_ENGINE: rust model registry lock poisoned"))?
+            .register(model)
+    }
+
+    /// Drop all Design B models (tests / reconfiguration).
+    pub fn clear_rust_models(&self) {
+        if let Ok(mut g) = self.rust_models.lock() {
+            g.clear();
+        }
+    }
+
+    fn lookup_rust_model(&self, name: &str) -> Result<Arc<dyn RustModel>> {
+        self.rust_models
+            .lock()
+            .map_err(|_| anyhow::anyhow!("E_RBT_ENGINE: rust model registry lock poisoned"))?
+            .get(name)
+    }
+
+    /// Design B: execute host Rust model → batches → materialize (table / keyed_upsert parquet).
+    async fn materialize_rust_model(
+        &self,
+        model: &ModelNode,
+        project_dir: &Path,
+        scope: &RunScope,
+        write_path: &Path,
+        write_opts: &MaterializeWriteOptions,
+        assertions: &[crate::testing::Assertion],
+        fail_on_error: bool,
+        run_id: &str,
+        contract: &str,
+        fp: &str,
+    ) -> Result<(
+        usize,
+        Option<StreamWriteStats>,
+        Option<crate::materializer::UpsertStats>,
+    )> {
+        let rust = self.lookup_rust_model(&model.name)?;
+        let declared = rust.output_schema();
+        let ctx = RustModelContext {
+            session: &self.ctx,
+            project_dir,
+            scope,
+            model_name: &model.name,
+            run_id,
+            contract_version: contract,
+            bronze_fingerprint: Some(fp),
+        };
+        let out = rust
+            .execute(&ctx)
+            .await
+            .with_context(|| format!("E_RBT_RUST_MODEL: execute '{}'", model.name))?;
+        let mut batches = match out {
+            RustModelOutput::Batches(b) => b,
+        };
+        validate_batches_schema(&batches, declared.as_ref()).with_context(|| {
+            format!("E_RBT_RUST_SCHEMA: model '{}'", model.name)
+        })?;
+        if batches.is_empty() {
+            batches.push(empty_batch_for_schema(declared.clone())?);
+        }
+        if let Some(ref lin) = write_opts.lineage {
+            batches = batches
+                .iter()
+                .map(|b| stamp_batch(b, lin))
+                .collect::<Result<Vec<_>>>()?;
+        }
+        // Optional frontmatter declared schema merge
+        if let Some(ref d) = write_opts.declared_schema {
+            batches = batches
+                .iter()
+                .map(|b| crate::core::schema_emit::ensure_declared_columns(b, d.as_ref()))
+                .collect::<Result<Vec<_>>>()?;
+        }
+
+        // Assertions over batches (same policy as SQL collect).
+        if !assertions.is_empty() {
+            let validation =
+                crate::testing::RecordBatchValidator::validate_batches(&batches, assertions);
+            if validation.failed_assertions > 0 && fail_on_error {
+                bail!(
+                    "E_RBT_TEST: model '{}': {} assertion(s) failed (Design B): {}",
+                    model.name,
+                    validation.failed_assertions,
+                    validation.errors.join("; ")
+                );
+            }
+        }
+
+        match (
+            &model.materialization,
+            &model.output_format,
+        ) {
+            (
+                Materialization::Table,
+                OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+            ) => {
+                let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                if rows == 0 {
+                    write_empty_parquet(declared, write_path, write_opts).with_context(|| {
+                        format!(
+                            "E_RBT_RUST_MAT: empty parquet for Rust model '{}'",
+                            model.name
+                        )
+                    })?;
+                } else {
+                    write_parquet_batches_atomic(&batches, write_path, write_opts).with_context(
+                        || {
+                            format!(
+                                "E_RBT_RUST_MAT: parquet write for Rust model '{}'",
+                                model.name
+                            )
+                        },
+                    )?;
+                }
+                tracing::info!(
+                    model = %model.name,
+                    rows,
+                    "Design B Rust model materialize (table parquet)"
+                );
+                Ok((
+                    rows,
+                    Some(StreamWriteStats {
+                        rows,
+                        batches: batches.len(),
+                        path: write_path.to_path_buf(),
+                        bytes_written: std::fs::metadata(write_path).map(|m| m.len()).unwrap_or(0),
+                        validation: crate::testing::ValidationResult {
+                            total_rows: rows,
+                            passed_assertions: assertions.len(),
+                            failed_assertions: 0,
+                            errors: Vec::new(),
+                        },
+                    }),
+                    None,
+                ))
+            }
+            (
+                Materialization::KeyedUpsert,
+                OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
+            ) => {
+                let fm = model.frontmatter.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "E_RBT_UPSERT_KEY: Rust model '{}': keyed_upsert requires frontmatter \
+                         with unique_key",
+                        model.name
+                    )
+                })?;
+                let upsert_cfg = fm.keyed_upsert_config().with_context(|| {
+                    format!(
+                        "E_RBT_UPSERT_KEY: Rust model '{}' keyed_upsert config invalid",
+                        model.name
+                    )
+                })?;
+                let (stats, upsert_stats) = materialize_keyed_upsert(
+                    write_path,
+                    &batches,
+                    &upsert_cfg,
+                    write_opts,
+                    assertions,
+                )
+                .with_context(|| {
+                    format!(
+                        "E_RBT_UPSERT_SCHEMA: Rust model '{}' keyed_upsert failed",
+                        model.name
+                    )
+                })?;
+                Ok((stats.rows, Some(stats), Some(upsert_stats)))
+            }
+            (mat, fmt) => {
+                bail!(
+                    "E_RBT_RUST_MAT: Rust model '{}' does not support materialization={:?} \
+                     output_format={:?} in Design B v1 (use table or keyed_upsert + parquet)",
+                    model.name,
+                    mat,
+                    fmt
+                );
+            }
         }
     }
 
@@ -733,6 +946,25 @@ impl TransformationEngine {
                 };
 
                 let mut upsert_for_model: Option<crate::materializer::UpsertStats> = None;
+                // Design B: host Rust model (skip SQL path).
+                let (row_count, write_stats) = if model.kind == ModelKind::Rust {
+                    let (rows, stats, upsert) = self
+                        .materialize_rust_model(
+                            model,
+                            project_dir,
+                            scope,
+                            &write_path,
+                            &write_opts,
+                            &assertions,
+                            fail_on_error,
+                            &run_id,
+                            &contract,
+                            &fp,
+                        )
+                        .await?;
+                    upsert_for_model = upsert;
+                    (rows, stats)
+                } else {
                 let (row_count, write_stats) = match (
                     &model.materialization,
                     &model.output_format,
@@ -989,6 +1221,8 @@ impl TransformationEngine {
                         .await?;
                         (rows, None)
                     }
+                };
+                (row_count, write_stats)
                 };
 
                 // WAP publish after successful write+audit (stream assertions already applied).
@@ -2050,6 +2284,108 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
             .await?;
         assert!(dest.exists(), "always must rebuild monolith from parts");
         assert!(parts_dir_for_parquet(&dest).is_dir());
+        Ok(())
+    }
+
+    /// Design B: SQL stg → Rust tf → SQL mart via ref().
+    #[tokio::test]
+    async fn design_b_sql_rust_sql_ref_chain() -> Result<()> {
+        use crate::core::dag::{Materialization, ModelKind, ModelLayer};
+        use crate::engine::rust_model::{RustModel, RustModelContext, RustModelOutput};
+        use crate::{DagBuilder, ModelSpec, RbtEngineBuilder, RbtProjectConfig, RunScope};
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        struct DoubleIds;
+        #[async_trait::async_trait]
+        impl RustModel for DoubleIds {
+            fn name(&self) -> &str {
+                "tf_double"
+            }
+            fn output_schema(&self) -> arrow::datatypes::SchemaRef {
+                Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+            }
+            async fn execute(&self, ctx: &RustModelContext<'_>) -> Result<RustModelOutput> {
+                let df = ctx.session.sql(r#"SELECT id FROM "stg_seed""#).await?;
+                let batches = df.collect().await?;
+                let mut ids = Vec::new();
+                for b in batches {
+                    let col = b
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .ok_or_else(|| anyhow::anyhow!("expected Int64 id"))?;
+                    for i in 0..col.len() {
+                        ids.push(col.value(i) * 2);
+                    }
+                }
+                let batch = RecordBatch::try_new(
+                    self.output_schema(),
+                    vec![Arc::new(Int64Array::from(ids))],
+                )?;
+                Ok(RustModelOutput::Batches(vec![batch]))
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let stg = temp.path().join("stg_seed.parquet");
+        let tf = temp.path().join("tf_double.parquet");
+        let mart = temp.path().join("obt_out.parquet");
+
+        // catalog_prefix "" → bare table names (same as file-project DF session tables).
+        let dag = DagBuilder::new()
+            .model(
+                ModelSpec::sql("stg_seed", "SELECT 1 AS id UNION ALL SELECT 2 AS id")
+                    .catalog_prefix("")
+                    .layer(ModelLayer::Staging)
+                    .materialization(Materialization::Table)
+                    .output_path(stg.to_string_lossy()),
+            )
+            .model(
+                ModelSpec::rust("tf_double")
+                    .refs(["stg_seed"])
+                    .layer(ModelLayer::Transform)
+                    .materialization(Materialization::Table)
+                    .output_path(tf.to_string_lossy()),
+            )
+            .model(
+                ModelSpec::sql(
+                    "obt_out",
+                    r#"SELECT id FROM {{ ref('tf_double') }} WHERE id > 0"#,
+                )
+                .catalog_prefix("")
+                .layer(ModelLayer::Mart)
+                .materialization(Materialization::Table)
+                .output_path(mart.to_string_lossy()),
+            )
+            .build()?;
+        assert_eq!(dag.graph[dag.node_map["tf_double"]].kind, ModelKind::Rust);
+
+        let engine = RbtEngineBuilder::new()
+            .with_rust_model(DoubleIds)
+            .build()
+            .await?;
+        let cfg = RbtProjectConfig::default();
+        let scope = RunScope::default();
+        let summary = engine
+            .execute_dag_with_scope(&dag, temp.path(), temp.path(), &cfg, &scope)
+            .await?;
+        assert_eq!(summary.models_executed, 3);
+        assert!(tf.exists());
+        assert!(mart.exists());
+        let out = load_parquet_batches(&mart)?;
+        let n: usize = out.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(n, 2);
+        let col = out[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let mut vals: Vec<i64> = (0..col.len()).map(|i| col.value(i)).collect();
+        vals.sort();
+        assert_eq!(vals, vec![2, 4]);
         Ok(())
     }
 }
