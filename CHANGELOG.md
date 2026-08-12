@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-12
+
+### Added (RBT-L1 — embeddable library surface)
+
+First-class **library embed** path for hosts that do not want a `models/` tree or the full CLI/Iceberg default stack. ADRs: [ADR-004](docs/adr/ADR_004_FEATURE_FLAGS.md) … [ADR-008](docs/adr/ADR_008_UDF_HOST_SURFACE.md). Survey: [library-embedding-and-dag-crate-survey](docs/analysis/library-embedding-and-dag-crate-survey.md).
+
+- **L1.1 — Cargo features** — `default = [sql, parquet, jshift, iceberg, cli]`. Embedders opt down:
+  ```toml
+  rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
+  ```
+  `cli` gates the `rbt` binary; `iceberg` / `jshift` gate optional deps.
+- **L1.2 — Data stack re-exports** — `rbt::arrow`, `rbt::parquet`, `rbt::datafusion` (and `rbt::iceberg` when enabled) so hosts share one monomorphic ABI with the engine.
+- **L1.3 — `DagBuilder` / `ModelSpec`** — programmatic `ModelDag` IR without a project directory; same execution path as file projects.
+- **L1.4 — Lake ops façade** — `ops::plan_skip`, `stage_model_spec`, `upsert_registry` / `keyed_upsert_model_spec` for skip decisions and focused materialize helpers without owning the full CLI execute path.
+- **L1.5 — Host UDFs** — `UdfPack` + `RbtEngineBuilder::with_udf_pack` / `register_udf_pack` so domain kernels register without subclassing `TransformationEngine`.
+
+### Added (RBT-A10 — heterogeneous bronze adapters)
+
+Make non-Parquet bronze a **documented, testable, registry-backed** path into Arrow for silver SQL.
+
+- **`BronzeAdapter` trait** + `adapter_for` / `builtin_adapters` / `read_with_adapter` (`scan/adapter.rs`)
+- Registry covers every `SourceFormat` variant; unknown formats fail closed with **`E_RBT_SOURCE_FORMAT`**
+- Whole-file UTF-8 adapters: **`html`**, **`xml`**, **`robots`** (plus existing jsonl/json/csv/parquet/arrow_ipc/log/txt/toml/protobuf paths)
+- **`ModelRole`** vocabulary (`stg_` / `ref_`·`lkp_` / `seed_` / `tf_`·`int_` / `dim_`·`fact_`·`obt_`) — intent for humans/agents; orthogonal to medallion layer (does not change materialization by itself)
+- Named pipeline stages doc + thin Stage 1 façade: `engine/stages.rs` (`stage_plan_skip` → `ops::plan_skip`)
+- Docs: [BRONZE_ADAPTER_MATRIX.md](docs/BRONZE_ADAPTER_MATRIX.md), [BRONZE_ADAPTERS.md](docs/BRONZE_ADAPTERS.md), [dag-pipeline-stages-and-storage](docs/concepts/dag-pipeline-stages-and-storage.md)
+- Approach note: [a10-bronze-to-silver-approach…](docs/analysis/a10-bronze-to-silver-approach-adapters-silver-first-class.md) (A9 still deferred)
+
+### Docs
+
+- Publishing guide: feature table + embed profile ([PUBLISHING.md](docs/PUBLISHING.md))
+- Roadmap: A10 microtasks marked Implemented; L1 pointer on dual-track plan
+
 ## [0.8.0] — 2026-08-08
 
 ### Added (RBT-A7 — keyed upsert / entity-grain merge)

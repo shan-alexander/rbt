@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.8.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit.
+> **Status:** **`0.9.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit. **Embeddable** via feature flags, `DagBuilder` IR, lake `ops`, host UDFs, and first-class **bronze adapters** (HTML/XML/robots/…).
 
 ## Why rbt
 
@@ -25,11 +25,14 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.8.0"
+rbt-datalake = "0.9.0"
+# embed-only (no Iceberg catalog / no CLI binary):
+# rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
 ```
 
 ```rust
-use rbt::RbtProjectConfig; // lib name is still `rbt`
+use rbt::{DagBuilder, ModelSpec, RbtProjectConfig}; // lib name is still `rbt`
+// also: rbt::arrow / rbt::datafusion, ops::plan_skip, BronzeAdapter, UdfPack, …
 ```
 
 **Git / from source:**
@@ -80,6 +83,17 @@ See [examples/smoke_fixture/README.md](examples/smoke_fixture/README.md) and
 bash scripts/smoke.sh              # CI baseline (smoke_fixture)
 bash scripts/smoke_feat_a1_a7.sh   # multi-value + scoped_replace + keyed_upsert demos
 ```
+
+## Library embed (0.9 / L1)
+
+| Surface | Entry points |
+|---------|----------------|
+| Feature flags | `sql`, `parquet`, `jshift`, `iceberg`, `cli` (see [ADR-004](docs/adr/ADR_004_FEATURE_FLAGS.md)) |
+| Shared stack | `rbt::arrow`, `rbt::parquet`, `rbt::datafusion` ([ADR-005](docs/adr/ADR_005_DATA_STACK_REEXPORTS.md)) |
+| Programmatic DAG | `DagBuilder`, `ModelSpec` ([ADR-006](docs/adr/ADR_006_DAG_BUILDER_IR.md)) |
+| Lake ops | `ops::plan_skip`, `stage_model_spec`, `upsert_registry` ([ADR-007](docs/adr/ADR_007_LAKE_OPS_FACADE.md)) |
+| Host UDFs | `UdfPack`, `RbtEngineBuilder::with_udf_pack` ([ADR-008](docs/adr/ADR_008_UDF_HOST_SURFACE.md)) |
+| Bronze adapters | `BronzeAdapter`, `adapter_for`, `read_with_adapter` — [BRONZE_ADAPTERS.md](docs/BRONZE_ADAPTERS.md) |
 
 ## CLI
 

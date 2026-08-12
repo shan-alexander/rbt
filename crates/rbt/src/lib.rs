@@ -14,7 +14,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.8.0"
+//! rbt-datalake = "0.9.0"
 //! ```
 //!
 //! ## Quick start (library)
@@ -63,7 +63,7 @@
 //! ## Embed profile
 //!
 //! ```toml
-//! rbt-datalake = { version = "0.8", default-features = false, features = ["sql", "parquet"] }
+//! rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
 //! # optional: "iceberg", "jshift", "cli"
 //! ```
 //!
@@ -92,6 +92,7 @@
 //! ```
 //!
 //! Lake helpers: [`ops`] (`plan_skip`, `stage_model_spec`, `upsert_registry`).
+//! Bronze adapters: [`BronzeAdapter`], [`adapter_for`], [`read_with_adapter`].
 //!
 //! ## Run scope (A1)
 //!
@@ -99,7 +100,7 @@
 //! `with_var_multi` bind hive **IN** filters. Showcase:
 //! `examples/a1_multi_value_scope`.
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.8.0")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.9.0")]
 
 pub mod core;
 pub mod engine;
