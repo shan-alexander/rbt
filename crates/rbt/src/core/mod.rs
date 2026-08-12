@@ -2,6 +2,7 @@
 
 pub mod contracts;
 pub mod dag;
+pub mod dag_builder;
 pub mod frontmatter;
 pub mod parser;
 pub mod paths;
@@ -18,6 +19,7 @@ pub use contracts::{
 pub use dag::{
     parse_materialization_hint, Materialization, ModelDag, ModelLayer, ModelNode, OutputFormat,
 };
+pub use dag_builder::{DagBuilder, ModelSpec};
 pub use frontmatter::{
     parse_logical_dtype, resolve_scan_path, scan_path_exists, AcceptedValuesEntry, BronzeCheckMode,
     BronzeDiagnostic, BronzeValidationReport, ColumnMeta, DiagnosticSeverity, ModelTests,

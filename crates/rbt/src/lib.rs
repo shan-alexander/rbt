@@ -19,6 +19,8 @@
 //!
 //! ## Quick start (library)
 //!
+//! **File project frontend** (CLI / DE layout):
+//!
 //! ```rust,no_run
 //! use rbt::{RbtProjectConfig, RunScope, TransformationEngine};
 //! # async fn demo() -> anyhow::Result<()> {
@@ -36,6 +38,37 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! **Programmatic IR** (embedders / no `models/` directory — RBT-L1.3):
+//!
+//! ```rust,no_run
+//! use rbt::{DagBuilder, Materialization, ModelLayer, ModelSpec, OutputFormat};
+//! # fn demo() -> anyhow::Result<()> {
+//! let dag = DagBuilder::new()
+//!     .model(
+//!         ModelSpec::sql("stg_x", "SELECT 1 AS id")
+//!             .layer(ModelLayer::Staging)
+//!             .materialization(Materialization::Table)
+//!             .output_format(OutputFormat::Parquet)
+//!             .output_path("/tmp/stg_x.parquet"),
+//!     )
+//!     .build()?;
+//! assert!(dag.node_map.contains_key("stg_x"));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! File projects and [`DagBuilder`] share the same [`ModelDag`] execution IR.
+//!
+//! ## Embed profile
+//!
+//! ```toml
+//! rbt-datalake = { version = "0.8", default-features = false, features = ["sql", "parquet"] }
+//! # optional: "iceberg", "jshift", "cli"
+//! ```
+//!
+//! Stack crates are re-exported as [`arrow`], [`parquet`], [`datafusion`] (and
+//! `iceberg` when enabled) so hosts share one monomorphic ABI.
 //!
 //! ## Run scope (A1)
 //!
@@ -62,9 +95,10 @@ pub use core::{
     resolve_scan_path, run_contract_diff, scan_path_exists, strip_contract_prefix,
     try_apply_scope_to_frontmatter, AcceptedValuesEntry, BronzeCheckMode, BronzeDiagnostic,
     BronzeValidationReport, ColumnMeta, ContractDiffColumn, ContractDiffReport, ContractsConfig,
-    ConsolidatePolicy, DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe, FingerprintAlgo,
-    FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode, Materialization,
-    MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode, ModelRunResult, ModelTests,
+    ConsolidatePolicy, DagBuilder, DependencyRef, DiagnosticSeverity, EnumContract, EnumProbe,
+    FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode,
+    Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelLayer, ModelNode,
+    ModelRunResult, ModelSpec, ModelTests,
     OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
     RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
     ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
