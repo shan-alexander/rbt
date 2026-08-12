@@ -86,13 +86,16 @@ RBT-A7 (keyed_upsert) ──► A8 research benches (no SQLite product)
                            · A19 SCD2 · A20 first-class star roles
 
 RBT-A10 (bronze adapters / ergonomics) — parallel track; core value-prop
+RBT-L1 (embeddable library: features, DagBuilder, UDF surface) — parallel; quant hosts
 RBT-A11 / A12 / A13 — after A2/A5 or parallel if staffed
 ```
 
 **MVP slice for hosts that do partial multi-entity runs:** A1 → A2 → A4 → A3.  
 **MVP slice for entity registry tables:** A7 (Parquet keyed_upsert) + entity_registry playbook.  
 **MVP slice for multi-format bronze:** A10 (adapters + ergonomics).  
-**MVP slice for star-schema DX:** A18 model_type + A16 SK + A19 SCD2 (after A7 hardened).
+**MVP slice for star-schema DX:** A18 model_type + A16 SK + A19 SCD2 (after A7 hardened).  
+**MVP slice for library embedders (qsys-class):** L1 feature flags + DagBuilder + UDF hooks  
+  (see [library-embedding-and-dag-crate-survey.md](../analysis/library-embedding-and-dag-crate-survey.md)).
 
 ---
 
