@@ -116,3 +116,15 @@ pub use testing::{
 
 /// Package version string.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+// --- L1.2 / ADR-005: one Arrow/DataFusion major for the process -------------
+// Prefer `rbt::arrow` / `rbt::datafusion` in embedders to avoid dual-linking.
+/// Re-export of the [arrow] crate used by this build.
+pub use arrow;
+/// Re-export of [parquet] aligned with [`arrow`].
+pub use parquet;
+/// Re-export of [datafusion] (SQL engine).
+pub use datafusion;
+#[cfg(feature = "iceberg")]
+/// Re-export of [iceberg] when feature `iceberg` is enabled.
+pub use iceberg;
