@@ -70,6 +70,29 @@
 //! Stack crates are re-exported as [`arrow`], [`parquet`], [`datafusion`] (and
 //! `iceberg` when enabled) so hosts share one monomorphic ABI.
 //!
+//! ## Host UDFs (L1.5 / Design A)
+//!
+//! Register domain kernels without subclassing the engine:
+//!
+//! ```rust,no_run
+//! use rbt::{RbtEngineBuilder, UdfPack};
+//! use rbt::datafusion::prelude::SessionContext;
+//! # struct MyPack;
+//! # impl UdfPack for MyPack {
+//! #   fn register(&self, _ctx: &SessionContext) -> anyhow::Result<()> { Ok(()) }
+//! # }
+//! # async fn demo() -> anyhow::Result<()> {
+//! let engine = RbtEngineBuilder::new()
+//!     .with_udf_pack(MyPack)
+//!     .build()
+//!     .await?;
+//! let _ = engine;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Lake helpers: [`ops`] (`plan_skip`, `stage_model_spec`, `upsert_registry`).
+//!
 //! ## Run scope (A1)
 //!
 //! See [`RunScope`] and [`ScopeValue`]: repeated `--var`, `--var-file`, and
@@ -115,7 +138,9 @@ pub use engine::{
     BronzeTableProvider, DagExecutionSummary, PreviewResult, RbtEngineBuilder,
     TransformationEngine,
 };
-pub use engine::udf::{register_builtin_udfs, register_scalar_udf, BUILTIN_UDF_NAMES};
+pub use engine::udf::{
+    register_builtin_udfs, register_scalar_udf, register_udf_pack, UdfPack, BUILTIN_UDF_NAMES,
+};
 
 pub use materializer::{
     clear_incremental_parts, consolidate_parts_to_parquet, incremental_ref_path,

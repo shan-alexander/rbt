@@ -78,9 +78,10 @@ RBT-L1 (embeddable library) — parallel: features, re-exports, DagBuilder, ops,
 
 ## 2b. Epic RBT-L1 — Embeddable library surface
 
-> **Status:** In progress on `feat/l1-embeddable-library`.  
+> **Status:** **L1.1–L1.5 implemented** on `feat/l1-embeddable-library` (not published).  
 > **Canonical detail:** also mirrored in [`docs/plans/rbt-datalake-feature-roadmap.md`](plans/rbt-datalake-feature-roadmap.md).  
 > **Survey:** [`docs/analysis/library-embedding-and-dag-crate-survey.md`](analysis/library-embedding-and-dag-crate-survey.md).  
+> **Antipatterns:** [`docs/analysis/rbt-datalake-library-antipatterns.md`](analysis/rbt-datalake-library-antipatterns.md).  
 > **ADRs:** [ADR-004](adr/ADR_004_FEATURE_FLAGS.md) · [ADR-005](adr/ADR_005_DATA_STACK_REEXPORTS.md) ·
 > [ADR-006](adr/ADR_006_DAG_BUILDER_IR.md) · [ADR-007](adr/ADR_007_LAKE_OPS_FACADE.md) ·
 > [ADR-008](adr/ADR_008_UDF_HOST_SURFACE.md)
@@ -91,7 +92,7 @@ RBT-L1 (embeddable library) — parallel: features, re-exports, DagBuilder, ops,
 | **L1.2** | Re-export `arrow` / `parquet` / `datafusion` (+ `iceberg` when enabled) | ADR-005 | One Arrow major per release; monomorphic batches |
 | **L1.3** | `DagBuilder` / `ModelSpec` programmatic IR; file project as peer frontend | ADR-006 | No `models/` dir required for hosts |
 | **L1.4** | Lake ops façade (skip, stage helpers, upsert write) | ADR-007 | 80% silver without inventing paths in host |
-| **L1.5** | `RbtEngineBuilder::with_udfs` / `register_udfs` host pack hook | ADR-008 | Design A: SQL orchestrates, kernels outside rbt |
+| **L1.5** | `with_udfs` / `with_udf_pack` / `UdfPack` host pack hook | ADR-008 | Design A: SQL orchestrates, kernels outside rbt |
 
 **Non-goals for L1:** generic Temporal/Airflow scheduler; host math kernels inside rbt;
 re-documenting star-schema `tf_` = transform (DE convention, not timeframe).

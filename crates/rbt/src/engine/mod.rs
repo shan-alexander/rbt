@@ -88,11 +88,27 @@ pub struct PreviewResult {
 /// # Patterns
 ///
 /// Creational **Builder**: optional Iceberg catalogs (feature `iceberg`) and UDF
-/// registration hooks (see [`RbtEngineBuilder::with_udfs`]).
+/// registration hooks ([`RbtEngineBuilder::with_udfs`], [`RbtEngineBuilder::with_udf_pack`]).
+/// Host packs run **after** built-in `rbt_*` UDFs (RBT-L1.5 / ADR-008).
+///
+/// ```rust,no_run
+/// use rbt::RbtEngineBuilder;
+/// # async fn demo() -> anyhow::Result<()> {
+/// let engine = RbtEngineBuilder::new()
+///     .with_udfs(|ctx| {
+///         let _ = ctx; // register host ScalarUDFs
+///         Ok(())
+///     })
+///     .build()
+///     .await?;
+/// let _ = engine;
+/// # Ok(())
+/// # }
+/// ```
 pub struct RbtEngineBuilder {
     #[cfg(feature = "iceberg")]
     catalogs: Vec<(String, Arc<dyn Catalog>)>,
-    /// Host UDF registration (Design A). Runs after builtins on build.
+    /// Host UDF registration (Design A / L1.5). Runs after builtins on build.
     udf_hooks: Vec<Box<dyn FnOnce(&SessionContext) -> Result<()> + Send>>,
 }
 
@@ -121,12 +137,21 @@ impl RbtEngineBuilder {
     /// Register host UDFs after built-ins (RBT-L1.5). Prefer one hook that registers a pack.
     ///
     /// Enables Strategy / plugin-style extension without subclassing the engine.
+    /// Multiple calls run in registration order after builtins.
     pub fn with_udfs<F>(mut self, f: F) -> Self
     where
         F: FnOnce(&SessionContext) -> Result<()> + Send + 'static,
     {
         self.udf_hooks.push(Box::new(f));
         self
+    }
+
+    /// Register a [`crate::engine::udf::UdfPack`] after built-ins (owned, `'static`).
+    pub fn with_udf_pack<P>(self, pack: P) -> Self
+    where
+        P: crate::engine::udf::UdfPack + 'static,
+    {
+        self.with_udfs(move |ctx| pack.register(ctx))
     }
 
     pub async fn build(self) -> Result<TransformationEngine> {
@@ -223,6 +248,11 @@ impl TransformationEngine {
         F: FnOnce(&SessionContext) -> Result<()>,
     {
         f(&self.ctx)
+    }
+
+    /// Register a [`crate::engine::udf::UdfPack`] on the live engine.
+    pub fn register_udf_pack(&self, pack: &dyn crate::engine::udf::UdfPack) -> Result<()> {
+        crate::engine::udf::register_udf_pack(&self.ctx, pack)
     }
 
     /// Executes a SQL transform query against registered tables.

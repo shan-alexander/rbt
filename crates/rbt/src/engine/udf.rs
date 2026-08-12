@@ -1,8 +1,22 @@
-//! Built-in DataFusion scalar UDFs (ADR-003 Design A).
+//! Built-in DataFusion scalar UDFs and host pack surface (ADR-003 Design A, RBT-L1.5).
 //!
-//! Registered on every [`TransformationEngine`] with the `rbt_` prefix so SQL models
-//! can call them without a project extension crate. Project-specific UDFs can register
-//! additional names the same way via [`register_scalar_udf`].
+//! Built-ins register on every [`crate::TransformationEngine`] with the `rbt_` prefix.
+//! Hosts add domain kernels via:
+//!
+//! - [`crate::RbtEngineBuilder::with_udfs`] / [`crate::RbtEngineBuilder::with_udf_pack`]
+//! - [`crate::TransformationEngine::register_udfs`] / [`register_udf_pack`]
+//! - [`register_scalar_udf`] for a single function
+//!
+//! # NULL policy
+//!
+//! Prefer Arrow nulls for “undefined”. Empty `Utf8` is **not** null unless your UDF
+//! defines it (`rbt_nullif_empty` maps `""` → NULL). Host packs should document their
+//! null semantics; SQL authors rely on that contract.
+//!
+//! # Ordering / windows
+//!
+//! Ordered domain logic belongs in SQL around the UDF:
+//! `… OVER (PARTITION BY symbol ORDER BY ts)` — rbt does not invent a second ordering model.
 
 use anyhow::{Context, Result};
 use arrow::array::{Array, ArrayRef, StringArray};
@@ -21,6 +35,34 @@ pub const BUILTIN_UDF_NAMES: &[&str] = &[
     "rbt_nullif_empty",
     "rbt_trim",
 ];
+
+/// Host UDF pack (Strategy / plugin). Implement once; register via builder or live engine.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use rbt::engine::udf::{register_scalar_udf, UdfPack};
+/// use rbt::datafusion::prelude::SessionContext;
+/// use anyhow::Result;
+///
+/// struct HostPack;
+/// impl UdfPack for HostPack {
+///     fn register(&self, ctx: &SessionContext) -> Result<()> {
+///         // register_scalar_udf(ctx, my_udf)?;
+///         let _ = ctx;
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait UdfPack: Send + Sync {
+    /// Register all functions in this pack into `ctx`.
+    fn register(&self, ctx: &SessionContext) -> Result<()>;
+}
+
+/// Register a [`UdfPack`] on a session (borrowed pack).
+pub fn register_udf_pack(ctx: &SessionContext, pack: &dyn UdfPack) -> Result<()> {
+    pack.register(ctx)
+}
 
 /// Register all rbt built-in scalar UDFs into `ctx`.
 pub fn register_builtin_udfs(ctx: &SessionContext) -> Result<()> {
@@ -136,6 +178,7 @@ pub fn ensure_builtins(ctx: &SessionContext) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::RbtEngineBuilder;
 
     #[tokio::test]
     async fn builtin_udfs_work_in_sql() -> Result<()> {
@@ -163,6 +206,63 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(l, "abc");
+        Ok(())
+    }
+
+    /// Host pack: double a utf8 string (demo only).
+    struct EchoPack;
+
+    impl UdfPack for EchoPack {
+        fn register(&self, ctx: &SessionContext) -> Result<()> {
+            let udf = utf8_unary("host_echo", |s| Some(format!("echo:{s}")));
+            register_scalar_udf(ctx, udf)
+        }
+    }
+
+    #[tokio::test]
+    async fn builder_with_udf_pack_registers_host_and_builtins() -> Result<()> {
+        let engine = RbtEngineBuilder::new()
+            .with_udf_pack(EchoPack)
+            .build()
+            .await?;
+        let df = engine
+            .ctx
+            .sql("SELECT host_echo('x') AS h, rbt_upper('y') AS u")
+            .await?;
+        let batches = df.collect().await?;
+        let h = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(h, "echo:x");
+        let u = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(u, "Y");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_register_udfs_hook() -> Result<()> {
+        let engine = crate::TransformationEngine::new();
+        engine.register_udfs(|ctx| {
+            let udf = utf8_unary("host_live", |s| Some(s.to_string()));
+            register_scalar_udf(ctx, udf)
+        })?;
+        let df = engine.ctx.sql("SELECT host_live('ok') AS v").await?;
+        let batches = df.collect().await?;
+        let v = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0);
+        assert_eq!(v, "ok");
         Ok(())
     }
 }
