@@ -74,14 +74,77 @@ Do **not** force dim/fact into silver. Gold owns star contracts.
 
 Library: `ModelRole::from_name("stg_events")`.
 
-## Add a format in one PR
+## Multi-file order + `_ingest_seq` (A10.13)
+
+Directory scans **sort** files before decode (stable total order):
+
+| `scan_order` | Order |
+|--------------|--------|
+| `path` (default) | Lexicographic relative path under `scan_path` |
+| `mtime` | mtime ascending, then path (mtime alone is not portable) |
+
+Optional inject columns (frontmatter):
+
+| Flag | Column | Type |
+|------|--------|------|
+| `inject_source_path: true` | `_source_path` | Utf8 absolute path |
+| `inject_ingest_seq: true` | `_ingest_seq` | Int64 `0..n-1` after sort |
+| `inject_source_mtime: true` | `_source_mtime` | Int64 unix seconds |
+
+**Last-wins SQL** (product-neutral):
+
+```sql
+SELECT * FROM (
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY grain_key
+      ORDER BY _ingest_seq DESC
+    ) AS rn
+  FROM {{ source('bronze', 'events') }}
+) t WHERE rn = 1
+```
+
+Any non-empty inject / `adapter` / path filters forces the scan→MemTable path (not DF listing).
+
+## Host adapters (A10.12) — no fork
+
+**Override a builtin format** (host wins for that `SourceFormat`):
+
+```rust
+use rbt::{register_host_adapter, BronzeAdapter, clear_host_adapters};
+// impl BronzeAdapter for MyArrowIpc { ... format() -> ArrowIpc ... }
+// register_host_adapter(Arc::new(MyArrowIpc))?;
+```
+
+**Named proprietary format** (no enum variant):
+
+```rust
+use rbt::{register_named_adapter, NamedBronzeAdapter};
+// impl NamedBronzeAdapter for HostTicks { fn name(&self) -> &str { "host_ticks" } ... }
+// register_named_adapter(Arc::new(HostTicks))?;
+```
+
+```yaml
+# model frontmatter
+scan_path: bronze/ticks
+adapter: host_ticks          # must be registered before run
+# source_format optional when adapter is set (still useful for docs)
+inject_ingest_seq: true
+```
+
+Unregistered `adapter:` / unknown `source_format` → **`E_RBT_SOURCE_FORMAT`**.  
+Duplicate host registration → **`E_RBT_ADAPTER_DUP`**.  
+`clear_host_adapters()` for tests / process reconfiguration.
+
+## Add a **builtin** format in one PR
 
 1. Add `SourceFormat` variant + `parse` / `from_extension` / `as_str` / `ALL`.
 2. Implement `BronzeAdapter` in `scan/adapter.rs` (or reuse whole-file UTF-8 helper).
 3. Register in `builtin_adapters()`.
-4. If format needs MemTable path, add to `needs_scan_path` match in `engine/bronze.rs`.
-5. Unit test under `scan/adapter` or `scan` tests.
-6. Row in [[Bronze adapter matrix]].
+4. Unit test under `scan/adapter` or `scan` tests.
+5. Row in [[Bronze adapter matrix]].
+
+Prefer **host named adapters** for proprietary formats that should not ship in rbt.
 
 Unknown formats must fail with `E_RBT_SOURCE_FORMAT` — never silent fallback.
 

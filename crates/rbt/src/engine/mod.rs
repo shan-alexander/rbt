@@ -255,6 +255,120 @@ impl TransformationEngine {
         crate::engine::udf::register_udf_pack(&self.ctx, pack)
     }
 
+    /// Stage 2 — register bronze sources for the DAG under `scope` (no materialize).
+    ///
+    /// Hosts that already called this can re-run [`Self::stage_execute_tiers`] without
+    /// re-fingerprinting (Stage 1). Safe to call more than once (tables deregister+replace).
+    pub async fn stage_register_bronze(
+        &self,
+        dag: &ModelDag,
+        project_dir: impl AsRef<Path>,
+        config: &RbtProjectConfig,
+        scope: &RunScope,
+    ) -> Result<usize> {
+        let project_dir = project_dir.as_ref();
+        let mut registered = HashSet::new();
+        register_bronze_sources_for_dag_scoped(
+            &self.ctx,
+            dag,
+            project_dir,
+            &mut registered,
+            config,
+            Some(scope),
+        )
+        .await
+        .context("frontmatter-driven bronze registration failed")
+    }
+
+    /// Stage 3 — execute topo tiers (materialize), optionally filtered to model names.
+    ///
+    /// Does **not** run fingerprint skip or write receipts. Compose with
+    /// [`stages::stage_plan_skip`] and [`stages::stage_write_receipt`].
+    ///
+    /// ```rust,no_run
+    /// # async fn demo(engine: &rbt::TransformationEngine, dag: &rbt::ModelDag,
+    /// #   cfg: &rbt::RbtProjectConfig, scope: &rbt::RunScope) -> anyhow::Result<()> {
+    /// use rbt::engine::stages::ExecuteTiersOptions;
+    /// // Skip Stage 1; re-register bronze; force one model (+ ancestors by default):
+    /// engine.stage_register_bronze(dag, ".", cfg, scope).await?;
+    /// let _ = engine
+    ///     .stage_execute_tiers(dag, ".", "./out", cfg, scope, ExecuteTiersOptions::only(["dim_x"]))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stage_execute_tiers(
+        &self,
+        dag: &ModelDag,
+        project_dir: impl AsRef<Path>,
+        output_dir: impl AsRef<Path>,
+        config: &RbtProjectConfig,
+        scope: &RunScope,
+        opts: stages::ExecuteTiersOptions,
+    ) -> Result<stages::StageExecuteResult> {
+        let project_dir = project_dir.as_ref();
+        // Optional model filter → runnable subgraph (ancestors included by default).
+        let filtered: Option<ModelDag> = match &opts.only_models {
+            None => None,
+            Some(only) => {
+                let keep =
+                    stages::expand_model_selection(dag, only, opts.include_ancestors)?;
+                Some(dag.subgraph(&keep).with_context(|| {
+                    "E_RBT_SELECT: stage_execute_tiers model filter produced incomplete subgraph \
+                     (include ancestors or materialize deps first)"
+                })?)
+            }
+        };
+        let work_dag = filtered.as_ref().unwrap_or(dag);
+
+        // Never short-circuit on fingerprint for host stage re-entry; still compute
+        // fingerprint for lineage unless the host provided one via opts.
+        let mut run_scope = scope.clone();
+        run_scope.skip_if_fingerprint_match = false;
+        let host_wants_receipt = run_scope.write_receipt;
+        run_scope.write_receipt = false;
+
+        let summary = self
+            .execute_dag_with_scope(work_dag, project_dir, output_dir, config, &run_scope)
+            .await?;
+
+        if host_wants_receipt {
+            let finished = crate::core::receipt::now_unix_ms();
+            let started = finished.saturating_sub(summary.model_results.iter().filter_map(|m| m.elapsed_ms).sum::<u64>() as u128);
+            let _ = stages::stage_write_receipt(stages::ReceiptWriteArgs {
+                project_dir,
+                config,
+                scope: &run_scope,
+                run_id: summary.run_id.clone().unwrap_or_else(|| run_scope.resolve_run_id()),
+                scope_key: run_scope.scope_key(),
+                contract_version: effective_contract_version(config, &run_scope),
+                bronze_fingerprint: opts
+                    .bronze_fingerprint
+                    .clone()
+                    .or(summary.bronze_fingerprint.clone())
+                    .unwrap_or_default(),
+                models_executed: summary.models_executed,
+                total_rows: summary.total_rows_produced,
+                bronze_sources: summary.bronze_sources_registered,
+                model_results: summary.model_results.clone(),
+                started_unix_ms: started,
+                finished_unix_ms: finished,
+                skipped: false,
+                skip_reason: None,
+                error: None,
+            })?;
+        }
+
+        Ok(stages::StageExecuteResult {
+            models_executed: summary.models_executed,
+            total_rows_produced: summary.total_rows_produced,
+            model_results: summary.model_results,
+            bronze_fingerprint: opts
+                .bronze_fingerprint
+                .or(summary.bronze_fingerprint),
+        })
+    }
+
     /// Executes a SQL transform query against registered tables.
     pub async fn execute_sql(&self, sql: &str) -> Result<SendableRecordBatchStream> {
         tracing::info!(

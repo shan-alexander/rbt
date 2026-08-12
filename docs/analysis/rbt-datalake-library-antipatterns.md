@@ -22,12 +22,15 @@ Not a full architecture review—signal for embedders and implementers.
 | File project as only frontend | IR-first dual frontend | **L1.3** `DagBuilder` / `ModelSpec` |
 | Skip/upsert only via CLI paths | Façade missing | **L1.4** `ops` module |
 | Host UDF pack undocumented | Plugin / Strategy surface | **L1.5** `with_udfs` / `register_udfs` |
+| Dual-link guidance only verbal | Embed footgun | **L1.6** `docs/EMBEDDING.md` + re-exports |
+| Stages not host-callable | Daemon re-entry | **L1.9** `stage_register_bronze` / `stage_execute_tiers` |
+| Host bronze formats require fork | Closed registry | **A10.12** host/named adapters |
 
 ## Still open (do not paper over)
 
 | Issue | Why it hurts | Direction (not L1) |
 |-------|--------------|--------------------|
-| **`execute_dag*` is a god method** | Hard to unit-test materialize alone; long arg lists | Split plan / register / materialize stages later |
+| **`execute_dag*` still orchestrates all stages** | Thick façade (stages now callable) | Further extract materialize_one; keep one DX entry |
 | **Filesystem-only lake** | Paths are the control plane; no trait for object store | A8 / storage backends |
 | **Package `rbt-datalake` / import `rbt`** | Discoverability tax | Document; optional thin `rbt` re-export crate later |
 | **`sql` / `parquet` features are markers** | Do not yet strip DF/Parquet from compile | Real split only if compile times force it |
@@ -48,14 +51,14 @@ Not a full architecture review—signal for embedders and implementers.
 Prefer:
 
 ```rust
-// Slim host
-rbt-datalake = { version = "0.8", default-features = false, features = ["sql", "parquet"] }
+// Slim host — see docs/EMBEDDING.md
+rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
 
 use rbt::{arrow, datafusion, DagBuilder, ModelSpec, RbtEngineBuilder, ops};
 ```
 
 Avoid:
 
-- Re-depending on a second `arrow` major.
-- Shelling out to `rbt run` from a long-lived daemon (use library + receipts).
+- Re-depending on a second `arrow` major (use `rbt::arrow` only in dag-enabled crates).
+- Shelling out to `rbt run` from a long-lived daemon (use library + receipts + stage re-entry).
 - Putting host math SoT SQL-only inside rbt; register UDFs instead.

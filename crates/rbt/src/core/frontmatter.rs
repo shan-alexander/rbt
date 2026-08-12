@@ -139,28 +139,37 @@ impl SourceFormat {
         }
     }
 
-    /// Parse free-form frontmatter / CLI format strings.
+    /// Parse free-form frontmatter / CLI format strings (builtins only).
     pub fn parse(s: &str) -> Result<Self> {
+        Self::try_parse(s).ok_or_else(|| {
+            anyhow::anyhow!(
+                "E_RBT_SOURCE_FORMAT: unknown source_format '{}'. Expected one of: {}. \
+                 For proprietary formats register a named host adapter and set frontmatter \
+                 `adapter: <name>` (see docs/BRONZE_ADAPTERS.md).",
+                s.trim(),
+                Self::all_names().join(", ")
+            )
+        })
+    }
+
+    /// Builtin format from string, or `None` if not a known source_format name.
+    pub fn try_parse(s: &str) -> Option<Self> {
         let key = s.trim().to_ascii_lowercase().replace('-', "_");
         match key.as_str() {
-            "jsonl" | "ndjson" | "json_lines" => Ok(Self::Jsonl),
-            "json" => Ok(Self::Json),
-            "parquet" | "pq" => Ok(Self::Parquet),
-            "csv" | "tsv" => Ok(Self::Csv),
-            "arrow_ipc" | "arrow" | "arrow_file" | "ipc" | "feather" => Ok(Self::ArrowIpc),
-            "arrow_ipc_stream" | "arrow_stream" | "ipc_stream" => Ok(Self::ArrowIpcStream),
-            "log" => Ok(Self::Log),
-            "txt" | "text" => Ok(Self::Txt),
-            "toml" => Ok(Self::Toml),
-            "protobuf" | "pb" | "proto" | "protobin" => Ok(Self::Protobuf),
-            "html" | "htm" => Ok(Self::Html),
-            "xml" => Ok(Self::Xml),
-            "robots" | "robots_txt" => Ok(Self::Robots),
-            other => bail!(
-                "E_RBT_SOURCE_FORMAT: unknown source_format '{}'. Expected one of: {}",
-                other,
-                Self::all_names().join(", ")
-            ),
+            "jsonl" | "ndjson" | "json_lines" => Some(Self::Jsonl),
+            "json" => Some(Self::Json),
+            "parquet" | "pq" => Some(Self::Parquet),
+            "csv" | "tsv" => Some(Self::Csv),
+            "arrow_ipc" | "arrow" | "arrow_file" | "ipc" | "feather" => Some(Self::ArrowIpc),
+            "arrow_ipc_stream" | "arrow_stream" | "ipc_stream" => Some(Self::ArrowIpcStream),
+            "log" => Some(Self::Log),
+            "txt" | "text" => Some(Self::Txt),
+            "toml" => Some(Self::Toml),
+            "protobuf" | "pb" | "proto" | "protobin" => Some(Self::Protobuf),
+            "html" | "htm" => Some(Self::Html),
+            "xml" => Some(Self::Xml),
+            "robots" | "robots_txt" => Some(Self::Robots),
+            _ => None,
         }
     }
 }
@@ -330,9 +339,26 @@ pub struct StagingFrontmatter {
     #[serde(default)]
     pub require_partitions_in: Option<std::collections::HashMap<String, Vec<String>>>,
     /// Inject `_source_path` (Utf8) with the absolute file path for each row.
-    /// Enables "latest chunk wins" dedupe via `ORDER BY _source_path DESC`.
+    /// Enables path-based ordering; prefer `_ingest_seq` for multi-file last-wins.
     #[serde(default)]
     pub inject_source_path: Option<bool>,
+    /// Inject `_ingest_seq` (Int64) — stable 0..n-1 per file in scan order (A10.13).
+    /// Use `ORDER BY _ingest_seq DESC` for last-wins after multi-file bronze.
+    #[serde(default)]
+    pub inject_ingest_seq: Option<bool>,
+    /// Inject `_source_mtime` (Int64 unix seconds) from file metadata (optional).
+    #[serde(default)]
+    pub inject_source_mtime: Option<bool>,
+    /// Multi-file list order before assign `_ingest_seq`: `path` (default) | `mtime`.
+    /// `path` = lexicographic relative path under scan root (stable total order).
+    /// `mtime` = mtime ascending, then path (mtime alone is not trustworthy across hosts).
+    #[serde(default)]
+    pub scan_order: Option<String>,
+    /// Host named bronze adapter (A10.12). When set, decode via
+    /// [`crate::scan::adapter::register_named_adapter`] registry — not a builtin
+    /// [`SourceFormat`]. Fail-closed if unregistered (`E_RBT_SOURCE_FORMAT`).
+    #[serde(default)]
+    pub adapter: Option<String>,
     /// When scan root is missing or filters match no files: `error` (default) | `empty`.
     ///
     /// `empty` registers a zero-row table with a declared schema from `columns.*.dtype`

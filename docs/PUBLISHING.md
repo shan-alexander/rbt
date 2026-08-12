@@ -28,6 +28,9 @@ Embed without Iceberg / CLI:
 rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
 ```
 
+**Single-ABI:** in dag-enabled crates use only `rbt::arrow` / `rbt::parquet` / `rbt::datafusion`.  
+See [EMBEDDING.md](EMBEDDING.md).
+
 Link: https://crates.io/crates/rbt-datalake
 
 ## Orphan deprecation stubs (0.0.4)

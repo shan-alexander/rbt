@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added (post-0.9.0 embed polish)
+
+- **L1.6** — [docs/EMBEDDING.md](docs/EMBEDDING.md): single-ABI rule, workspace pin recipe, feature profiles
+- **A10.12** — Host bronze adapters: `register_host_adapter`, `register_named_adapter`,
+  `NamedBronzeAdapter`, `AdapterRegistry`; frontmatter `adapter:`; fail-closed `E_RBT_SOURCE_FORMAT` /
+  `E_RBT_ADAPTER_DUP`
+- **A10.13** — Multi-file scan order (`scan_order: path|mtime`) + optional `_ingest_seq` /
+  `_source_mtime` inject columns for last-wins SQL
+- **L1.9** — Stage re-entry: `stage_register_bronze`, `stage_execute_tiers` (`ExecuteTiersOptions`),
+  `stage_write_receipt` (skip Stage 1 short-circuit; force model subgraph)
+- Roadmap: deferred **schema_digest / contract_version convention** (consider later)
+- Plan draft: [Design B Rust models](docs/plans/design-b-rust-models.md)
+
 ## [0.9.0] — 2026-08-12
 
 ### Added (RBT-L1 — embeddable library surface)

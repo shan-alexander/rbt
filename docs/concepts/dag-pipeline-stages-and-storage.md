@@ -17,14 +17,27 @@ execute_dag_with_scope(dag, project, output, config, scope) → Summary
 
 That façade must not be a *god object* that re-implements every concern inline. Stages:
 
-| Stage | Responsibility | Today |
-|-------|----------------|-------|
-| **1. PlanSkip** | Fingerprint bronze + compare receipt | `ops::plan_skip` / `stages::stage_plan_skip` |
-| **2. RegisterBronze** | Adapter decode → DF tables | `register_bronze_sources_for_dag_scoped` |
-| **3. ExecuteTiers** | Topo SQL + materialize dispatch | loop in `execute_dag_with_scope` |
-| **4. WriteReceipt** | Persist run identity | `RunReceipt::write` |
+| Stage | Responsibility | Host API |
+|-------|----------------|----------|
+| **1. PlanSkip** | Fingerprint bronze + compare receipt | `stage_plan_skip` / `ops::plan_skip` |
+| **2. RegisterBronze** | Adapter decode → DF tables | `TransformationEngine::stage_register_bronze` |
+| **3. ExecuteTiers** | Topo SQL + materialize dispatch | `TransformationEngine::stage_execute_tiers` (+ `ExecuteTiersOptions`) |
+| **4. WriteReceipt** | Persist run identity | `stage_write_receipt` |
 
-Further splits (materialize_one, WAP) can be extracted without changing the public entry.
+`execute_dag_with_scope` still runs 1→2→3→4. Hosts that need **re-entry** (register once, re-run gold, force one model without skip short-circuit) call stages 2–4 directly.
+
+```rust
+// Force one model (+ ancestors), no fingerprint skip short-circuit:
+engine.stage_register_bronze(&dag, proj, &cfg, &scope).await?;
+engine
+    .stage_execute_tiers(
+        &dag, proj, out, &cfg, &scope,
+        ExecuteTiersOptions::only(["dim_entity"]),
+    )
+    .await?;
+```
+
+`ExecuteTiersOptions::without_ancestors()` is fail-open for advanced hosts that already materialised deps; default includes ancestors.
 
 **Principle:** one façade for DX; pure stages for systems engineering and library reuse.
 

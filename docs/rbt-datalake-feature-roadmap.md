@@ -571,12 +571,36 @@ Make non-parquet bronze a **first-class, documented, testable** path: HTML, XML,
 | **RBT-A10.9** | Spill path | Done — existing Arrow IPC spill |
 | **RBT-A10.10** | Tests/fixtures | Done — adapter unit tests |
 | **RBT-A10.11** | Docs guide | Done — `docs/BRONZE_ADAPTERS.md` |
+| **RBT-A10.12** | Host-registerable adapters | Done — `register_host_adapter` / `register_named_adapter` / `NamedBronzeAdapter`; fail-closed |
+| **RBT-A10.13** | Multi-file order + `_ingest_seq` | Done — `scan_order`, `inject_ingest_seq`, `inject_source_mtime` |
 
-Also: `ModelRole` vocabulary; execute Stage 1 uses `ops::plan_skip` (`engine/stages.rs`).
+Also: `ModelRole` vocabulary; pipeline stages host-callable (L1.9); embed ABI guide [`docs/EMBEDDING.md`](EMBEDDING.md).
 
 ### Acceptance
 
-A third-party host can land mixed filetypes and stage with SQL without custom Rust (for formats marked Done).
+A third-party host can land mixed filetypes and stage with SQL without custom Rust (for formats marked Done). Hosts can inject proprietary adapters without forking.
+
+---
+
+## 12b. Later — schema digest / feature gate (deferred)
+
+> **Status:** **Consider later** (not scheduled).  
+> Hosts that need a stable “gold columns match schema version X” gate can already use `contract_version` in fingerprints/receipts and declared `columns:`.
+
+| ID | Idea | Notes |
+|----|------|--------|
+| **RBT-A3.x / contracts** | Optional opaque `schema_digest` (or documented `contract_version` convention) on frontmatter + receipt | Prefer **convention first** (`contract_version: "features@sha256:…"`). Add a first-class field only if convention proves noisy. Product-neutral name — not host-product-specific. |
+
+Do **not** hardcode host vocabulary into core.
+
+---
+
+## 12c. L1 follow-ons (embed polish)
+
+| ID | Task | Status |
+|----|------|--------|
+| **L1.6** | Single-ABI embed guide + workspace recipe | Done — `docs/EMBEDDING.md` |
+| **L1.9** | Stage re-entry: register_bronze / execute_tiers / write_receipt | Done — `engine/stages.rs` + engine methods |
 
 ---
 

@@ -442,6 +442,13 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
             .map(|p| !p.is_empty())
             .unwrap_or(false)
         || fm.inject_source_path.unwrap_or(false)
+        || fm.inject_ingest_seq.unwrap_or(false)
+        || fm.inject_source_mtime.unwrap_or(false)
+        || fm
+            .adapter
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
     {
         return true;
     }

@@ -36,4 +36,15 @@ Legend: **Done** = production path + tests · **Partial** = works with caveats �
 ## Fail-closed
 
 Unknown `source_format` string → `E_RBT_SOURCE_FORMAT`.  
-Missing adapter for a format enum → same code (registry exhaustiveness tests prevent drift).
+Missing adapter for a format enum → same code (registry exhaustiveness tests prevent drift).  
+Unregistered frontmatter `adapter:` (host named) → `E_RBT_SOURCE_FORMAT`.  
+Duplicate host registration → `E_RBT_ADAPTER_DUP`.
+
+## Multi-file order (all formats on scan path)
+
+| Control | Default | Notes |
+|---------|---------|--------|
+| `scan_order` | `path` | Lexicographic relative path; `mtime` then path |
+| `inject_ingest_seq` | off | Int64 `0..n-1` after sort — preferred for last-wins |
+| `inject_source_mtime` | off | Int64 unix mtime |
+| Host override / named | — | `register_host_adapter` / `register_named_adapter` |

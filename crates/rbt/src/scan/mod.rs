@@ -22,6 +22,35 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Multi-file bronze list order before `_ingest_seq` assignment (A10.13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScanFileOrder {
+    /// Lexicographic relative path under scan root (stable total order). Default.
+    #[default]
+    Path,
+    /// mtime ascending, then path. mtime alone is not a portable total order.
+    Mtime,
+}
+
+impl ScanFileOrder {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "path" | "name" | "lex" | "lexicographic" => Ok(Self::Path),
+            "mtime" | "modified" | "time" => Ok(Self::Mtime),
+            other => bail!(
+                "E_RBT_SCAN_ORDER: unknown scan_order '{other}'. Expected path|mtime"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Mtime => "mtime",
+        }
+    }
+}
+
 /// Scan request derived from staging frontmatter + project root.
 #[derive(Debug, Clone)]
 pub struct ScanRequest {
@@ -43,6 +72,14 @@ pub struct ScanRequest {
     pub path_glob: Vec<String>,
     /// Inject `_source_path` column (absolute path of the bronze file).
     pub inject_source_path: bool,
+    /// Inject `_ingest_seq` Int64 (0..n-1) per file after stable sort (A10.13).
+    pub inject_ingest_seq: bool,
+    /// Inject `_source_mtime` Int64 (unix seconds).
+    pub inject_source_mtime: bool,
+    /// File list order before ingest_seq.
+    pub file_order: ScanFileOrder,
+    /// Named host adapter (`frontmatter.adapter`) — process registry (A10.12).
+    pub custom_adapter: Option<String>,
     /// Named roots for `$name` expansion in `scan_path` (from project config).
     pub roots: HashMap<String, String>,
     /// Max bytes for one opaque protobuf file (from `scan.protobuf_max_payload_bytes`).
@@ -87,6 +124,24 @@ impl ScanRequest {
         validate_glob_patterns(&path_glob).with_context(|| {
             format!("E_RBT_PATH_GLOB_INVALID: bad path_glob on scan_path '{scan_path}'")
         })?;
+        let file_order = match fm.scan_order.as_deref() {
+            Some(s) => ScanFileOrder::parse(s)?,
+            None => ScanFileOrder::Path,
+        };
+        let custom_adapter = fm
+            .adapter
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        // Named host adapters must be registered; fail early for clear diagnostics.
+        if let Some(ref name) = custom_adapter {
+            adapter::adapter_for_name(name).with_context(|| {
+                format!(
+                    "E_RBT_SOURCE_FORMAT: frontmatter.adapter='{name}' is not registered \
+                     (call rbt::register_named_adapter before run)"
+                )
+            })?;
+        }
         Ok(Self {
             project_dir: project_dir.as_ref().to_path_buf(),
             scan_path,
@@ -98,6 +153,10 @@ impl ScanRequest {
             require_partitions_in: fm.require_partitions_in.clone().unwrap_or_default(),
             path_glob,
             inject_source_path: fm.inject_source_path.unwrap_or(false),
+            inject_ingest_seq: fm.inject_ingest_seq.unwrap_or(false),
+            inject_source_mtime: fm.inject_source_mtime.unwrap_or(false),
+            file_order,
+            custom_adapter,
             roots,
             protobuf_max_payload_bytes: scan_cfg.protobuf_max_payload_bytes,
             allow_empty: matches!(
@@ -152,7 +211,7 @@ impl LakeScanner {
         }
 
         let mut files = Vec::new();
-        collect_files_for_format(&root, req.format, &mut files)?;
+        collect_files_for_request(&root, req, &mut files)?;
         if !req.require_partitions.is_empty() || !req.require_partitions_in.is_empty() {
             files.retain(|f| {
                 path_matches_require_partitions(
@@ -167,17 +226,22 @@ impl LakeScanner {
             let glob_set = PathGlobSet::compile(&req.path_glob)?;
             files.retain(|f| glob_set.matches(f, &root));
         }
+        sort_scan_files(&mut files, &root, req.file_order)?;
         if files.is_empty() {
             if req.allow_empty {
                 return Ok((root, Vec::new()));
             }
+            let fmt_label = req
+                .custom_adapter
+                .as_deref()
+                .unwrap_or_else(|| req.format.as_str());
             bail!(
                 "E_RBT_BRONZE_SCAN_EMPTY: no {} files under {} after filters \
                  (require_partitions={:?}, require_partitions_in={:?}, path_glob={:?}). \
                  Hint: path_glob disables DataFusion listing pushdown and uses the \
                  scan→MemTable/spill path; check filename patterns and hive partitions, \
                  or set on_missing: empty for optional artifact families.",
-                req.format.as_str(),
+                fmt_label,
                 root.display(),
                 req.require_partitions,
                 req.require_partitions_in,
@@ -210,8 +274,8 @@ impl LakeScanner {
         );
 
         let mut batches = Vec::new();
-        for file_path in files {
-            for batch in self.read_enriched(&file_path, &root, req)? {
+        for (ingest_seq, file_path) in files.into_iter().enumerate() {
+            for batch in self.read_enriched(&file_path, &root, req, ingest_seq as i64)? {
                 batches.push(batch);
             }
         }
@@ -263,13 +327,15 @@ impl LakeScanner {
         let mut batches_n = 0usize;
 
         let mut write_loop = || -> Result<()> {
-            for file_path in &files {
-                let file_batches = self.read_enriched(file_path, &root, req).with_context(|| {
-                    format!(
-                        "E_RBT_BRONZE_SPILL: read {} for spill",
-                        file_path.display()
-                    )
-                })?;
+            for (ingest_seq, file_path) in files.iter().enumerate() {
+                let file_batches = self
+                    .read_enriched(file_path, &root, req, ingest_seq as i64)
+                    .with_context(|| {
+                        format!(
+                            "E_RBT_BRONZE_SPILL: read {} for spill",
+                            file_path.display()
+                        )
+                    })?;
                 for batch in file_batches {
                     if batch.num_rows() == 0 && batch.num_columns() == 0 {
                         continue;
@@ -362,10 +428,16 @@ impl LakeScanner {
         file_path: &Path,
         root: &Path,
         req: &ScanRequest,
+        ingest_seq: i64,
     ) -> Result<Vec<RecordBatch>> {
         let file_batches = self
             .read_file(file_path, req)
             .with_context(|| format!("Failed reading bronze file {}", file_path.display()))?;
+        let mtime_secs = if req.inject_source_mtime {
+            Some(file_mtime_unix_secs(file_path)?)
+        } else {
+            None
+        };
         let mut out = Vec::with_capacity(file_batches.len());
         for batch in file_batches {
             let mut batch = if req.partition_by.is_empty() {
@@ -375,6 +447,12 @@ impl LakeScanner {
             };
             if req.inject_source_path {
                 batch = inject_source_path_column(batch, file_path)?;
+            }
+            if req.inject_ingest_seq {
+                batch = inject_i64_column(batch, "_ingest_seq", ingest_seq)?;
+            }
+            if let Some(mt) = mtime_secs {
+                batch = inject_i64_column(batch, "_source_mtime", mt)?;
             }
             out.push(batch);
         }
@@ -472,12 +550,95 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn extension_matches(format: SourceFormat, ext: &str) -> bool {
+fn extension_matches_request(req: &ScanRequest, ext: &str) -> bool {
     let ext = ext.to_ascii_lowercase();
-    match adapter::adapter_for(format) {
+    match adapter::resolve_for_request(req) {
         Ok(a) => a.extensions().iter().any(|e| *e == ext.as_str()),
         Err(_) => false,
     }
+}
+
+fn collect_files_for_request(path: &Path, req: &ScanRequest, files: &mut Vec<PathBuf>) -> Result<()> {
+    if path.is_file() {
+        // Explicit single-file scan_path: always include.
+        files.push(path.to_path_buf());
+        return Ok(());
+    }
+    if path.is_dir() {
+        let mut all = Vec::new();
+        collect_files(path, &mut all)?;
+        for f in all {
+            let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if extension_matches_request(req, ext) {
+                files.push(f);
+            }
+        }
+        return Ok(());
+    }
+    bail!(
+        "scan path is neither file nor directory: {}",
+        path.display()
+    );
+}
+
+fn sort_scan_files(files: &mut [PathBuf], root: &Path, order: ScanFileOrder) -> Result<()> {
+    match order {
+        ScanFileOrder::Path => {
+            files.sort_by(|a, b| {
+                let ra = a.strip_prefix(root).unwrap_or(a);
+                let rb = b.strip_prefix(root).unwrap_or(b);
+                ra.cmp(rb)
+            });
+        }
+        ScanFileOrder::Mtime => {
+            let mut keyed: Vec<(i64, PathBuf)> = Vec::with_capacity(files.len());
+            for f in files.iter() {
+                let mt = file_mtime_unix_secs(f).unwrap_or(0);
+                keyed.push((mt, f.clone()));
+            }
+            keyed.sort_by(|a, b| {
+                a.0.cmp(&b.0).then_with(|| {
+                    let ra = a.1.strip_prefix(root).unwrap_or(&a.1);
+                    let rb = b.1.strip_prefix(root).unwrap_or(&b.1);
+                    ra.cmp(rb)
+                })
+            });
+            for (i, (_, p)) in keyed.into_iter().enumerate() {
+                files[i] = p;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn file_mtime_unix_secs(path: &Path) -> Result<i64> {
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("E_RBT_BRONZE_IO: stat {}", path.display()))?;
+    let modified = meta
+        .modified()
+        .with_context(|| format!("E_RBT_BRONZE_IO: mtime {}", path.display()))?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(secs)
+}
+
+fn inject_i64_column(batch: RecordBatch, name: &str, value: i64) -> Result<RecordBatch> {
+    use arrow::array::Int64Array;
+    let n = batch.num_rows();
+    let col: ArrayRef = Arc::new(Int64Array::from(vec![value; n]));
+    let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+    if let Some(idx) = fields.iter().position(|f| f.name() == name) {
+        fields[idx] = Field::new(name, DataType::Int64, false);
+        columns[idx] = col;
+    } else {
+        fields.push(Field::new(name, DataType::Int64, false));
+        columns.push(col);
+    }
+    let schema = Arc::new(Schema::new(fields));
+    RecordBatch::try_new(schema, columns).context("inject i64 column")
 }
 
 /// Opaque protobuf bronze: one row per file with path + raw bytes.
@@ -529,34 +690,6 @@ pub(crate) fn read_protobuf_opaque(path: &Path, max_bytes: u64) -> Result<Record
             Arc::new(len_b.finish()),
         ],
     )?)
-}
-
-fn collect_files_for_format(
-    path: &Path,
-    format: SourceFormat,
-    files: &mut Vec<PathBuf>,
-) -> Result<()> {
-    if path.is_file() {
-        files.push(path.to_path_buf());
-        return Ok(());
-    }
-    if path.is_dir() {
-        let mut all = Vec::new();
-        collect_files(path, &mut all)?;
-        for f in all {
-            let ext = f.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if extension_matches(format, ext) {
-                files.push(f);
-            }
-        }
-        // If directory has files but none matched extension, and format is Log/Txt,
-        // still allow extensionless? Skip for now.
-        return Ok(());
-    }
-    bail!(
-        "scan path is neither file nor directory: {}",
-        path.display()
-    );
 }
 
 pub(crate) fn read_parquet(path: &Path, projection: Option<SchemaRef>) -> Result<Vec<RecordBatch>> {
@@ -1300,6 +1433,45 @@ k = "b"
         let scanner = LakeScanner::from_request(&req);
         let batches = scanner.scan(&req).await?;
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ingest_seq_stable_path_order() -> Result<()> {
+        use arrow::array::Int64Array;
+
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        // Lexicographic: a.jsonl then z.jsonl → seq 0, 1
+        std::fs::write(root.join("z.jsonl"), b"{\"v\":2}\n")?;
+        std::fs::write(root.join("a.jsonl"), b"{\"v\":1}\n")?;
+        let fm = StagingFrontmatter {
+            source_format: Some(SourceFormat::Jsonl),
+            scan_path: Some(".".into()),
+            inject_ingest_seq: Some(true),
+            scan_order: Some("path".into()),
+            ..Default::default()
+        };
+        let req = ScanRequest::from_frontmatter(root, &fm)?;
+        let scanner = LakeScanner::from_request(&req);
+        let batches = scanner.scan(&req).await?;
+        assert_eq!(batches.len(), 2);
+        let seq0 = batches[0]
+            .column_by_name("_ingest_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        let seq1 = batches[1]
+            .column_by_name("_ingest_seq")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(seq0, 0);
+        assert_eq!(seq1, 1);
         Ok(())
     }
 }

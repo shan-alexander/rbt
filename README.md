@@ -86,14 +86,17 @@ bash scripts/smoke_feat_a1_a7.sh   # multi-value + scoped_replace + keyed_upsert
 
 ## Library embed (0.9 / L1)
 
+Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + workspace recipe).
+
 | Surface | Entry points |
 |---------|----------------|
 | Feature flags | `sql`, `parquet`, `jshift`, `iceberg`, `cli` (see [ADR-004](docs/adr/ADR_004_FEATURE_FLAGS.md)) |
-| Shared stack | `rbt::arrow`, `rbt::parquet`, `rbt::datafusion` ([ADR-005](docs/adr/ADR_005_DATA_STACK_REEXPORTS.md)) |
+| Shared stack | `rbt::arrow`, `rbt::parquet`, `rbt::datafusion` only — never dual-link Arrow majors |
 | Programmatic DAG | `DagBuilder`, `ModelSpec` ([ADR-006](docs/adr/ADR_006_DAG_BUILDER_IR.md)) |
 | Lake ops | `ops::plan_skip`, `stage_model_spec`, `upsert_registry` ([ADR-007](docs/adr/ADR_007_LAKE_OPS_FACADE.md)) |
+| Stage re-entry | `stage_register_bronze`, `stage_execute_tiers`, `stage_write_receipt` |
 | Host UDFs | `UdfPack`, `RbtEngineBuilder::with_udf_pack` ([ADR-008](docs/adr/ADR_008_UDF_HOST_SURFACE.md)) |
-| Bronze adapters | `BronzeAdapter`, `adapter_for`, `read_with_adapter` — [BRONZE_ADAPTERS.md](docs/BRONZE_ADAPTERS.md) |
+| Bronze adapters | builtins + `register_host_adapter` / `register_named_adapter` — [BRONZE_ADAPTERS.md](docs/BRONZE_ADAPTERS.md) |
 
 ## CLI
 

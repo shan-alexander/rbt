@@ -171,9 +171,15 @@ pub use ops::{
     keyed_upsert_model_spec, plan_skip, stage_model_spec, upsert_registry, SkipPlan,
 };
 pub use scan::adapter::{
-    adapter_for, builtin_adapters, read_with_adapter, BronzeAdapter,
+    adapter_for, adapter_for_name, builtin_adapters, clear_host_adapters, read_with_adapter,
+    register_host_adapter, register_named_adapter, resolve_for_request, AdapterRegistry,
+    BronzeAdapter, NamedBronzeAdapter, ResolvedAdapter,
 };
-pub use scan::{parse_hive_partitions, LakeScanner, ScanRequest};
+pub use scan::{parse_hive_partitions, LakeScanner, ScanFileOrder, ScanRequest};
+pub use engine::stages::{
+    expand_model_selection, stage_plan_skip, stage_write_receipt, ExecuteTiersOptions,
+    PipelineStage, ReceiptWriteArgs, StageExecuteResult,
+};
 // parts re-exported above
 
 pub use testing::{
