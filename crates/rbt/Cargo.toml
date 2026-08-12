@@ -13,6 +13,18 @@ keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
 
+[features]
+# Full product by default (CLI install + DE examples). Embedders opt down:
+#   rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
+default = ["sql", "parquet", "jshift", "iceberg", "cli"]
+# Markers for documentation / future splits; core always needs DF + Arrow + Parquet.
+sql = []
+parquet = []
+# Optional heavy / specialized stack
+jshift = ["dep:jshift"]
+iceberg = ["dep:iceberg", "dep:iceberg-datafusion"]
+cli = ["dep:clap"]
+
 [lib]
 # Library import path stays `rbt::…` even though the package is `rbt-datalake`.
 name = "rbt"
@@ -22,19 +34,21 @@ path = "src/lib.rs"
 name = "rbt"
 path = "src/main.rs"
 doc = false
+required-features = ["cli"]
 
 [dependencies]
 # async / runtime
 tokio = { workspace = true }
 async-trait = { workspace = true }
 
-# data stack
+# data stack (core)
 arrow = { workspace = true }
 parquet = { workspace = true }
 datafusion = { workspace = true }
-iceberg = { workspace = true }
-iceberg-datafusion = { workspace = true }
-jshift = { workspace = true }
+# optional data stack
+iceberg = { workspace = true, optional = true }
+iceberg-datafusion = { workspace = true, optional = true }
+jshift = { workspace = true, optional = true }
 
 # project / DAG
 petgraph = { workspace = true }
@@ -52,8 +66,8 @@ tempfile = { workspace = true }
 blake3 = { workspace = true }
 sha2 = { workspace = true }
 
-# cli
-clap = { workspace = true }
+# cli (optional)
+clap = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }

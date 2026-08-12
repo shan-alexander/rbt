@@ -3,6 +3,7 @@
 //! **Streaming materialize** ([`stream`]) is the default engine path: pull a DataFusion
 //! batch stream, write batch-by-batch, drop each batch, atomic-publish the file.
 
+#[cfg(feature = "iceberg")]
 pub mod iceberg_catalog;
 pub mod incremental;
 pub mod lineage;
@@ -10,6 +11,7 @@ pub mod stream;
 pub mod upsert;
 pub mod wap;
 
+#[cfg(feature = "iceberg")]
 pub use iceberg_catalog::{
     verify_iceberg_catalog_table, write_iceberg_catalog_batches, write_iceberg_catalog_stream,
     IcebergCatalogOptions, IcebergCatalogWriteStats,
@@ -106,7 +108,12 @@ impl MultiFormatWriter {
                 );
                 match opts.iceberg_mode {
                     crate::core::project::IcebergWriteMode::Catalog => {
+                        #[cfg(feature = "iceberg")]
                         write_iceberg_catalog_batches_sync(batches, destination_path, &opts)?;
+                        #[cfg(not(feature = "iceberg"))]
+                        anyhow::bail!(
+                            "E_RBT_FEATURE: iceberg catalog requires cargo feature `iceberg`"
+                        );
                     }
                     crate::core::project::IcebergWriteMode::Filesystem => {
                         write_iceberg_fs_table(batches, destination_path)?;
@@ -129,6 +136,7 @@ impl MultiFormatWriter {
     }
 }
 
+#[cfg(feature = "iceberg")]
 fn write_iceberg_catalog_batches_sync(
     batches: &[RecordBatch],
     destination_path: &Path,

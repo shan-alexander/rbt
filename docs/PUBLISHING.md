@@ -12,6 +12,22 @@ cargo publish -p rbt-datalake
 
 Package name on crates.io: **`rbt-datalake`**. Binary: **`rbt`**. Lib import: **`rbt::`**.
 
+### Cargo features (RBT-L1.1 / ADR-004)
+
+| Feature | Default | Notes |
+|---------|---------|--------|
+| `sql` | yes | Marker (DataFusion always linked) |
+| `parquet` | yes | Marker (Parquet materialize always linked) |
+| `jshift` | yes | Selective JSON path extract |
+| `iceberg` | yes | Iceberg **catalog** crate (+ DF provider) |
+| `cli` | yes | Binary `rbt` (required-features) |
+
+Embed without Iceberg / CLI:
+
+```toml
+rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
+```
+
 Link: https://crates.io/crates/rbt-datalake
 
 ## Orphan deprecation stubs (0.0.4)

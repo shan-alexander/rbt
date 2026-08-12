@@ -22,7 +22,19 @@ impl JShiftExtractor {
 
     /// Extracts target JSON paths from a JSONL byte stream (lines separated by `\n`)
     /// and constructs a RecordBatch according to the provided target schema.
+    ///
+    /// Requires cargo feature `jshift` (default). Without it, returns `E_RBT_FEATURE`.
     pub fn extract_jsonl(&self, jsonl_bytes: &[u8], schema: SchemaRef) -> Result<RecordBatch> {
+        #[cfg(not(feature = "jshift"))]
+        {
+            let _ = (jsonl_bytes, schema);
+            anyhow::bail!(
+                "E_RBT_FEATURE: selective JSON path extract requires cargo feature `jshift` \
+                 (enable rbt-datalake/jshift, or omit frontmatter `paths:` and use full JSONL scan)"
+            );
+        }
+        #[cfg(feature = "jshift")]
+        {
         let lines: Vec<&[u8]> = jsonl_bytes
             .split(|&b| b == b'\n')
             .map(trim_bytes) // Remove trailing \r or whitespaces
@@ -96,6 +108,7 @@ impl JShiftExtractor {
         let arrays: Vec<ArrayRef> = builders.into_iter().map(|mut b| b.finish()).collect();
         let batch = RecordBatch::try_new(schema, arrays)?;
         Ok(batch)
+        } // cfg jshift
     }
 }
 

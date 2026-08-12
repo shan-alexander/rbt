@@ -173,17 +173,28 @@ pub async fn materialize_stream(
         }
         OutputFormat::Iceberg => match opts.iceberg_mode {
             crate::core::project::IcebergWriteMode::Catalog => {
-                crate::materializer::iceberg_catalog::write_iceberg_catalog_stream(
-                    &mut stream,
-                    destination_path,
-                    &crate::materializer::iceberg_catalog::IcebergCatalogOptions {
-                        namespace: opts.iceberg_namespace.clone(),
-                        warehouse: Some(destination_path.to_path_buf()),
-                    },
-                    opts,
-                    assertions,
-                )
-                .await
+                #[cfg(feature = "iceberg")]
+                {
+                    crate::materializer::iceberg_catalog::write_iceberg_catalog_stream(
+                        &mut stream,
+                        destination_path,
+                        &crate::materializer::iceberg_catalog::IcebergCatalogOptions {
+                            namespace: opts.iceberg_namespace.clone(),
+                            warehouse: Some(destination_path.to_path_buf()),
+                        },
+                        opts,
+                        assertions,
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "iceberg"))]
+                {
+                    let _ = (&mut stream, destination_path, opts, assertions);
+                    anyhow::bail!(
+                        "E_RBT_FEATURE: iceberg catalog write requires cargo feature `iceberg` \
+                         (enable rbt-datalake/iceberg, or use materialize.iceberg.mode: filesystem)"
+                    )
+                }
             }
             crate::core::project::IcebergWriteMode::Filesystem => {
                 write_iceberg_stream(&mut stream, destination_path, opts, assertions).await

@@ -94,8 +94,26 @@ RBT-A11 / A12 / A13 — after A2/A5 or parallel if staffed
 **MVP slice for entity registry tables:** A7 (Parquet keyed_upsert) + entity_registry playbook.  
 **MVP slice for multi-format bronze:** A10 (adapters + ergonomics).  
 **MVP slice for star-schema DX:** A18 model_type + A16 SK + A19 SCD2 (after A7 hardened).  
-**MVP slice for library embedders (qsys-class):** L1 feature flags + DagBuilder + UDF hooks  
+**MVP slice for library embedders:** L1 feature flags + DagBuilder + UDF hooks  
   (see [library-embedding-and-dag-crate-survey.md](../analysis/library-embedding-and-dag-crate-survey.md)).
+
+---
+
+## 2b. Epic RBT-L1 — Embeddable library surface
+
+> **Status:** In progress on `feat/l1-embeddable-library`.  
+> **ADRs:** [[ADR-004 Feature flags]] · [[ADR-005 Data stack re-exports]] ·
+> [[ADR-006 DagBuilder IR]] · [[ADR-007 Lake ops façade]] · [[ADR-008 UDF host surface]]
+
+| ID | Task | ADR |
+|----|------|-----|
+| **L1.1** | Cargo features: default full; optional `iceberg`, `jshift`, `cli` | ADR-004 |
+| **L1.2** | Re-export `arrow` / `parquet` / `datafusion` (+ `iceberg` when enabled) | ADR-005 |
+| **L1.3** | `DagBuilder` / `ModelSpec` programmatic IR; file project as frontend | ADR-006 |
+| **L1.4** | Lake ops façade (skip, stage helpers, upsert write) | ADR-007 |
+| **L1.5** | `RbtEngineBuilder::with_udfs` / `register_udfs` host pack hook | ADR-008 |
+
+**Non-goals for L1:** generic Temporal/Airflow scheduler; host math kernels inside rbt.
 
 ---
 

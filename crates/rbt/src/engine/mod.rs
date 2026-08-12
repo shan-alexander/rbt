@@ -27,7 +27,9 @@ use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
+#[cfg(feature = "iceberg")]
 use iceberg::Catalog;
+#[cfg(feature = "iceberg")]
 use iceberg_datafusion::IcebergCatalogProvider;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -82,9 +84,26 @@ pub struct PreviewResult {
 }
 
 /// Fluent Builder for configuring and launching `TransformationEngine` instances.
-#[derive(Default)]
+///
+/// # Patterns
+///
+/// Creational **Builder**: optional Iceberg catalogs (feature `iceberg`) and UDF
+/// registration hooks (see [`RbtEngineBuilder::with_udfs`]).
 pub struct RbtEngineBuilder {
+    #[cfg(feature = "iceberg")]
     catalogs: Vec<(String, Arc<dyn Catalog>)>,
+    /// Host UDF registration (Design A). Runs after builtins on build.
+    udf_hooks: Vec<Box<dyn FnOnce(&SessionContext) -> Result<()> + Send>>,
+}
+
+impl Default for RbtEngineBuilder {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "iceberg")]
+            catalogs: Vec::new(),
+            udf_hooks: Vec::new(),
+        }
+    }
 }
 
 impl RbtEngineBuilder {
@@ -92,13 +111,30 @@ impl RbtEngineBuilder {
         Self::default()
     }
 
+    /// Register an Iceberg catalog into the session (requires feature `iceberg`).
+    #[cfg(feature = "iceberg")]
     pub fn with_catalog(mut self, name: impl Into<String>, catalog: Arc<dyn Catalog>) -> Self {
         self.catalogs.push((name.into(), catalog));
         self
     }
 
+    /// Register host UDFs after built-ins (RBT-L1.5). Prefer one hook that registers a pack.
+    ///
+    /// Enables Strategy / plugin-style extension without subclassing the engine.
+    pub fn with_udfs<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(&SessionContext) -> Result<()> + Send + 'static,
+    {
+        self.udf_hooks.push(Box::new(f));
+        self
+    }
+
     pub async fn build(self) -> Result<TransformationEngine> {
         let engine = TransformationEngine::new();
+        for hook in self.udf_hooks {
+            hook(&engine.ctx)?;
+        }
+        #[cfg(feature = "iceberg")]
         for (name, cat) in self.catalogs {
             engine.register_iceberg_catalog(&name, cat).await?;
         }
@@ -164,6 +200,9 @@ impl TransformationEngine {
     }
 
     /// Registers an Apache Iceberg catalog directly into the DataFusion query context.
+    ///
+    /// Requires cargo feature `iceberg`.
+    #[cfg(feature = "iceberg")]
     pub async fn register_iceberg_catalog(
         &self,
         catalog_name: &str,
@@ -176,6 +215,14 @@ impl TransformationEngine {
         let provider = IcebergCatalogProvider::try_new(catalog).await?;
         self.ctx.register_catalog(catalog_name, Arc::new(provider));
         Ok(())
+    }
+
+    /// Register host UDFs on the live engine (after construction).
+    pub fn register_udfs<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&SessionContext) -> Result<()>,
+    {
+        f(&self.ctx)
     }
 
     /// Executes a SQL transform query against registered tables.
