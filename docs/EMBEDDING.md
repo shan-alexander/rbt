@@ -98,6 +98,30 @@ rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "
 | Stage re-entry | `stage_register_bronze`, `stage_execute_tiers`, `stage_write_receipt` |
 | Bronze formats | `register_host_adapter`, `register_named_adapter` |
 | UDFs | `UdfPack`, `RbtEngineBuilder::with_udf_pack` |
+| Design B Rust models | `RustModel`, `ModelSpec::rust`, `with_rust_model` |
+
+### Design B sketch
+
+```rust
+use rbt::{async_trait, ModelSpec, RbtEngineBuilder, RustModel, RustModelContext, RustModelOutput};
+use rbt::arrow::datatypes::{DataType, Field, Schema};
+use std::sync::Arc;
+
+struct MyNode;
+#[async_trait]
+impl RustModel for MyNode {
+    fn name(&self) -> &str { "tf_my_node" }
+    fn output_schema(&self) -> arrow::datatypes::SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+    }
+    async fn execute(&self, ctx: &RustModelContext<'_>) -> anyhow::Result<RustModelOutput> {
+        let df = ctx.session.sql(r#"SELECT id FROM "stg_upstream""#).await?;
+        Ok(RustModelOutput::Batches(df.collect().await?))
+    }
+}
+// ModelSpec::rust("tf_my_node").refs(["stg_upstream"])
+// RbtEngineBuilder::new().with_rust_model(MyNode).build().await?;
+```
 
 ## Anti-patterns
 
