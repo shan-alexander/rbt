@@ -83,6 +83,7 @@ pub mod engine;
 pub mod json;
 pub mod materializer;
 pub mod measure;
+pub mod ops;
 pub mod scan;
 pub mod testing;
 
@@ -140,6 +141,9 @@ pub use measure::{
 };
 
 pub use json::{JShiftExtractor, JsonExtractSpec};
+pub use ops::{
+    keyed_upsert_model_spec, plan_skip, stage_model_spec, upsert_registry, SkipPlan,
+};
 pub use scan::{parse_hive_partitions, LakeScanner, ScanRequest};
 // parts re-exported above
 

@@ -110,7 +110,7 @@ RBT-A11 / A12 / A13 — after A2/A5 or parallel if staffed
 | **L1.1** | Cargo features: default full; optional `iceberg`, `jshift`, `cli` | ADR-004 |
 | **L1.2** | Re-export `arrow` / `parquet` / `datafusion` (+ `iceberg` when enabled) | ADR-005 |
 | **L1.3** | `DagBuilder` / `ModelSpec` programmatic IR; file project as frontend | ADR-006 |
-| **L1.4** | Lake ops façade (skip, stage helpers, upsert write) | ADR-007 |
+| **L1.4** | Lake ops façade (`ops::plan_skip`, `stage_model_spec`, `upsert_registry`) | ADR-007 |
 | **L1.5** | `RbtEngineBuilder::with_udfs` / `register_udfs` host pack hook | ADR-008 |
 
 **Non-goals for L1:** generic Temporal/Airflow scheduler; host math kernels inside rbt.
