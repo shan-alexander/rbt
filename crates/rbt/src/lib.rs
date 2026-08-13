@@ -113,7 +113,7 @@
 //! `with_var_multi` bind hive **IN** filters. Showcase:
 //! `examples/a1_multi_value_scope`.
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.10.0")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.10.1")]
 
 pub mod core;
 pub mod engine;
@@ -137,13 +137,14 @@ pub use core::{
     FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode,
     Materialization, MaterializeConfig, MaterializeMode, ModelDag, ModelKind, ModelLayer, ModelNode,
     ModelRole, ModelRunResult, ModelSpec, ModelTests,
-    OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, RbtProjectConfig, RbtTemplateEngine,
-    RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus, ScanConfig,
-    ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser, StagingFrontmatter,
-    DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
-    DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES, SUPPORTED_LOGICAL_DTYPES,
-    align_batches_to_declared, declared_schema_for_frontmatter, empty_batch_for_frontmatter,
-    ensure_declared_columns, merge_stream_and_declared, try_declared_schema,
+    OnMissing, OnNewPolicy, OutputFormat, PathGlobSet, ProjectLoadMode, RbtProjectConfig,
+    RbtTemplateEngine, RefBackend, RefStrategy, RelationshipTest, RunReceipt, RunScope, RunStatus,
+    ScanConfig, ScopeValue, SelectMode, SelectToken, SourceFormat, SqlModelParser,
+    StagingFrontmatter, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
+    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_MULTI_VAR_LIMIT, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    SUPPORTED_LOGICAL_DTYPES, align_batches_to_declared, declared_schema_for_frontmatter,
+    empty_batch_for_frontmatter, ensure_declared_columns, merge_stream_and_declared,
+    try_declared_schema, run_doctor, DoctorFinding, DoctorReport, DoctorSeverity, ErrorReport,
 };
 
 pub use engine::{

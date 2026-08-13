@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rbt::{
     consolidate_parts_to_parquet, model_has_test_contract, parts_dir_for_parquet, run_contract_diff,
-    BronzeCheckMode, MaterializeWriteOptions, OutputFormat, RbtProjectConfig, RunScope, SelectMode,
-    TransformationEngine,
+    run_doctor, BronzeCheckMode, DoctorSeverity, MaterializeWriteOptions, OutputFormat,
+    RbtProjectConfig, RunScope, SelectMode, TransformationEngine,
 };
 
 use std::path::PathBuf;
@@ -79,6 +79,9 @@ impl RunScopeArgs {
     about = "Rust lake build tool: medallion SQL DAGs on Parquet/Iceberg-style tables"
 )]
 struct Cli {
+    /// On failure, emit structured JSON error report to stderr (code/context/fixes).
+    #[arg(long, global = true, default_value_t = false)]
+    error_json: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -279,6 +282,14 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// Preflight project health: yml, roots, layer dirs, DAG, sample output paths
+    Doctor {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        /// Emit doctor report JSON to stdout
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -290,7 +301,39 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let error_json = cli.error_json;
+    let result = run_cli(cli).await;
+    if let Err(ref e) = result {
+        if error_json {
+            // Prefer the full multi-line message as summary; code best-effort from text.
+            let msg = format!("{e:#}");
+            let code = msg
+                .lines()
+                .find_map(|l| {
+                    let l = l.trim();
+                    if let Some(rest) = l.strip_prefix("error[") {
+                        rest.split(']').next().map(|s| s.to_string())
+                    } else if l.starts_with("E_RBT_") {
+                        l.split(|c: char| c == ':' || c.is_whitespace())
+                            .next()
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "E_RBT_ERROR".into());
+            let report = serde_json::json!({
+                "ok": false,
+                "code": code,
+                "message": msg,
+            });
+            eprintln!("{}", serde_json::to_string_pretty(&report).unwrap_or_default());
+        }
+    }
+    result
+}
 
+async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Compile {
             project_dir,
@@ -303,7 +346,7 @@ async fn main() -> Result<()> {
                 select,
                 BronzeCheckMode::from(bronze_check.clone())
             );
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let config = RbtProjectConfig::load_for_cli(&project_dir)?;
             let full = config.build_dag(&project_dir, None)?;
             let dag = full.apply_select(select.as_deref(), SelectMode::Exact)?;
             let tiers = dag.execution_tiers()?;
@@ -361,7 +404,7 @@ async fn main() -> Result<()> {
             }
             let start = Instant::now();
 
-            let mut config = RbtProjectConfig::load(&project_dir)?;
+            let mut config = RbtProjectConfig::load_for_cli(&project_dir)?;
             scope.apply_fingerprint_override(&mut config)?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
             let dag = full
@@ -470,7 +513,7 @@ async fn main() -> Result<()> {
                 (None, None) => None,
             };
             let run_scope = scope.to_scope()?;
-            let mut config = RbtProjectConfig::load(&project_dir)?;
+            let mut config = RbtProjectConfig::load_for_cli(&project_dir)?;
             scope.apply_fingerprint_override(&mut config)?;
 
             println!(
@@ -551,7 +594,7 @@ async fn main() -> Result<()> {
             vars,
             var_files,
         } => {
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let config = RbtProjectConfig::load_for_cli(&project_dir)?;
             let full = config.build_dag(&project_dir, None)?;
             let dag = full.apply_select(select.as_deref(), SelectMode::Exact)?;
             let tiers = dag.execution_tiers()?;
@@ -691,7 +734,7 @@ async fn main() -> Result<()> {
             select,
             json,
         } => {
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let config = RbtProjectConfig::load_for_cli(&project_dir)?;
             let full = config.build_dag(&project_dir, None)?;
             let name = select.trim();
             let node = full
@@ -763,7 +806,7 @@ async fn main() -> Result<()> {
             format,
             bronze_check,
         } => {
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let config = RbtProjectConfig::load_for_cli(&project_dir)?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
             let report = full.validate_bronze_sources_with_roots(
                 &project_dir,
@@ -871,7 +914,7 @@ async fn main() -> Result<()> {
             output_dir,
             json,
         } => {
-            let config = RbtProjectConfig::load(&project_dir)?;
+            let config = RbtProjectConfig::load_for_cli(&project_dir)?;
             let full = config.build_dag(&project_dir, None)?;
             let name = select.trim();
             let node = full
@@ -920,6 +963,34 @@ async fn main() -> Result<()> {
                     "  parts remain authoritative at {}; monolith is a convenience rebuild",
                     parts.display()
                 );
+            }
+        }
+        Commands::Doctor { project_dir, json } => {
+            let report = run_doctor(&project_dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("[rbt] doctor project={}", report.project_dir);
+                for f in &report.findings {
+                    let tag = match f.severity {
+                        DoctorSeverity::Ok => "ok",
+                        DoctorSeverity::Warn => "warn",
+                        DoctorSeverity::Error => "error",
+                    };
+                    if let Some(ref p) = f.path {
+                        println!("  [{tag}] {}: {} ({})", f.code, f.message, p);
+                    } else {
+                        println!("  [{tag}] {}: {}", f.code, f.message);
+                    }
+                }
+                if report.ok {
+                    println!("[rbt] doctor OK");
+                } else {
+                    println!("[rbt] doctor found errors — fix before run");
+                }
+            }
+            if !report.ok {
+                bail!("[rbt] doctor failed (see findings above)");
             }
         }
         Commands::Bench { num_rows } => {

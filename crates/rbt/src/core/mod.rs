@@ -3,6 +3,8 @@
 pub mod contracts;
 pub mod dag;
 pub mod dag_builder;
+pub mod diagnostics;
+pub mod doctor;
 pub mod frontmatter;
 pub mod parser;
 pub mod paths;
@@ -16,6 +18,12 @@ pub use contracts::{
     contract_diff_to_bronze_diagnostics, run_contract_diff, strip_contract_prefix, ContractsConfig,
     ContractDiffColumn, ContractDiffReport, EnumContract, EnumProbe, OnNewPolicy,
 };
+pub use diagnostics::{
+    dep_missing_report, extract_missing_table_hint, format_model_list, is_table_not_found_error,
+    list_siblings, project_missing_report, ref_missing_report, sql_table_report, ContextField,
+    DoctorFinding, DoctorReport, DoctorSeverity, ErrorReport,
+};
+pub use doctor::run_doctor;
 pub use dag::{
     parse_materialization_hint, Materialization, ModelDag, ModelKind, ModelLayer, ModelNode,
     ModelRole, OutputFormat,
@@ -34,9 +42,9 @@ pub use paths::{
 };
 pub use project::{
     ConsolidatePolicy, FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig,
-    IcebergWriteMode, MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend, RefStrategy,
-    ScanConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
-    DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    IcebergWriteMode, MaterializeConfig, MaterializeMode, ProjectLoadMode, RbtProjectConfig,
+    RefBackend, RefStrategy, ScanConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
+    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
 };
 pub use receipt::{
     apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version,

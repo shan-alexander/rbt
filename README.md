@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.10.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` nodes.
+> **Status:** **`0.10.1`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` nodes.
 
 ## Why rbt
 

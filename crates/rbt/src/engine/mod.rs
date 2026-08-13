@@ -1172,9 +1172,7 @@ impl TransformationEngine {
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
                         MaterializeMode::Stream,
                     ) => {
-                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
-                            format!("E_RBT_SQL: model '{}'", model.name)
-                        })?;
+                        let df = sql_for_model(&self.ctx, model).await?;
                         let stream = df.execute_stream().await?;
                         let stats = materialize_incremental_append_stream(
                             stream,
@@ -1228,9 +1226,7 @@ impl TransformationEngine {
                                 model.name
                             )
                         })?;
-                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
-                            format!("E_RBT_SQL: model '{}'", model.name)
-                        })?;
+                        let df = sql_for_model(&self.ctx, model).await?;
                         let stream = df.execute_stream().await?;
                         let stats = materialize_scoped_replace_stream(
                             stream,
@@ -1262,9 +1258,7 @@ impl TransformationEngine {
                         MaterializeMode::Stream,
                     ) if !materialize.consolidate.table_writes_monolith() => {
                         // A5: consolidate: never → parts only for table
-                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
-                            format!("E_RBT_SQL: model '{}'", model.name)
-                        })?;
+                        let df = sql_for_model(&self.ctx, model).await?;
                         let stream = df.execute_stream().await?;
                         let stats = materialize_table_parts_only_stream(
                             stream,
@@ -1301,9 +1295,7 @@ impl TransformationEngine {
                                 model.name
                             )
                         })?;
-                        let df = self.ctx.sql(&model.compiled_sql).await.with_context(|| {
-                            format!("E_RBT_SQL: model '{}'", model.name)
-                        })?;
+                        let df = sql_for_model(&self.ctx, model).await?;
                         let mut batches = df.collect().await.with_context(|| {
                             format!("E_RBT_SQL: collect for keyed_upsert model '{}'", model.name)
                         })?;
@@ -1707,12 +1699,7 @@ async fn execute_model_stream(
     assertions: &[Assertion],
     fail_on_error: bool,
 ) -> Result<StreamWriteStats> {
-    let df = ctx.sql(&model.compiled_sql).await.with_context(|| {
-        format!(
-            "E_RBT_SQL: execution failed for model '{}' (compiled: {})",
-            model.name, model.compiled_sql
-        )
-    })?;
+    let df = sql_for_model(ctx, model).await?;
     let stream = df.execute_stream().await.with_context(|| {
         format!(
             "E_RBT_SQL: execute_stream failed for model '{}'",
@@ -1779,12 +1766,7 @@ async fn execute_model_collect(
     use crate::materializer::write_empty_parquet;
     use datafusion::common::DFSchema;
 
-    let df = ctx.sql(&model.compiled_sql).await.with_context(|| {
-        format!(
-            "E_RBT_SQL: execution failed for model '{}' (compiled: {})",
-            model.name, model.compiled_sql
-        )
-    })?;
+    let df = sql_for_model(ctx, model).await?;
     // DFSchema → Arrow Schema for declared merge on zero-row collect.
     let sql_schema: arrow::datatypes::SchemaRef = {
         let df_schema: &DFSchema = df.schema();
@@ -1997,7 +1979,7 @@ async fn register_model_for_ref(
                 | OutputFormat::ZeroCopyClone
                 | OutputFormat::Iceberg
                 | OutputFormat::ParquetAndIceberg => {
-                    let path = resolve_lake_read_path(format, dest_path)?;
+                    let path = resolve_lake_read_path_for(format, dest_path, Some(name), None)?;
                     load_parquet_batches(&path).with_context(|| {
                         format!(
                             "E_RBT_REF_MEMTABLE: load {} for ref('{name}')",
@@ -2036,7 +2018,7 @@ async fn register_model_for_ref(
             | OutputFormat::ZeroCopyClone
             | OutputFormat::Iceberg
             | OutputFormat::ParquetAndIceberg => {
-                let path = resolve_lake_read_path(format, dest_path)?;
+                let path = resolve_lake_read_path_for(format, dest_path, Some(name), None)?;
                 ctx.register_parquet(
                     name,
                     path.to_str().unwrap_or_default(),
@@ -2076,7 +2058,12 @@ async fn register_model_for_ref(
     Ok(())
 }
 
-fn resolve_lake_read_path(format: &OutputFormat, dest_path: &Path) -> Result<PathBuf> {
+fn resolve_lake_read_path_for(
+    format: &OutputFormat,
+    dest_path: &Path,
+    upstream_model: Option<&str>,
+    current_model: Option<&str>,
+) -> Result<PathBuf> {
     let mut path = lake_read_path(format, dest_path);
     if !path.exists() && matches!(format, OutputFormat::ParquetAndIceberg) {
         let alt = sibling_iceberg_dir(dest_path).join("data/part-00000.parquet");
@@ -2085,12 +2072,97 @@ fn resolve_lake_read_path(format: &OutputFormat, dest_path: &Path) -> Result<Pat
         }
     }
     if !path.exists() {
-        bail!(
-            "E_RBT_REF_MISSING: lake file missing for ref(): expected {}",
-            path.display()
-        );
+        let name = upstream_model.unwrap_or_else(|| {
+            dest_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        });
+        let layer_hint = if name.starts_with("stg_") {
+            Some("staging")
+        } else if name.starts_with("tf_") || name.starts_with("int_") {
+            Some("transforms")
+        } else if name.starts_with("dim_") || name.starts_with("fact_") || name.starts_with("obt_") {
+            Some("marts")
+        } else {
+            None
+        };
+        return Err(crate::core::diagnostics::ref_missing_report(
+            name,
+            &path,
+            current_model,
+            layer_hint,
+        )
+        .into_error());
     }
     Ok(path)
+}
+
+/// Best-effort list of bare table names registered on the session (for diagnostics).
+fn list_registered_table_names(ctx: &SessionContext) -> Vec<String> {
+    let mut names = Vec::new();
+    // catalog.schema.table walk — DataFusion SessionState
+    let state = ctx.state();
+    let catalog_list = state.catalog_list();
+    for cat_name in catalog_list.catalog_names() {
+        let Some(cat) = catalog_list.catalog(&cat_name) else {
+            continue;
+        };
+        for schema_name in cat.schema_names() {
+            let Some(schema) = cat.schema(&schema_name) else {
+                continue;
+            };
+            for t in schema.table_names() {
+                names.push(t);
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Rewrap SQL failures: DF "table not found" → structured `E_RBT_SQL_TABLE`.
+fn enrich_sql_error(
+    ctx: &SessionContext,
+    model: &ModelNode,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    let full = format!("{err:#}");
+    if crate::core::diagnostics::is_table_not_found_error(&full) {
+        let missing = crate::core::diagnostics::extract_missing_table_hint(&full);
+        let registered = list_registered_table_names(ctx);
+        let snippet: String = model
+            .compiled_sql
+            .chars()
+            .take(240)
+            .collect();
+        return crate::core::diagnostics::sql_table_report(
+            &model.name,
+            &full,
+            missing.as_deref(),
+            &registered,
+            Some(&snippet),
+        )
+        .into_error();
+    }
+    err
+}
+
+/// Run SQL for a model with enriched table-not-found diagnostics.
+async fn sql_for_model(
+    ctx: &SessionContext,
+    model: &ModelNode,
+) -> Result<datafusion::dataframe::DataFrame> {
+    ctx.sql(&model.compiled_sql)
+        .await
+        .map_err(|e| {
+            enrich_sql_error(
+                ctx,
+                model,
+                anyhow::anyhow!(e).context(format!("E_RBT_SQL: model '{}'", model.name)),
+            )
+        })
 }
 
 #[cfg(test)]

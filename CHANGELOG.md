@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-08-13
+
+### Added (diagnostics P0–P2)
+
+- **CLI:** missing `rbt_project.yml` → `E_RBT_PROJECT_MISSING` with What failed / Context / How to fix
+  (override: `RBT_ALLOW_DEFAULT_PROJECT=1` for intentional defaults)
+- **`E_RBT_REF_MISSING`:** upstream model, expected path, parent/siblings, rebuild selects
+- **`E_RBT_SQL_TABLE`:** wraps DataFusion table-not-found with registered tables + fix steps
+- **`E_RBT_DEP_MISSING`:** missing `ref()` dependency lists models already in the DAG
+- **`--error-json`:** global flag emits structured JSON error on failure
+- **`rbt doctor -p`:** preflight yml/roots/layers/DAG/sample outputs (`--json` supported)
+- Module: `core/diagnostics.rs`, `core/doctor.rs`
+
 ### Added
 
 - **`materialize.wap_root`** — configurable WAP staging root (default `{project}/.wap`;

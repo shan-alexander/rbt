@@ -484,23 +484,67 @@ impl Default for RbtProjectConfig {
     }
 }
 
+/// How [`RbtProjectConfig::load_with_mode`] treats a missing yml file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectLoadMode {
+    /// Missing yml → built-in defaults (library / tests).
+    DefaultIfMissing,
+    /// Missing yml → `E_RBT_PROJECT_MISSING` (CLI default).
+    RequireYml,
+}
+
 impl RbtProjectConfig {
     /// Loads `rbt_project.yml` from project directory or returns default configuration.
+    ///
+    /// Library / tests: missing yml → defaults (no error). Prefer [`Self::load_for_cli`]
+    /// for operator-facing runs so a deleted config is not silently ignored.
     pub fn load(project_dir: &Path) -> Result<Self> {
+        Self::load_with_mode(project_dir, ProjectLoadMode::DefaultIfMissing)
+    }
+
+    /// CLI load: missing `rbt_project.yml` is an error unless
+    /// `RBT_ALLOW_DEFAULT_PROJECT=1` (or `true` / `yes`).
+    pub fn load_for_cli(project_dir: &Path) -> Result<Self> {
+        let allow_default = std::env::var("RBT_ALLOW_DEFAULT_PROJECT")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if allow_default {
+            Self::load_with_mode(project_dir, ProjectLoadMode::DefaultIfMissing)
+        } else {
+            Self::load_with_mode(project_dir, ProjectLoadMode::RequireYml)
+        }
+    }
+
+    /// Load with explicit missing-yml policy.
+    pub fn load_with_mode(project_dir: &Path, mode: ProjectLoadMode) -> Result<Self> {
         let project_file = project_dir.join("rbt_project.yml");
         if project_file.exists() {
             let content = fs::read_to_string(&project_file).with_context(|| {
                 format!(
-                    "E_RBT_PROJECT_LOAD: cannot read project file {}",
+                    "E_RBT_PROJECT_LOAD: cannot read project file {}\n\n\
+                     What failed:\n  Config file exists but is unreadable (permissions or I/O).\n\n\
+                     How to fix:\n  1. Check file permissions / lock.\n  2. Re-checkout from git if corrupt.",
                     project_file.display()
                 )
             })?;
             let mut config: RbtProjectConfig = serde_yaml::from_str(&content).with_context(|| {
                 format!(
-                    "E_RBT_PROJECT_LOAD: failed to parse {}. \
-                     Check required keys (name, version, models_dir, target_path) and \
-                     optional materialize:/scan:/roots:/layers:/contracts:/fingerprint blocks.",
-                    project_file.display()
+                    "E_RBT_PROJECT_LOAD: failed to parse {}\n\n\
+                     What failed:\n  YAML syntax or type mismatch in project config.\n\n\
+                     Context:\n  project_dir: {}\n  file: {}\n\n\
+                     How to fix:\n  1. Validate YAML indentation and quotes.\n  \
+                     2. Check keys: name, version, models_dir, target_path, optional \
+                     materialize:/scan:/roots:/layers:/contracts:/fingerprint.\n  \
+                     3. rbt doctor -p {}",
+                    project_file.display(),
+                    project_dir.display(),
+                    project_file.display(),
+                    project_dir.display()
                 )
             })?;
 
@@ -511,9 +555,24 @@ impl RbtProjectConfig {
             config.fingerprint = config.fingerprint.with_env_overrides()?;
             Ok(config)
         } else {
-            let mut config = Self::default();
-            config.fingerprint = config.fingerprint.with_env_overrides()?;
-            Ok(config)
+            match mode {
+                ProjectLoadMode::RequireYml => {
+                    Err(crate::core::diagnostics::project_missing_report(project_dir).into_error())
+                }
+                ProjectLoadMode::DefaultIfMissing => {
+                    if project_dir.join("models").is_dir() {
+                        tracing::warn!(
+                            project_dir = %project_dir.display(),
+                            "W_RBT_PROJECT_DEFAULT: rbt_project.yml missing but models/ present; \
+                             using built-in defaults (roots/layers may be wrong). \
+                             CLI should use load_for_cli / restore yml."
+                        );
+                    }
+                    let mut config = Self::default();
+                    config.fingerprint = config.fingerprint.with_env_overrides()?;
+                    Ok(config)
+                }
+            }
         }
     }
 
@@ -983,6 +1042,18 @@ target_path: lake/gold
             DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES
         );
         Ok(())
+    }
+
+    #[test]
+    fn load_for_cli_requires_yml() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = RbtProjectConfig::load_with_mode(dir.path(), ProjectLoadMode::RequireYml)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("E_RBT_PROJECT_MISSING"), "{err}");
+        // library load still defaults
+        let cfg = RbtProjectConfig::load(dir.path()).unwrap();
+        assert_eq!(cfg.name, "rbt_project");
     }
 
     /// Workspace examples stay loadable / 0.3.7-shaped (roots + defaults).

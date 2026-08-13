@@ -322,11 +322,14 @@ impl ModelDag {
 
                         edges.push((dep_idx, idx));
                     } else {
-                        bail!(
-                            "Missing model dependency '{}' referenced by model '{}'",
+                        let available: Vec<String> = name_map.keys().cloned().collect();
+                        return Err(crate::core::diagnostics::dep_missing_report(
+                            &node.name,
                             dep_name,
-                            node.name
-                        );
+                            &available,
+                            None,
+                        )
+                        .into_error());
                     }
                 }
             }
