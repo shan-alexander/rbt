@@ -165,10 +165,17 @@ pub struct MaterializeConfig {
     /// Iceberg catalog vs filesystem layout.
     #[serde(default)]
     pub iceberg: IcebergConfig,
-    /// Write-Audit-Publish: stage under `.wap/{run_id}/`, audit, then atomic publish.
+    /// Write-Audit-Publish: stage under `{wap_root}/{run_id}/`, audit, then atomic publish.
     /// Default false (stream still uses partial→rename atomicity without WAP dirs).
     #[serde(default)]
     pub wap: bool,
+    /// Root directory for WAP staging (relative to project, absolute, or `$root` template).
+    ///
+    /// Default when omitted: `{project_dir}/.wap`. Put this on the **same volume** as lake
+    /// outputs when possible (Windows cannot `rename` across drives; we fall back to
+    /// copy+delete, but same-volume is still preferred for true atomicity).
+    #[serde(default)]
+    pub wap_root: Option<String>,
     /// Parts vs monolith publish policy (RBT-A5). Default `auto`.
     #[serde(default)]
     pub consolidate: ConsolidatePolicy,
@@ -196,6 +203,7 @@ impl Default for MaterializeConfig {
             max_row_group_bytes: DEFAULT_MAX_ROW_GROUP_BYTES,
             iceberg: IcebergConfig::default(),
             wap: false,
+            wap_root: None,
             consolidate: ConsolidatePolicy::Auto,
         }
     }

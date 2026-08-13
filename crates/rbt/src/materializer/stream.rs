@@ -113,7 +113,12 @@ fn remove_if_exists(path: &Path) {
     }
 }
 
-/// Atomically replace `dest` with `partial` (same filesystem). Cleans partial on failure.
+/// Atomically replace `dest` with `partial` when possible.
+///
+/// Prefer `rename` on the same volume. On cross-device failure (common when WAP stage
+/// lives on `C:` and lake outputs on `F:`), fall back to copy + remove of the partial.
+/// The copy path is not truly atomic on all OSes; place `materialize.wap_root` on the
+/// lake volume when you need same-volume renames.
 pub fn atomic_publish(partial: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
@@ -137,15 +142,55 @@ pub fn atomic_publish(partial: &Path, dest: &Path) -> Result<()> {
             })?;
         }
     }
-    fs::rename(partial, dest).with_context(|| {
-        format!(
-            "E_RBT_MATERIALIZE_ATOMIC: rename {} → {} failed. \
-             Partial file left for inspection if rename partially failed.",
-            partial.display(),
-            dest.display()
-        )
-    })?;
-    Ok(())
+    match fs::rename(partial, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if is_cross_device_rename_error(&e) => {
+            tracing::warn!(
+                from = %partial.display(),
+                to = %dest.display(),
+                "E_RBT_MATERIALIZE_ATOMIC: rename across volumes failed ({e}); \
+                 falling back to copy+delete. Prefer materialize.wap_root on the lake volume."
+            );
+            fs::copy(partial, dest).with_context(|| {
+                format!(
+                    "E_RBT_MATERIALIZE_ATOMIC: cross-volume copy {} → {} failed",
+                    partial.display(),
+                    dest.display()
+                )
+            })?;
+            fs::remove_file(partial).with_context(|| {
+                format!(
+                    "E_RBT_MATERIALIZE_ATOMIC: remove partial after copy {}",
+                    partial.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "E_RBT_MATERIALIZE_ATOMIC: rename {} → {} failed. \
+                 Partial file left for inspection if rename partially failed.",
+                partial.display(),
+                dest.display()
+            )
+        }),
+    }
+}
+
+/// Windows ERROR_NOT_SAME_DEVICE / Unix EXDEV-style rename failures.
+fn is_cross_device_rename_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        // Windows: ERROR_NOT_SAME_DEVICE = 17
+        Some(17)
+    ) || err.kind() == std::io::ErrorKind::CrossesDevices
+        || {
+            let s = err.to_string().to_ascii_lowercase();
+            s.contains("cross-device")
+                || s.contains("exdev")
+                || s.contains("not the same device")
+                || s.contains("cannot move the file to a different disk")
+        }
 }
 
 /// Stream a DataFusion result into `destination_path` for the given format.

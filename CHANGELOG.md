@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`materialize.wap_root`** — configurable WAP staging root (default `{project}/.wap`;
+  absolute / project-relative / `$root` templates). Prefer same volume as lake outputs.
+- **`atomic_publish` cross-volume fallback** — if rename fails across devices (Windows
+  C:→F:), copy+delete with a warning (same-volume rename still preferred).
+
 ## [0.10.0] — 2026-08-13
 
 ### Added (Design B — Rust model nodes, ADR-003 B1–B5)

@@ -77,11 +77,19 @@ Ops: `rbt consolidate -s <model>` merges parts → single file without deleting 
 ```yaml
 materialize:
   wap: true
+  # Optional. Default: {project_dir}/.wap
+  # Put this on the same volume as lake outputs when project and lake differ (Windows).
+  # Absolute, project-relative, or $root template:
+  # wap_root: lake/.wap
+  # wap_root: F:/data/rbt_wap
+  # wap_root: $lake/.wap
 ```
 
-1. Write stream output to `.wap/{run_id}/{model}.parquet`
+1. Write stream output to `{wap_root}/{run_id}/{model}.parquet` (default `wap_root` = `{project}/.wap`)
 2. Assertions already applied on the stream (fail → no publish)
-3. Atomic rename to production dest; write `.wap/{run_id}/{model}.audit.json`
+3. Publish stage → production dest (same-volume `rename`, or copy+delete across volumes); write `{wap_root}/{run_id}/{model}.audit.json`
+
+**Not hard-coded to any drive letter.** Staging follows `project_dir` / `wap_root`. If the project lives on `C:` and the lake on `F:`, set `wap_root` under the lake volume for same-disk renames.
 
 Production dest is left unchanged on audit failure. This is **filesystem WAP**, not Iceberg branch APIs.
 

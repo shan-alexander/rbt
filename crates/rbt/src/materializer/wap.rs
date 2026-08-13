@@ -1,12 +1,15 @@
 //! Honest Write-Audit-Publish for lake files (not Iceberg branch theater).
 //!
 //! Protocol:
-//! 1. **Write** model output to a staging path under `.wap/{run_id}/`
+//! 1. **Write** model output to a staging path under `{wap_root}/{run_id}/`
 //! 2. **Audit** via streaming assertions (caller); fail leaves production dest untouched
-//! 3. **Publish** atomic rename stage → production dest
+//! 3. **Publish** atomic rename (or cross-volume copy+delete) stage → production dest
 //! 4. Write a small audit log JSON next to stage (kept on failure for debug)
 //!
-//! This is real atomic publish + test gate. It does **not** claim Iceberg WAP branches.
+//! Default `wap_root` is `{project_dir}/.wap` — **not** a fixed drive letter. Configure
+//! `materialize.wap_root` (e.g. under the lake volume) when project and lake live on
+//! different disks. This is real atomic publish + test gate; it does **not** claim Iceberg
+//! WAP branches.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -51,13 +54,29 @@ pub struct WapModelPaths {
 }
 
 impl WapModelPaths {
+    /// Stage under `{project_dir}/.wap/{run_id}/` (legacy default).
     pub fn for_model(
         project_dir: &Path,
         run_id: &str,
         model_name: &str,
         final_path: &Path,
     ) -> Self {
-        let stage_root = project_dir.join(".wap").join(run_id);
+        Self::for_model_with_root(
+            &project_dir.join(".wap"),
+            run_id,
+            model_name,
+            final_path,
+        )
+    }
+
+    /// Stage under `{wap_root}/{run_id}/` (config `materialize.wap_root`).
+    pub fn for_model_with_root(
+        wap_root: &Path,
+        run_id: &str,
+        model_name: &str,
+        final_path: &Path,
+    ) -> Self {
+        let stage_root = wap_root.join(run_id);
         let ext = final_path
             .extension()
             .and_then(|e| e.to_str())
@@ -184,6 +203,17 @@ mod tests {
         assert!(!paths.stage_path.exists());
         assert!(paths.audit_log_path.exists());
         Ok(())
+    }
+
+    #[test]
+    fn wap_root_custom_staging_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("lake").join(".rbt_wap");
+        let final_p = temp.path().join("lake").join("silver").join("m.parquet");
+        let paths =
+            WapModelPaths::for_model_with_root(&custom, "wap_9", "m", &final_p);
+        assert!(paths.stage_path.starts_with(&custom.join("wap_9")));
+        assert_eq!(paths.final_path, final_p);
     }
 
     #[test]

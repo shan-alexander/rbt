@@ -5,11 +5,11 @@ aliases: [WAP, write audit publish, FS WAP]
 ---
 # Filesystem write-audit-publish
 
-**One-line:** Stage → audit → atomic publish on the filesystem when `materialize.wap: true`; do not claim Iceberg branch WAP until that path exists.
+**One-line:** Stage → audit → atomic publish on the filesystem when `materialize.wap: true` (optional `materialize.wap_root`); do not claim Iceberg branch WAP until that path exists.
 
 ## Goals
 
-- Write stream output under `.wap/{run_id}/`, run stream assertions, then rename to production dest with audit JSON.
+- Write stream output under `{wap_root}/{run_id}/` (default `{project}/.wap`), run stream assertions, then publish to production dest with audit JSON.
 - Leave production unchanged on audit failure.
 - Make the mechanism discoverable in config and docs without overselling.
 

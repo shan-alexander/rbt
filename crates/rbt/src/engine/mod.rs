@@ -1021,6 +1021,25 @@ impl TransformationEngine {
         } else {
             None
         };
+        // Resolve WAP stage root once per run (default: {project_dir}/.wap).
+        let wap_root: Option<PathBuf> = if materialize.wap {
+            let root = match materialize.wap_root.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => {
+                    crate::core::paths::resolve_project_path(project_dir, raw, &config.roots)
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_WAP: failed resolving materialize.wap_root '{raw}' \
+                                 (project_dir={})",
+                                project_dir.display()
+                            )
+                        })?
+                }
+                _ => project_dir.join(".wap"),
+            };
+            Some(root)
+        } else {
+            None
+        };
 
         for (tier_idx, tier) in tiers.iter().enumerate() {
             tracing::info!(
@@ -1094,15 +1113,21 @@ impl TransformationEngine {
                 // Parts strategies (incl. table + consolidate:never) skip WAP staging.
                 let table_parts_only = matches!(model.materialization, Materialization::Table)
                     && !materialize.consolidate.table_writes_monolith();
-                let (write_path, wap_paths) = if let Some(ref run_id) = wap_run_id {
+                let (write_path, wap_paths) = if let (Some(ref run_id), Some(ref wap_root)) =
+                    (wap_run_id.as_ref(), wap_root.as_ref())
+                {
                     if matches!(
                         model.output_format,
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone
                     ) && !uses_parts_directory(&model.materialization)
                         && !table_parts_only
                     {
-                        let paths =
-                            WapModelPaths::for_model(project_dir, run_id, &model.name, &dest_path);
+                        let paths = WapModelPaths::for_model_with_root(
+                            wap_root,
+                            run_id,
+                            &model.name,
+                            &dest_path,
+                        );
                         if let Some(p) = paths.stage_path.parent() {
                             std::fs::create_dir_all(p)?;
                         }
