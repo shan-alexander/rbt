@@ -141,8 +141,8 @@ pub use engine::{
     TransformationEngine,
 };
 pub use engine::rust_model::{
-    empty_batch_for_schema, schema_from_fields, validate_batches_schema, RustModel,
-    RustModelContext, RustModelOutput, RustModelRegistry,
+    batches_to_stream, empty_batch_for_schema, schema_from_fields, validate_batches_schema,
+    RustModel, RustModelContext, RustModelOutput, RustModelRegistry,
 };
 /// Re-export for Design B implementors: `#[async_trait] impl RustModel for …`.
 pub use async_trait::async_trait;

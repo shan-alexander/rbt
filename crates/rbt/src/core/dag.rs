@@ -25,6 +25,20 @@ pub enum Materialization {
     ZeroCopyClone,
 }
 
+impl Materialization {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Table => "table",
+            Self::IncrementalAppend => "incremental_append",
+            Self::ScopedReplace => "scoped_replace",
+            Self::IncrementalMerge => "incremental_merge",
+            Self::KeyedUpsert => "keyed_upsert",
+            Self::ZeroCopyClone => "zero_copy_clone",
+        }
+    }
+}
+
 /// Parse frontmatter `materialization:` string into [`Materialization`].
 pub fn parse_materialization_hint(s: &str) -> Result<Materialization> {
     match s.trim().to_ascii_lowercase().as_str() {

@@ -4,15 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-### Added (Design B — Rust model nodes, ADR-003 B1–B2)
+### Added (Design B — Rust model nodes, ADR-003 B1–B5)
 
 - **`ModelKind::Rust`** on `ModelNode`; SQL remains default for file projects
-- **`RustModel` trait** (`async fn execute`) + `RustModelContext` / `RustModelOutput::Batches`
+- **`RustModel` trait** (`async fn execute`) + `RustModelContext` /
+  `RustModelOutput::{Batches, Stream}` + `batches_to_stream`
 - **Registry:** `RbtEngineBuilder::with_rust_model`, `TransformationEngine::register_rust_model`
 - **`ModelSpec::rust(name).refs([...]).sources([...])`** for programmatic DAGs
-- Materialize: **table** and **keyed_upsert** → Parquet; same `ref()` registration as SQL
+- Materialize: **table**, **keyed_upsert**, **scoped_replace**, **incremental_append**,
+  table+parts (`consolidate:never`) → Parquet; same `ref()` registration as SQL
+- Receipts (B4): `ModelRunResult.kind` (`sql`|`rust`) + `materialization`
 - Fail-closed: `E_RBT_RUST_MODEL`, `E_RBT_RUST_SCHEMA`, `E_RBT_RUST_MAT`
 - Re-export `async_trait` for host implementors
+- Bench: `cargo bench -p rbt-datalake --bench design_b_sql_vs_rust`
+- Docs: library **`.catalog_prefix("")`** footgun (L1.10 / EMBEDDING)
 - Plan: [docs/plans/design-b-rust-models.md](docs/plans/design-b-rust-models.md)
 
 ### Added (post-0.9.0 embed polish)

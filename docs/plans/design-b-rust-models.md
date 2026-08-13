@@ -6,7 +6,7 @@ status: draft
 ---
 # Design B — First-class Rust models (implementation plan)
 
-**Status:** **B1–B2 shipped** (library registry + execute table/keyed_upsert); B3+ planned.  
+**Status:** **B1–B5 shipped** (registry, table/upsert/parts, receipt kind, stream output).  
 **Parent ADR:** [ADR-003](../adr/ADR_003_UDF_RSMODELS.md)  
 **Depends on:** L1 embed surface (shipped), Design A UDFs (shipped), shared materializer  
 **Non-goals:** `.rsx` language, untrusted `cdylib` v1, finance kernels in rbt core
@@ -156,9 +156,9 @@ Optional: `RustModel::self_test()` hook for host unit tests — not required for
 | **B0** | ADR-003 refresh + this plan | Done (plan + ADR note) |
 | **B1** | IR: `ModelKind`, `ModelSpec::rust`, registry on engine | **Done** |
 | **B2** | Execute Rust → batches → table parquet + keyed_upsert | **Done** — `design_b_sql_rust_sql_ref_chain` |
-| **B3** | Parts strategies (`scoped_replace`, incremental_append) for Rust | Planned |
-| **B4** | Receipt `kind` field + richer metrics | Planned |
-| **B5** | Stream output (`RustModelOutput::Stream`) | Planned |
+| **B3** | Parts strategies for Rust (`scoped_replace`, `incremental_append`, table+parts) | **Done** |
+| **B4** | Receipt `kind` + `materialization` on `ModelRunResult` | **Done** |
+| **B5** | `RustModelOutput::Stream` + `batches_to_stream` | **Done** |
 | **B6** | File/project discovery (optional) | Planned — library first |
 | **Later** | Optional `cdylib` load policy | Deferred |
 

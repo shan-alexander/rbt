@@ -61,13 +61,16 @@ pub enum RunStatus {
     Error,
 }
 
-/// Per-model outcome inside a receipt (RBT-A3 phase/tags + timing).
+/// Per-model outcome inside a receipt (RBT-A3 phase/tags + timing; B4 kind).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelRunResult {
     pub name: String,
     /// `success` | `skipped` | `error` (free for hosts; engine sets these).
     #[serde(default = "default_model_status")]
     pub status: String,
+    /// Authoring kind: `sql` | `rust` (Design B). Omitted on legacy receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// Rows produced this run for the model.
     #[serde(alias = "rows")]
     pub row_count: usize,
@@ -91,6 +94,9 @@ pub struct ModelRunResult {
     pub rows_updated: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_touched: Option<usize>,
+    /// Materialization strategy name (`table`, `scoped_replace`, …) when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialization: Option<String>,
 }
 
 fn default_model_status() -> String {
@@ -109,6 +115,7 @@ impl ModelRunResult {
         Self {
             name: name.into(),
             status: "success".into(),
+            kind: None,
             row_count,
             phase,
             tags,
@@ -118,7 +125,18 @@ impl ModelRunResult {
             rows_inserted: None,
             rows_updated: None,
             rows_touched: None,
+            materialization: None,
         }
+    }
+
+    pub fn with_kind(mut self, kind: impl Into<String>) -> Self {
+        self.kind = Some(kind.into());
+        self
+    }
+
+    pub fn with_materialization(mut self, m: impl Into<String>) -> Self {
+        self.materialization = Some(m.into());
+        self
     }
 
     pub fn with_upsert_stats(mut self, inserted: usize, updated: usize, touched: usize) -> Self {

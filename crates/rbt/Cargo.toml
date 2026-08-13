@@ -84,3 +84,7 @@ harness = false
 [[bench]]
 name = "downstream_ref"
 harness = false
+
+[[bench]]
+name = "design_b_sql_vs_rust"
+harness = false

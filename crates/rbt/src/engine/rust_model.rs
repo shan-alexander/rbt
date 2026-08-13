@@ -52,19 +52,38 @@ pub struct RustModelContext<'a> {
     pub bronze_fingerprint: Option<&'a str>,
 }
 
-/// Output of a Rust model (v1: in-memory batches).
-#[derive(Debug)]
+/// Output of a Rust model.
 pub enum RustModelOutput {
     /// Zero or more record batches (same schema). Empty vec → zero-row table from declared schema.
     Batches(Vec<RecordBatch>),
+    /// Streaming path (B5) — preferred for large outputs; schema must match [`RustModel::output_schema`].
+    ///
+    /// Consumed once by the materializer (table / parts strategies). Keyed upsert still
+    /// requires collect (memory-bound) in v1.
+    Stream(datafusion::physical_plan::SendableRecordBatchStream),
 }
 
-impl RustModelOutput {
-    pub fn batches(self) -> Vec<RecordBatch> {
+impl std::fmt::Debug for RustModelOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Batches(b) => b,
+            Self::Batches(b) => f.debug_tuple("Batches").field(&b.len()).finish(),
+            Self::Stream(_) => f.write_str("Stream(..)"),
         }
     }
+}
+
+/// Build a [`SendableRecordBatchStream`] from owned batches (host + engine helper).
+pub fn batches_to_stream(
+    schema: arrow::datatypes::SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> datafusion::physical_plan::SendableRecordBatchStream {
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+    let stream = futures::stream::iter(
+        batches
+            .into_iter()
+            .map(|b| Ok(b) as datafusion::common::Result<RecordBatch>),
+    );
+    Box::pin(RecordBatchStreamAdapter::new(schema, stream))
 }
 
 /// Process-local map of host Rust models (name → impl).

@@ -7,8 +7,8 @@ pub mod udf;
 
 use crate::core::dag::{Materialization, ModelDag, ModelKind, ModelNode, OutputFormat};
 use crate::engine::rust_model::{
-    empty_batch_for_schema, validate_batches_schema, RustModel, RustModelContext, RustModelOutput,
-    RustModelRegistry,
+    batches_to_stream, empty_batch_for_schema, validate_batches_schema, RustModel,
+    RustModelContext, RustModelOutput, RustModelRegistry,
 };
 use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
@@ -25,12 +25,12 @@ use crate::materializer::{
     stamp_batch, wap_publish, write_empty_parquet, write_parquet_batches_atomic, LineageStamp,
     MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
 };
+use datafusion::physical_plan::SendableRecordBatchStream;
 use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
 use anyhow::{bail, Context, Result};
 use datafusion::datasource::MemTable;
 use datafusion::execution::context::SessionContext;
-use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
 #[cfg(feature = "iceberg")]
 use iceberg::Catalog;
@@ -244,12 +244,16 @@ impl TransformationEngine {
             .get(name)
     }
 
-    /// Design B: execute host Rust model → batches → materialize (table / keyed_upsert parquet).
+    /// Design B: execute host Rust model → batches/stream → materialize.
+    ///
+    /// Supports table, keyed_upsert, scoped_replace, incremental_append, and table+parts
+    /// (consolidate:never). `dest_path` is the published lake path; `write_path` may be a WAP stage.
     async fn materialize_rust_model(
         &self,
         model: &ModelNode,
         project_dir: &Path,
         scope: &RunScope,
+        dest_path: &Path,
         write_path: &Path,
         write_opts: &MaterializeWriteOptions,
         assertions: &[crate::testing::Assertion],
@@ -257,6 +261,8 @@ impl TransformationEngine {
         run_id: &str,
         contract: &str,
         fp: &str,
+        table_parts_only: bool,
+        materialize: &MaterializeConfig,
     ) -> Result<(
         usize,
         Option<StreamWriteStats>,
@@ -277,95 +283,181 @@ impl TransformationEngine {
             .execute(&ctx)
             .await
             .with_context(|| format!("E_RBT_RUST_MODEL: execute '{}'", model.name))?;
-        let mut batches = match out {
-            RustModelOutput::Batches(b) => b,
-        };
-        validate_batches_schema(&batches, declared.as_ref()).with_context(|| {
-            format!("E_RBT_RUST_SCHEMA: model '{}'", model.name)
-        })?;
-        if batches.is_empty() {
-            batches.push(empty_batch_for_schema(declared.clone())?);
-        }
-        if let Some(ref lin) = write_opts.lineage {
-            batches = batches
-                .iter()
-                .map(|b| stamp_batch(b, lin))
-                .collect::<Result<Vec<_>>>()?;
-        }
-        // Optional frontmatter declared schema merge
-        if let Some(ref d) = write_opts.declared_schema {
-            batches = batches
-                .iter()
-                .map(|b| crate::core::schema_emit::ensure_declared_columns(b, d.as_ref()))
-                .collect::<Result<Vec<_>>>()?;
-        }
 
-        // Assertions over batches (same policy as SQL collect).
-        if !assertions.is_empty() {
-            let validation =
-                crate::testing::RecordBatchValidator::validate_batches(&batches, assertions);
-            if validation.failed_assertions > 0 && fail_on_error {
-                bail!(
-                    "E_RBT_TEST: model '{}': {} assertion(s) failed (Design B): {}",
-                    model.name,
-                    validation.failed_assertions,
-                    validation.errors.join("; ")
-                );
+        // Normalize to either collected batches (upsert / small table) or a stream (parts/table stream).
+        enum Out {
+            Batches(Vec<arrow::record_batch::RecordBatch>),
+            Stream(SendableRecordBatchStream),
+        }
+        let prepared = match out {
+            RustModelOutput::Batches(mut batches) => {
+                validate_batches_schema(&batches, declared.as_ref()).with_context(|| {
+                    format!("E_RBT_RUST_SCHEMA: model '{}'", model.name)
+                })?;
+                if batches.is_empty() {
+                    batches.push(empty_batch_for_schema(declared.clone())?);
+                }
+                if let Some(ref lin) = write_opts.lineage {
+                    batches = batches
+                        .iter()
+                        .map(|b| stamp_batch(b, lin))
+                        .collect::<Result<Vec<_>>>()?;
+                }
+                if let Some(ref d) = write_opts.declared_schema {
+                    batches = batches
+                        .iter()
+                        .map(|b| crate::core::schema_emit::ensure_declared_columns(b, d.as_ref()))
+                        .collect::<Result<Vec<_>>>()?;
+                }
+                if !assertions.is_empty() {
+                    let validation = crate::testing::RecordBatchValidator::validate_batches(
+                        &batches,
+                        assertions,
+                    );
+                    if validation.failed_assertions > 0 && fail_on_error {
+                        bail!(
+                            "E_RBT_TEST: model '{}': {} assertion(s) failed (Design B): {}",
+                            model.name,
+                            validation.failed_assertions,
+                            validation.errors.join("; ")
+                        );
+                    }
+                }
+                Out::Batches(batches)
             }
+            RustModelOutput::Stream(stream) => Out::Stream(stream),
+        };
+
+        let parquet_fmt = matches!(
+            model.output_format,
+            OutputFormat::Parquet | OutputFormat::ZeroCopyClone
+        );
+        if !parquet_fmt {
+            bail!(
+                "E_RBT_RUST_MAT: Rust model '{}' requires parquet output (got {:?})",
+                model.name,
+                model.output_format
+            );
         }
 
-        match (
-            &model.materialization,
-            &model.output_format,
-        ) {
-            (
-                Materialization::Table,
-                OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
-            ) => {
-                let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-                if rows == 0 {
-                    write_empty_parquet(declared, write_path, write_opts).with_context(|| {
-                        format!(
-                            "E_RBT_RUST_MAT: empty parquet for Rust model '{}'",
-                            model.name
+        match &model.materialization {
+            Materialization::Table if table_parts_only => {
+                let stream = match prepared {
+                    Out::Batches(b) => {
+                        let schema = b
+                            .first()
+                            .map(|x| x.schema())
+                            .unwrap_or_else(|| declared.clone());
+                        batches_to_stream(schema, b)
+                    }
+                    Out::Stream(s) => s,
+                };
+                let stats = materialize_table_parts_only_stream(
+                    stream,
+                    dest_path,
+                    write_opts,
+                    assertions,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "E_RBT_CONSOLIDATE: Rust model '{}' table parts-only failed",
+                        model.name
+                    )
+                })?;
+                log_assertion_result(model, &stats, fail_on_error)?;
+                maybe_consolidate_after_parts(materialize, dest_path, write_opts, &model.name)
+                    .await?;
+                Ok((stats.rows, Some(stats), None))
+            }
+            Materialization::Table => {
+                match prepared {
+                    Out::Batches(batches) => {
+                        let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                        if rows == 0 {
+                            write_empty_parquet(declared, write_path, write_opts).with_context(
+                                || {
+                                    format!(
+                                        "E_RBT_RUST_MAT: empty parquet for Rust model '{}'",
+                                        model.name
+                                    )
+                                },
+                            )?;
+                        } else {
+                            write_parquet_batches_atomic(&batches, write_path, write_opts)
+                                .with_context(|| {
+                                    format!(
+                                        "E_RBT_RUST_MAT: parquet write for Rust model '{}'",
+                                        model.name
+                                    )
+                                })?;
+                        }
+                        tracing::info!(
+                            model = %model.name,
+                            rows,
+                            "Design B Rust model materialize (table parquet)"
+                        );
+                        Ok((
+                            rows,
+                            Some(StreamWriteStats {
+                                rows,
+                                batches: batches.len(),
+                                path: write_path.to_path_buf(),
+                                bytes_written: std::fs::metadata(write_path)
+                                    .map(|m| m.len())
+                                    .unwrap_or(0),
+                                validation: crate::testing::ValidationResult {
+                                    total_rows: rows,
+                                    passed_assertions: assertions.len(),
+                                    failed_assertions: 0,
+                                    errors: Vec::new(),
+                                },
+                            }),
+                            None,
+                        ))
+                    }
+                    Out::Stream(stream) => {
+                        let stats = materialize_stream(
+                            stream,
+                            &model.output_format,
+                            write_path,
+                            write_opts,
+                            assertions,
                         )
-                    })?;
-                } else {
-                    write_parquet_batches_atomic(&batches, write_path, write_opts).with_context(
-                        || {
+                        .await
+                        .with_context(|| {
                             format!(
-                                "E_RBT_RUST_MAT: parquet write for Rust model '{}'",
+                                "E_RBT_RUST_MAT: stream table write for Rust model '{}'",
                                 model.name
                             )
-                        },
-                    )?;
+                        })?;
+                        log_assertion_result(model, &stats, fail_on_error)?;
+                        Ok((stats.rows, Some(stats), None))
+                    }
                 }
-                tracing::info!(
-                    model = %model.name,
-                    rows,
-                    "Design B Rust model materialize (table parquet)"
-                );
-                Ok((
-                    rows,
-                    Some(StreamWriteStats {
-                        rows,
-                        batches: batches.len(),
-                        path: write_path.to_path_buf(),
-                        bytes_written: std::fs::metadata(write_path).map(|m| m.len()).unwrap_or(0),
-                        validation: crate::testing::ValidationResult {
-                            total_rows: rows,
-                            passed_assertions: assertions.len(),
-                            failed_assertions: 0,
-                            errors: Vec::new(),
-                        },
-                    }),
-                    None,
-                ))
             }
-            (
-                Materialization::KeyedUpsert,
-                OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
-            ) => {
+            Materialization::KeyedUpsert => {
+                let batches = match prepared {
+                    Out::Batches(b) => b,
+                    Out::Stream(mut s) => {
+                        // Memory-bound collect for upsert v1.
+                        let mut all = Vec::new();
+                        use futures::StreamExt;
+                        while let Some(item) = s.next().await {
+                            all.push(item.map_err(|e| {
+                                anyhow::anyhow!(
+                                    "E_RBT_RUST_MAT: stream collect for upsert '{}': {e}",
+                                    model.name
+                                )
+                            })?);
+                        }
+                        if all.is_empty() {
+                            all.push(empty_batch_for_schema(declared.clone())?);
+                        }
+                        validate_batches_schema(&all, declared.as_ref())?;
+                        all
+                    }
+                };
                 let fm = model.frontmatter.as_ref().ok_or_else(|| {
                     anyhow::anyhow!(
                         "E_RBT_UPSERT_KEY: Rust model '{}': keyed_upsert requires frontmatter \
@@ -394,13 +486,90 @@ impl TransformationEngine {
                 })?;
                 Ok((stats.rows, Some(stats), Some(upsert_stats)))
             }
-            (mat, fmt) => {
+            Materialization::ScopedReplace => {
+                let stream = match prepared {
+                    Out::Batches(b) => {
+                        let schema = b
+                            .first()
+                            .map(|x| x.schema())
+                            .unwrap_or_else(|| declared.clone());
+                        batches_to_stream(schema, b)
+                    }
+                    Out::Stream(s) => s,
+                };
+                let part_keys = resolve_part_keys(
+                    model
+                        .frontmatter
+                        .as_ref()
+                        .and_then(|f| f.part_key.as_deref()),
+                    model
+                        .frontmatter
+                        .as_ref()
+                        .and_then(|f| f.partition_by.as_deref()),
+                    scope,
+                );
+                let sid = scope_part_id(&model.name, contract, &part_keys, scope).with_context(
+                    || {
+                        format!(
+                            "E_RBT_PART_KEY: Rust model '{}' cannot build scope_id",
+                            model.name
+                        )
+                    },
+                )?;
+                let stats = materialize_scoped_replace_stream(
+                    stream,
+                    dest_path,
+                    write_opts,
+                    assertions,
+                    &sid,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "E_RBT_INCREMENTAL: Rust model '{}' scoped_replace failed (scope_id={sid})",
+                        model.name
+                    )
+                })?;
+                log_assertion_result(model, &stats, fail_on_error)?;
+                maybe_consolidate_after_parts(materialize, dest_path, write_opts, &model.name)
+                    .await?;
+                Ok((stats.rows, Some(stats), None))
+            }
+            Materialization::IncrementalAppend => {
+                let stream = match prepared {
+                    Out::Batches(b) => {
+                        let schema = b
+                            .first()
+                            .map(|x| x.schema())
+                            .unwrap_or_else(|| declared.clone());
+                        batches_to_stream(schema, b)
+                    }
+                    Out::Stream(s) => s,
+                };
+                let stats = materialize_incremental_append_stream(
+                    stream,
+                    dest_path,
+                    write_opts,
+                    assertions,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "E_RBT_INCREMENTAL: Rust model '{}' append failed",
+                        model.name
+                    )
+                })?;
+                log_assertion_result(model, &stats, fail_on_error)?;
+                maybe_consolidate_after_parts(materialize, dest_path, write_opts, &model.name)
+                    .await?;
+                Ok((stats.rows, Some(stats), None))
+            }
+            mat => {
                 bail!(
-                    "E_RBT_RUST_MAT: Rust model '{}' does not support materialization={:?} \
-                     output_format={:?} in Design B v1 (use table or keyed_upsert + parquet)",
+                    "E_RBT_RUST_MAT: Rust model '{}' does not support materialization={} \
+                     (supported: table, keyed_upsert, scoped_replace, incremental_append)",
                     model.name,
-                    mat,
-                    fmt
+                    mat.as_str()
                 );
             }
         }
@@ -953,6 +1122,7 @@ impl TransformationEngine {
                             model,
                             project_dir,
                             scope,
+                            &dest_path,
                             &write_path,
                             &write_opts,
                             &assertions,
@@ -960,6 +1130,8 @@ impl TransformationEngine {
                             &run_id,
                             &contract,
                             &fp,
+                            table_parts_only,
+                            materialize,
                         )
                         .await?;
                     upsert_for_model = upsert;
@@ -1336,7 +1508,9 @@ impl TransformationEngine {
                     phase,
                     tags,
                     Some(elapsed_ms),
-                );
+                )
+                .with_kind(model.kind.as_str())
+                .with_materialization(model.materialization.as_str());
                 if let Some(u) = upsert_for_model {
                     mrr = mrr.with_upsert_stats(
                         u.rows_inserted,
@@ -2386,6 +2560,102 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         let mut vals: Vec<i64> = (0..col.len()).map(|i| col.value(i)).collect();
         vals.sort();
         assert_eq!(vals, vec![2, 4]);
+        // B4: receipt kind on model results
+        let rust_mrr = summary
+            .model_results
+            .iter()
+            .find(|m| m.name == "tf_double")
+            .expect("tf_double result");
+        assert_eq!(rust_mrr.kind.as_deref(), Some("rust"));
+        assert_eq!(rust_mrr.materialization.as_deref(), Some("table"));
+        let sql_mrr = summary
+            .model_results
+            .iter()
+            .find(|m| m.name == "stg_seed")
+            .unwrap();
+        assert_eq!(sql_mrr.kind.as_deref(), Some("sql"));
+        Ok(())
+    }
+
+    /// B3 + B5: Rust scoped_replace via Stream output.
+    #[tokio::test]
+    async fn design_b_scoped_replace_stream() -> Result<()> {
+        use crate::core::dag::{Materialization, ModelLayer};
+        use crate::core::frontmatter::StagingFrontmatter;
+        use crate::engine::rust_model::{
+            batches_to_stream, RustModel, RustModelContext, RustModelOutput,
+        };
+        use crate::{DagBuilder, ModelSpec, RbtEngineBuilder, RbtProjectConfig, RunScope};
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        struct ScopeEmit;
+        #[async_trait::async_trait]
+        impl RustModel for ScopeEmit {
+            fn name(&self) -> &str {
+                "stg_parts"
+            }
+            fn output_schema(&self) -> arrow::datatypes::SchemaRef {
+                Arc::new(Schema::new(vec![
+                    Field::new("entity", DataType::Utf8, false),
+                    Field::new("n", DataType::Int64, false),
+                ]))
+            }
+            async fn execute(&self, ctx: &RustModelContext<'_>) -> Result<RustModelOutput> {
+                let entity = ctx
+                    .scope
+                    .vars
+                    .get("entity")
+                    .map(|v| v.as_single().unwrap_or("?").to_string())
+                    .unwrap_or_else(|| "?".into());
+                let schema = self.output_schema();
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec![entity.as_str()])),
+                        Arc::new(Int64Array::from(vec![1i64])),
+                    ],
+                )?;
+                // B5: stream path
+                Ok(RustModelOutput::Stream(batches_to_stream(
+                    schema,
+                    vec![batch],
+                )))
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("stg_parts.parquet");
+        let mut fm = StagingFrontmatter::default();
+        fm.partition_by = Some(vec!["entity".into()]);
+        fm.part_key = Some(vec!["entity".into()]);
+
+        let dag = DagBuilder::new()
+            .model(
+                ModelSpec::rust("stg_parts")
+                    .layer(ModelLayer::Staging)
+                    .materialization(Materialization::ScopedReplace)
+                    .frontmatter(fm)
+                    .output_path(dest.to_string_lossy()),
+            )
+            .build()?;
+
+        let engine = RbtEngineBuilder::new()
+            .with_rust_model(ScopeEmit)
+            .build()
+            .await?;
+        let cfg = RbtProjectConfig::default();
+        let scope = RunScope::new().with_var("entity", "a.com");
+        let summary = engine
+            .execute_dag_with_scope(&dag, temp.path(), temp.path(), &cfg, &scope)
+            .await?;
+        assert_eq!(summary.models_executed, 1);
+        assert!(crate::materializer::parts_dir_for_parquet(&dest).is_dir());
+        let mrr = &summary.model_results[0];
+        assert_eq!(mrr.kind.as_deref(), Some("rust"));
+        assert_eq!(mrr.materialization.as_deref(), Some("scoped_replace"));
         Ok(())
     }
 }

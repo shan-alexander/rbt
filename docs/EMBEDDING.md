@@ -123,9 +123,23 @@ impl RustModel for MyNode {
 // RbtEngineBuilder::new().with_rust_model(MyNode).build().await?;
 ```
 
+## `catalog_prefix` for library DAGs
+
+`ModelSpec::sql` defaults to `catalog_prefix: "rbt"`, so `{{ ref('stg_x') }}` becomes `rbt.stg_x`.
+The engine registers tables under the **bare** name. For pure library embeds:
+
+```rust
+ModelSpec::sql("stg_x", "SELECT 1 AS id")
+    .catalog_prefix("")   // required so ref() matches session table names
+    .output_path(...)
+```
+
+File-based projects are unaffected (project compiler owns the prefix). See roadmap **L1.10**.
+
 ## Anti-patterns
 
 - Second Arrow major in the same package graph as rbt DAG code  
 - Shelling out to `rbt run` from a long-lived daemon (use library + receipts)  
 - Domain math formulas inside rbt core (register UDFs or Design B Rust models)  
-- Product-specific examples in rbt (keep host SoT examples in the host repo)
+- Product-specific examples in rbt (keep host SoT examples in the host repo)  
+- Forgetting `.catalog_prefix("")` on library `ModelSpec::sql` (planning fails on `rbt.*`)
