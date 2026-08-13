@@ -1,14 +1,27 @@
 //! Design B — first-class Rust model nodes (ADR-003).
 //!
 //! Hosts implement [`RustModel`], register on the engine, and place nodes in the DAG via
-//! [`crate::ModelSpec::rust`]. Execution produces Arrow batches that use the same materializer
-//! / `ref()` path as SQL models.
+//! [`crate::ModelSpec::rust`]. Execution produces Arrow batches (or a stream) that use the
+//! same materializer and `ref()` path as SQL models.
+//!
+//! # Minimal host flow
+//!
+//! 1. `#[async_trait] impl RustModel for MyNode { … }`
+//! 2. `RbtEngineBuilder::new().with_rust_model(MyNode).build().await?`
+//! 3. `ModelSpec::rust("my_node").refs(["stg_upstream"]).output_path(…)`
+//! 4. Downstream SQL: `SELECT … FROM {{ ref('my_node') }}`
+//!
+//! # Materializations (v1)
+//!
+//! `table`, `keyed_upsert`, `scoped_replace`, `incremental_append`, and table+parts
+//! (`consolidate: never`). Prefer [`RustModelOutput::Stream`] for large outputs (except
+//! keyed_upsert, which still collects).
 //!
 //! # Fail-closed codes
 //!
-//! - `E_RBT_RUST_MODEL` — unknown registry key / missing implementation  
-//! - `E_RBT_RUST_SCHEMA` — output batches disagree with declared schema  
-//! - `E_RBT_RUST_MAT` — unsupported materialization for Rust v1  
+//! - `E_RBT_RUST_MODEL` — unknown registry key / missing implementation
+//! - `E_RBT_RUST_SCHEMA` — output batches disagree with declared schema
+//! - `E_RBT_RUST_MAT` — unsupported materialization / format for this node
 
 use anyhow::{bail, Context, Result};
 use arrow::array::ArrayRef;
@@ -22,19 +35,41 @@ use std::sync::Arc;
 
 use crate::core::run_scope::RunScope;
 
-/// Host-owned whole-node transform (Design B).
+/// Host-owned whole-node transform (Design B / ADR-003).
 ///
 /// Register with [`crate::TransformationEngine::register_rust_model`] or
 /// [`crate::RbtEngineBuilder::with_rust_model`]. The registry key is [`RustModel::name`]
-/// and must match the DAG model name.
+/// and **must** match the DAG model name from [`crate::ModelSpec::rust`].
 ///
-/// `execute` is async so hosts can `session.sql(...).await` without nesting runtimes.
+/// `execute` is async so hosts can call `ctx.session.sql(...).await` without nesting runtimes.
+/// Use the crate-level [`crate::async_trait`] re-export on implementations.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use rbt::{async_trait, RustModel, RustModelContext, RustModelOutput};
+/// use rbt::arrow::datatypes::{DataType, Field, Schema};
+/// use std::sync::Arc;
+///
+/// struct Double;
+/// #[async_trait]
+/// impl RustModel for Double {
+///     fn name(&self) -> &str { "tf_double" }
+///     fn output_schema(&self) -> arrow::datatypes::SchemaRef {
+///         Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
+///     }
+///     async fn execute(&self, ctx: &RustModelContext<'_>) -> anyhow::Result<RustModelOutput> {
+///         let df = ctx.session.sql(r#"SELECT id * 2 AS id FROM "stg_x""#).await?;
+///         Ok(RustModelOutput::Batches(df.collect().await?))
+///     }
+/// }
+/// ```
 #[async_trait]
 pub trait RustModel: Send + Sync {
-    /// DAG / registry identity (must equal the `ModelNode.name`).
+    /// DAG / registry identity (must equal the [`crate::ModelNode`] name).
     fn name(&self) -> &str;
 
-    /// Declared output schema (required — used for zero-row writes and validation).
+    /// Declared output schema (required for zero-row writes and validation).
     fn output_schema(&self) -> SchemaRef;
 
     /// Run the transform. Upstream `ref` / bronze tables are already on [`RustModelContext::session`].
@@ -42,24 +77,34 @@ pub trait RustModel: Send + Sync {
 }
 
 /// Per-run context passed into [`RustModel::execute`].
+///
+/// Upstream models materialised earlier in the tier plan are registered on [`Self::session`]
+/// under bare table names (when using the default empty [`crate::ModelSpec`] catalog prefix).
 pub struct RustModelContext<'a> {
+    /// Shared DataFusion session (same process as SQL models).
     pub session: &'a SessionContext,
+    /// Project / work directory for the run.
     pub project_dir: &'a Path,
+    /// Partition binds and run flags for this execution.
     pub scope: &'a RunScope,
+    /// DAG node name (same as [`RustModel::name`] when registered correctly).
     pub model_name: &'a str,
+    /// Run identity (receipts / lineage stamps).
     pub run_id: &'a str,
+    /// Effective contract version for this scope.
     pub contract_version: &'a str,
+    /// Bronze fingerprint when Stage 1 ran; may be a host placeholder on stage re-entry.
     pub bronze_fingerprint: Option<&'a str>,
 }
 
-/// Output of a Rust model.
+/// Output of a Rust model (batches or stream).
 pub enum RustModelOutput {
     /// Zero or more record batches (same schema). Empty vec → zero-row table from declared schema.
     Batches(Vec<RecordBatch>),
     /// Streaming path (B5) — preferred for large outputs; schema must match [`RustModel::output_schema`].
     ///
     /// Consumed once by the materializer (table / parts strategies). Keyed upsert still
-    /// requires collect (memory-bound) in v1.
+    /// requires collect (memory-bound) in v1. See [`batches_to_stream`] to wrap owned batches.
     Stream(datafusion::physical_plan::SendableRecordBatchStream),
 }
 

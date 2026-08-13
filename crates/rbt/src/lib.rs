@@ -1,7 +1,10 @@
 //! # rbt
 //!
 //! **Data-engineering workflow engine** for medallion lakes: bronze files → silver/gold
-//! Parquet via SQL DAGs (DataFusion), with run scope, receipts, and optional Iceberg-FS.
+//! Parquet via SQL DAGs (DataFusion), with run scope, receipts, optional Iceberg-FS, and
+//! first-class **Rust model nodes** (Design B).
+//!
+//! Crate on crates.io: **`rbt-datalake`**. Import path and CLI binary: **`rbt`**.
 //!
 //! ## Install
 //!
@@ -14,7 +17,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.9.0"
+//! rbt-datalake = "0.10"
 //! ```
 //!
 //! ## Quick start (library)
@@ -59,11 +62,12 @@
 //! ```
 //!
 //! File projects and [`DagBuilder`] share the same [`ModelDag`] execution IR.
+//! [`ModelSpec`] defaults to an empty `catalog_prefix` (L1.10) so `ref('x')` matches bare tables.
 //!
 //! ## Embed profile
 //!
 //! ```toml
-//! rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
+//! rbt-datalake = { version = "0.10", default-features = false, features = ["sql", "parquet"] }
 //! # optional: "iceberg", "jshift", "cli"
 //! ```
 //!
@@ -91,9 +95,17 @@
 //! # }
 //! ```
 //!
+//! ## Design B — Rust model nodes
+//!
+//! Whole-node transforms in the same DAG as SQL: implement [`RustModel`], register with
+//! [`RbtEngineBuilder::with_rust_model`], place with [`ModelSpec::rust`]. Same materializer
+//! and `ref()` path as SQL (table, keyed_upsert, scoped_replace, incremental_append).
+//!
 //! Lake helpers: [`ops`] (`plan_skip`, `stage_model_spec`, `upsert_registry`).
-//! Bronze adapters: [`BronzeAdapter`], [`adapter_for`], [`read_with_adapter`].
-//! Design B Rust models: [`RustModel`], [`ModelSpec::rust`], [`RbtEngineBuilder::with_rust_model`].
+//! Pipeline stages: [`TransformationEngine::stage_register_bronze`],
+//! [`TransformationEngine::stage_execute_tiers`], [`stage_write_receipt`].
+//! Bronze adapters: [`BronzeAdapter`], [`register_host_adapter`], [`register_named_adapter`].
+//! See also: [EMBEDDING.md](https://github.com/shan-alexander/rbt/blob/main/docs/EMBEDDING.md).
 //!
 //! ## Run scope (A1)
 //!
@@ -101,7 +113,7 @@
 //! `with_var_multi` bind hive **IN** filters. Showcase:
 //! `examples/a1_multi_value_scope`.
 
-#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.9.0")]
+#![doc(html_root_url = "https://docs.rs/rbt-datalake/0.10.0")]
 
 pub mod core;
 pub mod engine;

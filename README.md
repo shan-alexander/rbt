@@ -2,17 +2,17 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.9.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Data-engineering **workflow engine** for medallion lakes: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit. **Embeddable** via feature flags, `DagBuilder` IR, lake `ops`, host UDFs, and first-class **bronze adapters** (HTML/XML/robots/…).
+> **Status:** **`0.10.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` nodes.
 
 ## Why rbt
 
 | | |
 |--|--|
-| **Identity** | Data-engineering workflow engine for medallion lakes (not a generic app framework, not Temporal/Airflow) |
+| **Identity** | Data-engineering pipeline engine for data lakes |
 | **Niche** | Bronze → silver → gold on lake files, with fast bronze adapters |
 | **Stack** | Rust + Arrow + DataFusion + optional Iceberg-style FS tables + jshift |
 | **UX** | Models, `ref` / `source`, frontmatter tests, CLI select, run vars |
-| **Claim** | Replace ad-hoc scripts / Spark for team-scale medallion jobs |
+| **Claim** | Replace ad-hoc scripts / Spark for one-machine medallion data engineering jobs |
 
 ## Install
 
@@ -25,14 +25,15 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.9.0"
+rbt-datalake = "0.10"
 # embed-only (no Iceberg catalog / no CLI binary):
-# rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
+# rbt-datalake = { version = "0.10", default-features = false, features = ["sql", "parquet"] }
 ```
 
 ```rust
-use rbt::{DagBuilder, ModelSpec, RbtProjectConfig}; // lib name is still `rbt`
+use rbt::{DagBuilder, ModelSpec, RbtProjectConfig, RustModel}; // lib name is still `rbt`
 // also: rbt::arrow / rbt::datafusion, ops::plan_skip, BronzeAdapter, UdfPack, …
+// ModelSpec defaults to empty catalog_prefix (ref('x') → bare table x)
 ```
 
 **Git / from source:**
@@ -84,20 +85,20 @@ bash scripts/smoke.sh              # CI baseline (smoke_fixture)
 bash scripts/smoke_feat_a1_a7.sh   # multi-value + scoped_replace + keyed_upsert demos
 ```
 
-## Library embed (0.9 / L1)
+## Library embed (0.10 / L1 + Design B)
 
-Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + workspace recipe).
+Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + workspace recipe + `catalog_prefix`).
 
 | Surface | Entry points |
 |---------|----------------|
 | Feature flags | `sql`, `parquet`, `jshift`, `iceberg`, `cli` (see [ADR-004](docs/adr/ADR_004_FEATURE_FLAGS.md)) |
 | Shared stack | `rbt::arrow`, `rbt::parquet`, `rbt::datafusion` only — never dual-link Arrow majors |
-| Programmatic DAG | `DagBuilder`, `ModelSpec` ([ADR-006](docs/adr/ADR_006_DAG_BUILDER_IR.md)) |
+| Programmatic DAG | `DagBuilder`, `ModelSpec` ([ADR-006](docs/adr/ADR_006_DAG_BUILDER_IR.md)); empty `catalog_prefix` by default (L1.10) |
 | Lake ops | `ops::plan_skip`, `stage_model_spec`, `upsert_registry` ([ADR-007](docs/adr/ADR_007_LAKE_OPS_FACADE.md)) |
 | Stage re-entry | `stage_register_bronze`, `stage_execute_tiers`, `stage_write_receipt` |
 | Host UDFs | `UdfPack`, `RbtEngineBuilder::with_udf_pack` ([ADR-008](docs/adr/ADR_008_UDF_HOST_SURFACE.md)) |
 | Bronze adapters | builtins + `register_host_adapter` / `register_named_adapter` — [BRONZE_ADAPTERS.md](docs/BRONZE_ADAPTERS.md) |
-| Design B Rust models | `RustModel` + `ModelSpec::rust` — whole-node Arrow transforms in the same DAG ([ADR-003](docs/adr/ADR_003_UDF_RSMODELS.md)) |
+| Design B Rust models | `RustModel` + `ModelSpec::rust` — whole-node Arrow transforms ([ADR-003](docs/adr/ADR_003_UDF_RSMODELS.md)) |
 
 ## CLI
 

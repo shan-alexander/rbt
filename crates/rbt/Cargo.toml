@@ -15,7 +15,7 @@ rust-version.workspace = true
 
 [features]
 # Full product by default (CLI install + DE examples). Embedders opt down:
-#   rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "parquet"] }
+#   rbt-datalake = { version = "0.10", default-features = false, features = ["sql", "parquet"] }
 default = ["sql", "parquet", "jshift", "iceberg", "cli"]
 # Markers for documentation / future splits; core always needs DF + Arrow + Parquet.
 sql = []

@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-08-13
+
 ### Added (Design B — Rust model nodes, ADR-003 B1–B5)
 
 - **`ModelKind::Rust`** on `ModelNode`; SQL remains default for file projects
@@ -16,22 +18,25 @@ All notable changes to this project are documented in this file.
 - Receipts (B4): `ModelRunResult.kind` (`sql`|`rust`) + `materialization`
 - Fail-closed: `E_RBT_RUST_MODEL`, `E_RBT_RUST_SCHEMA`, `E_RBT_RUST_MAT`
 - Re-export `async_trait` for host implementors
-- Bench: `cargo bench -p rbt-datalake --bench design_b_sql_vs_rust`
-- **L1.10:** `ModelSpec` default `catalog_prefix` is **empty** (bare `ref()` names match
-  engine registration); opt-in `.catalog_prefix("rbt")` if needed
+- Bench: `cargo bench -p rbt-datalake --bench design_b_sql_vs_rust` (window MA / lag at 10k–100k)
 - Plan: [docs/plans/design-b-rust-models.md](docs/plans/design-b-rust-models.md)
 
-### Added (post-0.9.0 embed polish)
+### Added (embed polish after 0.9.0)
 
 - **L1.6** — [docs/EMBEDDING.md](docs/EMBEDDING.md): single-ABI rule, workspace pin recipe, feature profiles
-- **A10.12** — Host bronze adapters: `register_host_adapter`, `register_named_adapter`,
-  `NamedBronzeAdapter`, `AdapterRegistry`; frontmatter `adapter:`; fail-closed `E_RBT_SOURCE_FORMAT` /
-  `E_RBT_ADAPTER_DUP`
-- **A10.13** — Multi-file scan order (`scan_order: path|mtime`) + optional `_ingest_seq` /
-  `_source_mtime` inject columns for last-wins SQL
 - **L1.9** — Stage re-entry: `stage_register_bronze`, `stage_execute_tiers` (`ExecuteTiersOptions`),
-  `stage_write_receipt` (skip Stage 1 short-circuit; force model subgraph)
+  `stage_write_receipt`
+- **L1.10** — `ModelSpec` default `catalog_prefix` is **empty** (bare `ref()` matches engine tables)
+- **A10.12** — Host bronze adapters: `register_host_adapter`, `register_named_adapter`,
+  `NamedBronzeAdapter`; frontmatter `adapter:`; fail-closed `E_RBT_SOURCE_FORMAT` / `E_RBT_ADAPTER_DUP`
+- **A10.13** — Multi-file scan order (`scan_order: path|mtime`) + optional `_ingest_seq` /
+  `_source_mtime` for last-wins SQL
 - Roadmap: deferred **schema_digest / contract_version convention** (consider later)
+
+### Changed
+
+- Library `ModelSpec` default catalog prefix: `"rbt"` → **empty** (breaking for embeds that
+  relied on `rbt.`-prefixed `ref()` without dual-register; file projects unchanged)
 
 ## [0.9.0] — 2026-08-12
 
