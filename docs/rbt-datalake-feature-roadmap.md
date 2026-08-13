@@ -611,20 +611,18 @@ Do **not** hardcode host vocabulary into core.
 | **B3** | Parts strategies for Rust outputs (`scoped_replace`, `incremental_append`, table+parts) | Done |
 | **B4** | Receipt `kind` (`sql` \| `rust`) + `materialization` | Done |
 | **B5** | `RustModelOutput::Stream` + `batches_to_stream` | Done |
-| **L1.10** | Library `catalog_prefix` footgun (docs; optional dual-register) | Docs done — see EMBEDDING |
+| **L1.10** | Library `catalog_prefix` default empty (match bare `ref()` tables) | **Done** |
 | **B6** | File/project discovery (optional) | Planned — see [design-b-rust-models.md](plans/design-b-rust-models.md) |
 
-### Library embed: `catalog_prefix` (DX footgun)
+### Library embed: `catalog_prefix` (L1.10)
 
-**Concern:** `ModelSpec` defaults to `catalog_prefix: "rbt"`, so `{{ ref('stg_x') }}` compiles to `rbt.stg_x`. The engine registers materialised tables under the **bare** name `stg_x`. Library embeds that keep the default then fail planning with “table rbt.stg_x not found”.
+**Fixed:** `ModelSpec` defaults to empty `catalog_prefix`, so `{{ ref('stg_x') }}` → bare `stg_x` matching engine registration.
 
 | Guidance | Detail |
 |----------|--------|
-| **Recommended for pure library DAGs** | `.catalog_prefix("")` on every `ModelSpec::sql(...)` (and document in EMBEDDING) |
-| **File projects** | `SqlModelParser` / project compile already uses project catalog conventions — leave as-is |
-| **Possible later fix** | Default empty prefix for `DagBuilder`, or dual-register `name` + `{prefix}.name` on ref register (careful with DF catalogs) |
-
-Track as **L1.10** (docs + optional dual-register). Do not silently change default without a minor bump note.
+| **Default** | Empty prefix (library-friendly) |
+| **Opt-in catalog** | `.catalog_prefix("rbt")` only with dual-register / DF catalog setup |
+| **File projects** | Unchanged (project template engine owns prefix) |
 
 ---
 

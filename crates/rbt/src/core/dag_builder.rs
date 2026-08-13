@@ -42,7 +42,9 @@ pub struct ModelSpec {
     pub description: Option<String>,
     /// When set, used as compiled SQL without Jinja compile (tests / fully-expanded SQL).
     pub compiled_sql_override: Option<String>,
-    /// Catalog prefix for `{{ ref() }}` / `{{ source() }}` compile (default `"rbt"`).
+    /// Catalog prefix for `{{ ref() }}` / `{{ source() }}` compile.
+    ///
+    /// Default **empty** (L1.10): `ref('x')` → bare `x`, matching engine table registration.
     pub catalog_prefix: String,
     /// Explicit model deps for Design B Rust nodes (and optional SQL override).
     pub explicit_refs: Vec<String>,
@@ -64,7 +66,9 @@ impl ModelSpec {
             frontmatter: None,
             description: None,
             compiled_sql_override: None,
-            catalog_prefix: "rbt".into(),
+            // L1.10: empty default so `ref('x')` matches bare DF table names after materialize.
+            // Use `.catalog_prefix("rbt")` only if you dual-register / use a catalog schema.
+            catalog_prefix: String::new(),
             explicit_refs: Vec::new(),
             explicit_sources: Vec::new(),
         }
@@ -85,7 +89,7 @@ impl ModelSpec {
             frontmatter: None,
             description: None,
             compiled_sql_override: None,
-            catalog_prefix: "rbt".into(),
+            catalog_prefix: String::new(),
             explicit_refs: Vec::new(),
             explicit_sources: Vec::new(),
         }

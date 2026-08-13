@@ -2508,11 +2508,10 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         let tf = temp.path().join("tf_double.parquet");
         let mart = temp.path().join("obt_out.parquet");
 
-        // catalog_prefix "" → bare table names (same as file-project DF session tables).
+        // L1.10: empty catalog_prefix default → bare table names after materialize.
         let dag = DagBuilder::new()
             .model(
                 ModelSpec::sql("stg_seed", "SELECT 1 AS id UNION ALL SELECT 2 AS id")
-                    .catalog_prefix("")
                     .layer(ModelLayer::Staging)
                     .materialization(Materialization::Table)
                     .output_path(stg.to_string_lossy()),
@@ -2529,7 +2528,6 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
                     "obt_out",
                     r#"SELECT id FROM {{ ref('tf_double') }} WHERE id > 0"#,
                 )
-                .catalog_prefix("")
                 .layer(ModelLayer::Mart)
                 .materialization(Materialization::Table)
                 .output_path(mart.to_string_lossy()),

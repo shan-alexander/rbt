@@ -17,7 +17,8 @@ All notable changes to this project are documented in this file.
 - Fail-closed: `E_RBT_RUST_MODEL`, `E_RBT_RUST_SCHEMA`, `E_RBT_RUST_MAT`
 - Re-export `async_trait` for host implementors
 - Bench: `cargo bench -p rbt-datalake --bench design_b_sql_vs_rust`
-- Docs: library **`.catalog_prefix("")`** footgun (L1.10 / EMBEDDING)
+- **L1.10:** `ModelSpec` default `catalog_prefix` is **empty** (bare `ref()` names match
+  engine registration); opt-in `.catalog_prefix("rbt")` if needed
 - Plan: [docs/plans/design-b-rust-models.md](docs/plans/design-b-rust-models.md)
 
 ### Added (post-0.9.0 embed polish)

@@ -123,18 +123,20 @@ impl RustModel for MyNode {
 // RbtEngineBuilder::new().with_rust_model(MyNode).build().await?;
 ```
 
-## `catalog_prefix` for library DAGs
+## `catalog_prefix` for library DAGs (L1.10)
 
-`ModelSpec::sql` defaults to `catalog_prefix: "rbt"`, so `{{ ref('stg_x') }}` becomes `rbt.stg_x`.
-The engine registers tables under the **bare** name. For pure library embeds:
+`ModelSpec` defaults to **empty** `catalog_prefix`, so `{{ ref('stg_x') }}` → bare `stg_x`, matching
+engine `ref()` registration. Prefer the default for library embeds.
 
 ```rust
-ModelSpec::sql("stg_x", "SELECT 1 AS id")
-    .catalog_prefix("")   // required so ref() matches session table names
-    .output_path(...)
+// Default is correct for most embeds:
+ModelSpec::sql("stg_x", "SELECT 1 AS id").output_path(...)
+
+// Only if you intentionally use a catalog schema:
+ModelSpec::sql("stg_x", "...").catalog_prefix("rbt")  // needs dual-register or DF catalog setup
 ```
 
-File-based projects are unaffected (project compiler owns the prefix). See roadmap **L1.10**.
+File-based projects still use their project compiler / template engine prefix independently.
 
 ## Anti-patterns
 
@@ -142,4 +144,4 @@ File-based projects are unaffected (project compiler owns the prefix). See roadm
 - Shelling out to `rbt run` from a long-lived daemon (use library + receipts)  
 - Domain math formulas inside rbt core (register UDFs or Design B Rust models)  
 - Product-specific examples in rbt (keep host SoT examples in the host repo)  
-- Forgetting `.catalog_prefix("")` on library `ModelSpec::sql` (planning fails on `rbt.*`)
+- Setting `.catalog_prefix("rbt")` without dual-registering tables (planning fails on `rbt.*`)
