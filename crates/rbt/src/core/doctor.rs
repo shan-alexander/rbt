@@ -3,7 +3,7 @@
 use super::diagnostics::{DoctorReport, DoctorSeverity};
 use super::project::RbtProjectConfig;
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Run project preflight checks. Does not execute the DAG.
 pub fn run_doctor(project_dir: &Path) -> Result<DoctorReport> {
@@ -211,6 +211,10 @@ fn inspect_models(project_dir: &Path, cfg: &RbtProjectConfig, report: &mut Docto
                     checked += 1;
                 }
             }
+            // C0.6: identity SELECT * marts still on table rewrite → suggest alias
+            inspect_identity_marts(&dag, report);
+            // C3.7: concurrency config + parallel_safe + parts manifests
+            inspect_execution_and_parts(project_dir, cfg, &dag, report);
         }
         Err(e) => {
             report.push(
@@ -218,6 +222,192 @@ fn inspect_models(project_dir: &Path, cfg: &RbtProjectConfig, report: &mut Docto
                 "E_RBT_DAG",
                 format!("build_dag failed: {e:#}"),
                 None,
+            );
+        }
+    }
+}
+
+/// Phase 3: surface concurrency strategy, parallel_safe, and part-manifest health.
+fn inspect_execution_and_parts(
+    project_dir: &Path,
+    cfg: &RbtProjectConfig,
+    dag: &crate::core::dag::ModelDag,
+    report: &mut DoctorReport,
+) {
+    use crate::core::work_unit::classify_parallel_contract;
+    use crate::materializer::{
+        load_manifest, resolve_parts_layout, table_layout_root, uses_parts_directory,
+    };
+
+    let conc = &cfg.execution.concurrency;
+    report.push(
+        DoctorSeverity::Ok,
+        "OK_EXECUTION",
+        format!(
+            "execution.concurrency enabled={} strategy={} max_workers={} fanout_threshold={} \
+             dirty_part_skip={} large_parts_first={} max_inflight_bytes={:?}",
+            conc.enabled,
+            conc.strategy.as_str(),
+            conc.max_workers,
+            conc.multi_value_fanout_threshold,
+            conc.dirty_part_skip,
+            conc.large_parts_first,
+            conc.max_inflight_bytes
+        ),
+        None,
+    );
+    if conc.enabled && conc.max_workers > 1 {
+        report.push(
+            DoctorSeverity::Ok,
+            "OK_CONCURRENT",
+            "concurrency enabled: workers use private SessionContext; manifests merge under lock"
+                .into(),
+            None,
+        );
+    }
+
+    let mut checked = 0usize;
+    for (name, &idx) in &dag.node_map {
+        if checked >= 12 {
+            break;
+        }
+        let node = &dag.graph[idx];
+        let contract = classify_parallel_contract(node);
+        if matches!(
+            node.materialization,
+            crate::core::dag::Materialization::ScopedReplace
+        ) || node
+            .frontmatter
+            .as_ref()
+            .and_then(|f| f.parallel_safe)
+            .is_some()
+        {
+            report.push(
+                DoctorSeverity::Ok,
+                "OK_PARALLEL_CONTRACT",
+                format!(
+                    "model '{name}' parallel_contract={} mat={} parts_layout={:?}",
+                    contract.as_str(),
+                    node.materialization.as_str(),
+                    node.frontmatter
+                        .as_ref()
+                        .and_then(|f| f.parts_layout.as_ref())
+                ),
+                None,
+            );
+            checked += 1;
+        }
+
+        if !uses_parts_directory(&node.materialization) {
+            continue;
+        }
+        let Some(ref op) = node.output_path else {
+            continue;
+        };
+        let dest = Path::new(op);
+        let layout = resolve_parts_layout(
+            node.frontmatter
+                .as_ref()
+                .and_then(|f| f.parts_layout.as_deref()),
+            cfg.materialize.default_parts_layout.as_deref(),
+        );
+        let root = table_layout_root(dest, layout);
+        if !root.is_dir() {
+            continue;
+        }
+        match load_manifest(&root) {
+            Ok(man) => {
+                let with_fp = man
+                    .part_meta
+                    .values()
+                    .filter(|m| m.content_fp.is_some())
+                    .count();
+                let with_stats = man
+                    .part_meta
+                    .values()
+                    .filter(|m| !m.stats.is_empty())
+                    .count();
+                report.push(
+                    DoctorSeverity::Ok,
+                    "OK_PARTS_MANIFEST",
+                    format!(
+                        "model '{name}' layout={} parts={} schema_v{} content_fp={with_fp} \
+                         col_stats={with_stats} parallel_safe={:?} sort_within_part={:?}",
+                        layout.as_str(),
+                        man.parts.len(),
+                        man.schema_version,
+                        man.parallel_safe,
+                        man.sort_within_part
+                    ),
+                    Some(root),
+                );
+            }
+            Err(e) => report.push(
+                DoctorSeverity::Warn,
+                "W_RBT_MANIFEST",
+                format!("model '{name}' parts root {} manifest: {e}", root.display()),
+                Some(root),
+            ),
+        }
+        checked += 1;
+    }
+    let _ = project_dir;
+}
+
+/// Warn when SQL looks like pure identity but materialization rewrites bytes.
+fn inspect_identity_marts(dag: &crate::core::dag::ModelDag, report: &mut DoctorReport) {
+    use crate::core::dag::Materialization;
+    use crate::materializer::looks_like_identity_sql;
+
+    for (name, &idx) in &dag.node_map {
+        let node = &dag.graph[idx];
+        if node.materialization.is_alias() {
+            report.push(
+                DoctorSeverity::Ok,
+                "OK_ALIAS",
+                format!(
+                    "model '{name}' uses materialization=alias (zero-copy identity)"
+                ),
+                None,
+            );
+            continue;
+        }
+        // Only suggest for rewrite strategies that would re-encode parquet.
+        if !matches!(
+            node.materialization,
+            Materialization::Table | Materialization::View
+        ) {
+            continue;
+        }
+        let sql = if !node.raw_sql.trim().is_empty() {
+            node.raw_sql.as_str()
+        } else {
+            node.compiled_sql.as_str()
+        };
+        // Prefer raw (still has {{ ref }}); identity pattern on compiled table name also OK.
+        if let Some(from) = looks_like_identity_sql(sql) {
+            report.push(
+                DoctorSeverity::Warn,
+                "W_RBT_ALIAS_CANDIDATE",
+                format!(
+                    "model '{name}' looks like SELECT * identity of '{from}' but materialization is \
+                     {:?} — consider `materialization: alias` (and alias_of: {from}) to avoid \
+                     rewriting multi-GB files (RBT-C Phase 0)",
+                    node.materialization
+                ),
+                node.output_path.as_ref().map(PathBuf::from),
+            );
+        } else if looks_like_identity_sql(&node.compiled_sql).is_some()
+            && matches!(node.materialization, Materialization::Table)
+        {
+            report.push(
+                DoctorSeverity::Warn,
+                "W_RBT_ALIAS_CANDIDATE",
+                format!(
+                    "model '{name}' compiled SQL is SELECT * from a single table with \
+                     materialization=table — consider `materialization: alias` to skip rewrite"
+                ),
+                node.output_path.as_ref().map(PathBuf::from),
             );
         }
     }

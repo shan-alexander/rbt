@@ -4,8 +4,17 @@
 # Generated lake outputs
 examples/full_e2e_rbt_example/lake/silver/
 examples/full_e2e_rbt_example/lake/gold/
+examples/full_e2e_rbt_example/lake/sql_models_output/
+examples/full_e2e_rbt_example/lake/rust_models_output/
+examples/full_e2e_rbt_example/lake/parallel_models_output/
+examples/full_e2e_rbt_example/lake/design_d_models_output/
+examples/full_e2e_rbt_example/lake/compare_*/
+examples/full_e2e_rbt_example/lake/bronze/lz_stock_bars_parquet/
+examples/full_e2e_rbt_example/.rbt/
 examples/smoke_fixture/lake/silver/
 examples/smoke_fixture/lake/gold/
+**/__pycache__/
+
 examples/smoke_fixture/**/*.iceberg/
 examples/complex_bronze_landing/lake/silver/
 examples/complex_bronze_landing/lake/gold/

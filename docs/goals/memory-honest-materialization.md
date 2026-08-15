@@ -24,9 +24,11 @@ aliases: [P1, streaming materialize, bronze spill, lake as truth]
 
 - **Shipped** stream + spill path (**0.3.8 / 0.3.9**). Further harden optional.
 - Plan: [docs/STREAMING_MATERIALIZE_PLAN.md](../STREAMING_MATERIALIZE_PLAN.md). Ref tradeoffs: [docs/REF_STRATEGY.md](../REF_STRATEGY.md).
+- **Next wall-clock honesty:** alias / zero-copy materialization for identity marts + partition work units (avoid full-table collect/rewrite) — [[Partition work units and concurrent scheduler]].
 
 ## Related
 
 - [[Primary path spine]]
 - [[Measured claims before marketing]]
 - [[Iceberg system of record]]
+- [[Team-scale lake positioning]]

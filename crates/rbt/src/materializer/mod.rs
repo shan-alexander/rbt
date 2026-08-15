@@ -3,6 +3,7 @@
 //! **Streaming materialize** ([`stream`]) is the default engine path: pull a DataFusion
 //! batch stream, write batch-by-batch, drop each batch, atomic-publish the file.
 
+pub mod alias;
 #[cfg(feature = "iceberg")]
 pub mod iceberg_catalog;
 pub mod incremental;
@@ -16,11 +17,18 @@ pub use iceberg_catalog::{
     verify_iceberg_catalog_table, write_iceberg_catalog_batches, write_iceberg_catalog_stream,
     IcebergCatalogOptions, IcebergCatalogWriteStats,
 };
+pub use alias::{
+    alias_ref_path, is_alias_materialization, looks_like_identity_sql, materialize_alias,
+    read_alias_sidecar, resolve_alias_upstream, upstream_lake_path, AliasPublishMode, AliasSidecar,
+};
 pub use incremental::{
-    clear_incremental_parts, consolidate_parts_to_parquet, incremental_ref_path, load_manifest,
-    materialize_incremental_append_stream, materialize_scoped_replace_stream,
-    materialize_table_parts_only_stream, parts_dir_for_parquet, resolve_part_keys, scope_part_id,
-    uses_parts_directory, IncrementalManifest,
+    clear_incremental_parts, consolidate_parts_to_parquet, file_content_fp, hive_part_rel_path,
+    incremental_ref_path, load_manifest, materialize_incremental_append_stream,
+    materialize_scoped_replace_stream, materialize_scoped_replace_stream_with,
+    materialize_table_parts_only_stream, merge_manifest_upsert_part, parquet_footer_stats,
+    part_is_clean, parts_dir_for_parquet, resolve_part_keys, resolve_parts_layout,
+    scoped_part_rel_path, scope_part_id, table_layout_root, uses_parts_directory, ColumnStats,
+    IncrementalManifest, PartMeta, PartsLayout, ScopedPartPublish,
 };
 pub use upsert::{
     materialize_keyed_upsert, upsert_batches, UpsertConfig, UpsertResult, UpsertStats,
@@ -64,7 +72,8 @@ impl MultiFormatWriter {
     /// * **Parquet / Jsonl / Csv** — single file at `destination_path`
     /// * **Iceberg** — table directory at `destination_path` with `data/` + `metadata/`
     /// * **ParquetAndIceberg** — flat `.parquet` sibling plus `{stem}.iceberg/` table dir
-    /// * **ZeroCopyClone** — currently materializes Parquet (clone semantics later)
+    /// * **ZeroCopyClone** (output format) — treated as Parquet write here; prefer
+    ///   `materialization: alias` for true zero-copy (see [`alias::materialize_alias`]).
     pub fn write_batches(
         batches: &[RecordBatch],
         format: &OutputFormat,

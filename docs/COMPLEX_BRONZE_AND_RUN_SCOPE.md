@@ -2,6 +2,40 @@
 
 Product goal: turn **multi-artifact Hive-ish bronze trees** into reliable **silver stage tables**, with orchestrator-friendly scope binds and job receipts.
 
+## Recommended bronze landing (fast path)
+
+| Landing | Registration | Spill? | Notes |
+|---------|--------------|--------|--------|
+| **Parquet hive / `.parts/`** | DataFusion listing | **No** | **Preferred.** Columns (or hive) carry partition keys; omit `inject_source_path` / heavy globs. |
+| Arrow IPC multi-file hive | Scan → spill Parquet → list | Yes (default) | Flexible; `scan.reuse_register` reuses spill when landings unchanged. |
+| JSONL / CSV / etc. | Scan or listing | Depends | See format matrix. |
+
+```yaml
+# rbt_project.yml
+scan:
+  spill_arrow_ipc: true          # Arrow multi-file safety (default)
+  reuse_register: true           # reuse spill when bronze path_stat matches (default)
+  spill_dir: .rbt/bronze_spill
+
+# Staging frontmatter — recommended Parquet bronze
+source_format: parquet
+scan_path: $lake/bronze/lz_stock_bars_parquet
+source_name: bronze
+source_table: ohlcv_1m
+# no inject_source_path, no require_partitions (filter in SQL if needed)
+```
+
+```bash
+# Rematerialize silver/gold but do not re-decode unchanged bronze:
+rbt run -p proj --select stg_ohlcv_1m   # reuse_register on by default
+
+# Force re-spill / re-register bronze:
+rbt run -p proj --force-bronze-register --select stg_ohlcv_1m
+
+# Skip entire DAG when bronze+contract unchanged:
+rbt run -p proj --skip-if-match
+```
+
 Related brain notes: [[Complex bronze landing zones]], [[Bronze-to-silver maturity gap matrix]], [[Dual-track maturity roadmap]].
 
 ## 1. Run variables & partition binds (P5a + RBT-A1 multi-value)
@@ -44,6 +78,47 @@ rbt run -p my_project \
 
 With frontmatter `partition_by: [entity, report_date]`, bronze listing keeps hive dirs
 `entity=a.com` and `entity=b.com` only (not `entity=c.com`).
+
+### Multi-value: filter (default) or WorkUnit fan-out (RBT-C Phase 1)
+
+**Default (compat):** multi-value scope is a **partition IN filter** on one plan/write.
+
+**Opt-in fan-out** (`execution.concurrency` or CLI `--jobs` / `--execution-strategy partition`):
+
+```yaml
+execution:
+  concurrency:
+    enabled: true
+    max_workers: 8
+    strategy: partition   # serial | model_tier | partition | auto
+    multi_value_fanout_threshold: 4
+```
+
+```bash
+rbt run -p proj --jobs 8 --var-file entity=list.txt
+rbt explain -p proj --plan --jobs 8 --var-file entity=list.txt
+rbt work-units -p proj --json --jobs 8 --var-file entity=list.txt
+```
+
+When the model is `materialization: scoped_replace` with `partition_by` / `part_key`
+covering the multi vars, rbt expands **WorkUnits** (one part per value), optionally concurrent
+with **private DataFusion sessions** and **atomic manifest merge**. Non-partition-local models
+stay on the mega/IN path. Frontmatter `parallel_safe: false` forces mega plan.
+
+**Physical layout (Phase 3):**
+
+```yaml
+parts_layout: parts   # default → model.parts/part-{scope_id}.parquet
+# parts_layout: hive  # → model/symbol=AAPL/data.parquet
+sort_within_part: [timestamp_ns]   # contract recorded on manifest
+```
+
+Project default: `materialize.default_parts_layout: hive`.  
+`rbt consolidate` still rebuilds a monolith for BI. Cost heuristics:
+`large_parts_first`, optional `max_inflight_bytes` (advisory).
+
+See [[Partition work units and concurrent scheduler]] and
+[[Partition-aware concurrent execution — user feedback vs rbt 0.10.x]].
 
 Library:
 

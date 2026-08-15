@@ -21,7 +21,11 @@ pub enum Materialization {
     IncrementalMerge,
     /// RBT-A7: Type-1 entity-grain upsert by `unique_key` (touch-only when attrs unchanged).
     KeyedUpsert,
-    /// Native zero-copy metadata table clone (zero disk byte duplication)
+    /// Identity / pass-through: no re-encode of upstream lake bytes (RBT-C Phase 0).
+    ///
+    /// Frontmatter: `materialization: alias` (aliases: `zero_copy_ref`, `zero_copy_clone`,
+    /// `clone`). Optional `alias_of: upstream_model`. Publishes hardlink/symlink/pointer
+    /// to the upstream path — see [`crate::materializer::alias`].
     ZeroCopyClone,
 }
 
@@ -34,8 +38,14 @@ impl Materialization {
             Self::ScopedReplace => "scoped_replace",
             Self::IncrementalMerge => "incremental_merge",
             Self::KeyedUpsert => "keyed_upsert",
-            Self::ZeroCopyClone => "zero_copy_clone",
+            // Product name is `alias`; enum keeps ZeroCopyClone for stable serde/API.
+            Self::ZeroCopyClone => "alias",
         }
+    }
+
+    /// True for identity / zero-copy materialization (no SQL rewrite of upstream bytes).
+    pub fn is_alias(&self) -> bool {
+        matches!(self, Self::ZeroCopyClone)
     }
 }
 
@@ -52,10 +62,13 @@ pub fn parse_materialization_hint(s: &str) -> Result<Materialization> {
         "keyed_upsert" | "upsert" | "scd1" | "type1" | "type_1" => {
             Ok(Materialization::KeyedUpsert)
         }
-        "zero_copy_clone" | "clone" => Ok(Materialization::ZeroCopyClone),
+        "alias" | "zero_copy_ref" | "zero_copy_clone" | "zero_copy" | "clone" => {
+            Ok(Materialization::ZeroCopyClone)
+        }
         other => bail!(
             "E_RBT_MATERIALIZATION: unknown materialization '{other}' \
-             (table | view | incremental_append | scoped_replace | keyed_upsert | incremental_merge)"
+             (table | view | incremental_append | scoped_replace | keyed_upsert | \
+             incremental_merge | alias)"
         ),
     }
 }

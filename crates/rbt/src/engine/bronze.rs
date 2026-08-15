@@ -2,15 +2,24 @@
 //!
 //! ## Architecture
 //!
-//! * **Path A (DataFusion listing / external tables)** — Parquet, CSV, JSON/JSONL (no
-//!   jshift projection), Arrow IPC file: register via DataFusion native readers, then
-//!   wrap the resulting provider in [`BronzeTableProvider`]. Listing predicate
-//!   pushdown is available on this path.
-//! * **Path B (scan → MemTable)** — used when rbt must apply its own filters or
-//!   inject path-derived columns. **Any non-empty `path_glob` forces Path B** (as do
-//!   `partition_by` / `require_partitions` / `inject_source_path` / `force_scan` and
-//!   formats that require scan: log, txt, toml, Arrow IPC stream, protobuf).
-//!   DataFusion directory listing pushdown is **disabled** for that source by design.
+//! * **Path A (DataFusion listing / external tables)** — **preferred for Parquet bronze**
+//!   (hive dirs or multi-file / `.parts/` tables). No spill; DF can push predicates.
+//! * **Path B (scan → MemTable or spill→Parquet)** — when rbt must apply path globs,
+//!   inject path-derived columns, or decode formats DF does not list well (Arrow IPC
+//!   hive, log, protobuf, …). Arrow IPC multi-file defaults to **spill→Parquet** then
+//!   Path A listing (bounded RAM).
+//!
+//! ### Recommended landing
+//!
+//! Land **Parquet** under a hive or parts directory (`source_format: parquet`). Omit
+//! `inject_source_path` / path-only metadata if columns already live in the files so
+//! registration stays on Path A.
+//!
+//! ### Register reuse
+//!
+//! For spill paths, `scan.reuse_register` (default true) reuses the spill Parquet when
+//! the per-source bronze path fingerprint matches a sidecar — independent of DAG-level
+//! `--skip-if-match` (which skips all materialize).
 //!
 //! [`BronzeTableProvider`] is intentionally thin: it delegates scan/schema to the
 //! inner provider and carries bronze metadata for lineage / debugging.
@@ -419,6 +428,14 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
     if fm.force_scan.unwrap_or(false) {
         return true;
     }
+
+    // --- Recommended Parquet bronze: stay on DataFusion listing (no spill/MemTable) ---
+    // When landings already include partition keys as columns (or need no path inject),
+    // a directory / .parts registration is the fast path.
+    if matches!(format, SourceFormat::Parquet) && parquet_prefers_listing(fm) {
+        return false;
+    }
+
     // Hive partition injection / filters / source path / path_glob require the scan path
     // (DataFusion listing does not inject path-derived columns or apply rbt globs).
     if fm
@@ -471,6 +488,53 @@ fn should_use_scan_path(fm: &StagingFrontmatter, format: SourceFormat) -> bool {
             | SourceFormat::Xml
             | SourceFormat::Robots
     )
+}
+
+/// True when Parquet bronze can use Path A listing (fast, no spill).
+///
+/// Requires no path-derived injects / custom adapters. Optional globs that only mean
+/// "all parquet" are treated as listing-friendly. Partition keys should live **in the
+/// files** (or hive dirs read by DF); `partition_by` alone does not force scan for Parquet
+/// when injects are off.
+fn parquet_prefers_listing(fm: &StagingFrontmatter) -> bool {
+    if fm.inject_source_path.unwrap_or(false)
+        || fm.inject_ingest_seq.unwrap_or(false)
+        || fm.inject_source_mtime.unwrap_or(false)
+        || fm
+            .adapter
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    // require_partitions* still force scan so we prune hive before open (listing root
+    // would scan all symbols). Hosts that want pure listing omit require_* and filter in SQL.
+    if fm
+        .require_partitions
+        .as_ref()
+        .map(|p| !p.is_empty())
+        .unwrap_or(false)
+        || fm
+            .require_partitions_in
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    match fm.path_glob.as_ref() {
+        None => true,
+        Some(g) if g.is_empty() => true,
+        Some(g) => g.iter().all(|p| {
+            let p = p.trim();
+            p == "*.parquet"
+                || p == "**/*.parquet"
+                || p == "part-*.parquet"
+                || p == "**/part-*.parquet"
+                || p == "*.parts"
+        }),
+    }
 }
 
 async fn ensure_schema(ctx: &SessionContext, schema_name: &str) -> Result<()> {
@@ -622,6 +686,9 @@ async fn scan_to_memtable(
 }
 
 /// Stream Arrow IPC (etc.) file-by-file into a project spill Parquet, then DF-list it.
+///
+/// When `scan.reuse_register` is true and a prior spill sidecar matches the current
+/// per-source path fingerprint, re-registers the existing spill without re-decoding.
 async fn scan_spill_to_listing(
     ctx: &SessionContext,
     project_dir: &Path,
@@ -663,6 +730,27 @@ async fn scan_spill_to_listing(
         table_name.replace('/', "_")
     );
     let spill_path = spill_root.join(safe);
+    let sidecar_path = spill_register_sidecar_path(&spill_path);
+    let source_fp = source_path_fingerprint(&scanner, &req)?;
+
+    if config.scan.reuse_register
+        && spill_path.is_file()
+        && sidecar_matches(&sidecar_path, &source_fp)
+    {
+        tracing::info!(
+            "Bronze {}.{} register reuse (spill cache hit) → {} fp={}",
+            schema_name,
+            table_name,
+            spill_path.display(),
+            source_fp
+        );
+        return listing_table_provider(
+            ctx,
+            spill_path.to_str().unwrap_or_default(),
+            SourceFormat::Parquet,
+        )
+        .await;
+    }
 
     let opts = crate::materializer::MaterializeWriteOptions::from_config(&config.materialize, true);
     let stats = scanner
@@ -681,6 +769,7 @@ async fn scan_spill_to_listing(
         stats.batches,
         spill_path.display()
     );
+    write_spill_register_sidecar(&sidecar_path, &source_fp, stats.rows, stats.batches)?;
 
     listing_table_provider(
         ctx,
@@ -690,10 +779,110 @@ async fn scan_spill_to_listing(
     .await
 }
 
+fn spill_register_sidecar_path(spill_path: &Path) -> PathBuf {
+    let mut s = spill_path.as_os_str().to_os_string();
+    s.push(".rbt_register.json");
+    PathBuf::from(s)
+}
+
+fn source_path_fingerprint(scanner: &LakeScanner, req: &ScanRequest) -> Result<String> {
+    use crate::core::run_scope::fnv1a64;
+    use std::fs;
+    let (root, files) = scanner.list_files(req)?;
+    let mut lines: Vec<String> = Vec::with_capacity(files.len() + 2);
+    lines.push(format!("format={}", req.format.as_str()));
+    lines.push(format!("root={}", root.display()));
+    for f in files {
+        let rel = f
+            .strip_prefix(&root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| f.display().to_string());
+        let meta = fs::metadata(&f).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        lines.push(format!("{rel}\t{size}\t{mtime}"));
+    }
+    lines.sort();
+    let joined = lines.join("\n");
+    let h = fnv1a64(joined.as_bytes());
+    Ok(format!("path_stat:fnv1a64:{h:016x}"))
+}
+
+fn sidecar_matches(sidecar: &Path, expected_fp: &str) -> bool {
+    let Ok(raw) = std::fs::read_to_string(sidecar) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    v.get("fingerprint")
+        .and_then(|x| x.as_str())
+        .map(|fp| fp == expected_fp)
+        .unwrap_or(false)
+}
+
+fn write_spill_register_sidecar(
+    sidecar: &Path,
+    fingerprint: &str,
+    rows: usize,
+    batches: usize,
+) -> Result<()> {
+    let body = serde_json::json!({
+        "fingerprint": fingerprint,
+        "rows": rows,
+        "batches": batches,
+        "schema_version": 1,
+    });
+    if let Some(parent) = sidecar.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(sidecar, serde_json::to_vec_pretty(&body)?)
+        .with_context(|| format!("write bronze register sidecar {}", sidecar.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::dag::{Materialization, ModelDag, OutputFormat};
+    use crate::core::frontmatter::StagingFrontmatter;
+
+    #[test]
+    fn parquet_listing_preferred_without_injects() {
+        let fm = StagingFrontmatter {
+            path_glob: Some(vec!["**/*.parquet".into()]),
+            partition_by: Some(vec!["symbol".into()]),
+            ..Default::default()
+        };
+        assert!(parquet_prefers_listing(&fm));
+        assert!(!should_use_scan_path(&fm, SourceFormat::Parquet));
+    }
+
+    #[test]
+    fn parquet_scan_when_require_partitions() {
+        let mut req = std::collections::HashMap::new();
+        req.insert("timeframe".into(), "1m".into());
+        let fm = StagingFrontmatter {
+            require_partitions: Some(req),
+            ..Default::default()
+        };
+        assert!(!parquet_prefers_listing(&fm));
+        assert!(should_use_scan_path(&fm, SourceFormat::Parquet));
+    }
+
+    #[test]
+    fn parquet_scan_when_inject_source_path() {
+        let fm = StagingFrontmatter {
+            inject_source_path: Some(true),
+            ..Default::default()
+        };
+        assert!(!parquet_prefers_listing(&fm));
+    }
 
     #[tokio::test]
     async fn register_arrow_ipc_spills_to_parquet() -> Result<()> {

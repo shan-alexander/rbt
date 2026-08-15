@@ -25,7 +25,7 @@ Package name on crates.io: **`rbt-datalake`**. Binary: **`rbt`**. Lib import: **
 Embed without Iceberg / CLI:
 
 ```toml
-rbt-datalake = { version = "0.10", default-features = false, features = ["sql", "parquet"] }
+rbt-datalake = { version = "0.11", default-features = false, features = ["sql", "parquet"] }
 ```
 
 **Single-ABI:** in dag-enabled crates use only `rbt::arrow` / `rbt::parquet` / `rbt::datafusion`.  

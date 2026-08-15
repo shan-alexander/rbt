@@ -30,6 +30,11 @@ pub const SCENARIO_WHALE_SYNTHETIC: &str = "whale_synthetic";
 pub const SCENARIO_COMPLEX_BRONZE: &str = "complex_bronze";
 /// Synthetic N-key Type-1 upsert (RBT-A7); env `RBT_MEASURE_UPSERT_KEYS`.
 pub const SCENARIO_ENTITY_REGISTRY_UPSERT: &str = "entity_registry_upsert";
+/// RBT-C Phase 0 baseline: independent tier models run **serially** (concurrent path not yet).
+pub const SCENARIO_CONCURRENT_TIER_VS_SERIAL: &str = "concurrent_tier_vs_serial";
+/// RBT-C: multi-value IN-filter vs partition fan-out (Phase 0/1).
+/// Set `RBT_MEASURE_FANOUT=1` to enable partition strategy fan-out path.
+pub const SCENARIO_MULTI_VALUE_IN_VS_FANOUT: &str = "multi_value_in_vs_fanout";
 
 /// Default synthetic row count for whale scenario (override with `RBT_MEASURE_ROWS`).
 pub const DEFAULT_WHALE_ROWS: usize = 100_000;
@@ -122,6 +127,12 @@ pub async fn run_measure_scenario(
         }
         SCENARIO_ENTITY_REGISTRY_UPSERT | "keyed_upsert" | "upsert" => {
             measure_entity_registry_upsert(output_dir).await
+        }
+        SCENARIO_CONCURRENT_TIER_VS_SERIAL | "concurrent_tier" | "tier_serial" => {
+            measure_concurrent_tier_vs_serial(output_dir).await
+        }
+        SCENARIO_MULTI_VALUE_IN_VS_FANOUT | "multi_value_in" | "mv_in_vs_fanout" => {
+            measure_multi_value_in_vs_fanout(output_dir).await
         }
         other => bail!(
             "E_RBT_MEASURE: unknown scenario '{other}'. Built-ins: {}",
@@ -626,7 +637,253 @@ pub fn list_scenarios() -> Vec<&'static str> {
         SCENARIO_WHALE_SYNTHETIC,
         SCENARIO_COMPLEX_BRONZE,
         SCENARIO_ENTITY_REGISTRY_UPSERT,
+        SCENARIO_CONCURRENT_TIER_VS_SERIAL,
+        SCENARIO_MULTI_VALUE_IN_VS_FANOUT,
     ]
+}
+
+/// Phase 0 baseline for RBT-C L1: two independent staging models in one tier (serial exec).
+///
+/// Notes record that concurrent tier execution is **not** implemented yet; this is the
+/// serial wall_ms / RSS baseline for future `max_in_flight_models > 1` comparison.
+async fn measure_concurrent_tier_vs_serial(output_dir: &Path) -> Result<MeasureReport> {
+    let n = env_usize("RBT_MEASURE_TIER_ROWS", 20_000);
+    let root = output_dir.join("concurrent_tier_vs_serial_measure");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("lake/bronze"))?;
+    fs::create_dir_all(root.join("models/staging"))?;
+    fs::create_dir_all(root.join("lake/silver"))?;
+
+    // Two independent bronze files → two independent stg models (same tier).
+    for (name, prefix) in [("events_a", "a"), ("events_b", "b")] {
+        let path = root.join(format!("lake/bronze/{name}.jsonl"));
+        let mut f = fs::File::create(&path)?;
+        for i in 0..n {
+            writeln!(f, r#"{{"id":{i},"k":"{prefix}","v":{}}}"#, i % 7)?;
+        }
+        fs::write(
+            root.join(format!("models/staging/stg_{name}.sql")),
+            format!(
+                r#"---
+description: Independent staging model for tier concurrency baseline
+source_format: jsonl
+scan_path: lake/bronze/{name}.jsonl
+materialization: table
+---
+SELECT * FROM {{{{ source('bronze', '{name}') }}}}
+"#
+            ),
+        )?;
+    }
+
+    fs::write(
+        root.join("rbt_project.yml"),
+        r#"
+name: concurrent_tier_vs_serial_measure
+version: "1"
+models_dir: models
+target_path: lake/silver
+layers:
+  staging:
+    path: models/staging
+    target_path: lake/silver
+    default_format: parquet
+materialize:
+  mode: stream
+  ref_strategy: parquet
+"#,
+    )?;
+
+    let config = RbtProjectConfig::load(&root)?;
+    let dag = config.build_dag(&root, None)?;
+    let tiers = dag.execution_tiers()?;
+    let tier0_len = tiers.first().map(|t| t.len()).unwrap_or(0);
+    let engine = TransformationEngine::new();
+    let rss0 = read_peak_rss_kb();
+    let start = Instant::now();
+    let summary = engine
+        .execute_dag(&dag, &root, root.join("lake/silver"))
+        .await
+        .context("E_RBT_MEASURE: concurrent_tier_vs_serial execute failed")?;
+    let wall_ms = start.elapsed().as_millis();
+    let rss1 = read_peak_rss_kb();
+
+    Ok(MeasureReport {
+        scenario: SCENARIO_CONCURRENT_TIER_VS_SERIAL.into(),
+        project: config.name,
+        package_version: crate::VERSION.into(),
+        wall_ms,
+        models_executed: summary.models_executed,
+        total_rows: summary.total_rows_produced,
+        bronze_sources: summary.bronze_sources_registered,
+        peak_rss_kb: rss1.or(rss0),
+        notes: vec![
+            format!(
+                "SERIAL baseline only: tier0 has {tier0_len} independent model(s); engine still \
+                 executes serially (RBT-C Phase 0). Concurrent path lands in Phase 1 (L1)."
+            ),
+            format!("rows_per_model≈{n} (env RBT_MEASURE_TIER_ROWS)"),
+            "Compare later: same pack with execution.concurrency.max_workers>1".into(),
+        ],
+        ok: summary.models_executed >= 2 && tier0_len >= 2,
+        error: if summary.models_executed >= 2 && tier0_len >= 2 {
+            None
+        } else {
+            Some(format!(
+                "expected ≥2 models in tier0 (got models={}, tier0={tier0_len})",
+                summary.models_executed
+            ))
+        },
+        mode_compare: None,
+        synthetic_rows: Some(n.saturating_mul(2)),
+        synthetic_parts: None,
+    })
+}
+
+/// Phase 0 baseline for RBT-C L2: multi-value partition scope as one IN-filter plan.
+///
+/// Fan-out into per-value WorkUnits is **not** implemented yet; this measures the current
+/// serial multi-value IN path for later comparison.
+async fn measure_multi_value_in_vs_fanout(output_dir: &Path) -> Result<MeasureReport> {
+    let entities = env_usize("RBT_MEASURE_MV_ENTITIES", 8);
+    let rows_per = env_usize("RBT_MEASURE_MV_ROWS", 2_000);
+    let root = output_dir.join("multi_value_in_vs_fanout_measure");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("lake/bronze"))?;
+    fs::create_dir_all(root.join("models/staging"))?;
+    fs::create_dir_all(root.join("lake/silver"))?;
+
+    // Hive-ish entity=X dirs under bronze.
+    for e in 0..entities {
+        let ent = format!("e{e}");
+        let dir = root.join(format!("lake/bronze/entity={ent}"));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("data.jsonl");
+        let mut f = fs::File::create(&path)?;
+        for i in 0..rows_per {
+            writeln!(
+                f,
+                r#"{{"entity":"{ent}","id":{i},"v":{}}}"#,
+                i % 5
+            )?;
+        }
+    }
+
+    let fanout = std::env::var("RBT_MEASURE_FANOUT")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let mat = if fanout {
+        "scoped_replace"
+    } else {
+        "table"
+    };
+
+    fs::write(
+        root.join("models/staging/stg_events.sql"),
+        format!(
+            r#"---
+description: Multi-value IN vs fan-out measure
+source_format: jsonl
+scan_path: lake/bronze
+partition_by: [entity]
+part_key: [entity]
+materialization: {mat}
+---
+SELECT * FROM {{{{ source('bronze', 'events') }}}}
+"#
+        ),
+    )?;
+
+    let exec_yml = if fanout {
+        r#"
+execution:
+  concurrency:
+    enabled: true
+    max_workers: 4
+    strategy: partition
+    multi_value_fanout_threshold: 2
+"#
+    } else {
+        ""
+    };
+
+    fs::write(
+        root.join("rbt_project.yml"),
+        format!(
+            r#"
+name: multi_value_in_vs_fanout_measure
+version: "1"
+models_dir: models
+target_path: lake/silver
+layers:
+  staging:
+    path: models/staging
+    target_path: lake/silver
+    default_format: parquet
+materialize:
+  mode: stream
+  ref_strategy: parquet
+{exec_yml}
+"#
+        ),
+    )?;
+
+    let mut entity_list = Vec::new();
+    for e in 0..entities {
+        entity_list.push(format!("e{e}"));
+    }
+
+    let config = RbtProjectConfig::load(&root)?;
+    let dag = config.build_dag(&root, None)?;
+    let scope = RunScope::new().with_var_multi("entity", entity_list)?;
+    let engine = TransformationEngine::new();
+    let rss0 = read_peak_rss_kb();
+    let start = Instant::now();
+    let summary = engine
+        .execute_dag_with_scope(&dag, &root, root.join("lake/silver"), &config, &scope)
+        .await
+        .context("E_RBT_MEASURE: multi_value_in_vs_fanout execute failed")?;
+    let wall_ms = start.elapsed().as_millis();
+    let rss1 = read_peak_rss_kb();
+    let expected_rows = entities.saturating_mul(rows_per);
+
+    Ok(MeasureReport {
+        scenario: SCENARIO_MULTI_VALUE_IN_VS_FANOUT.into(),
+        project: config.name,
+        package_version: crate::VERSION.into(),
+        wall_ms,
+        models_executed: summary.models_executed,
+        total_rows: summary.total_rows_produced,
+        bronze_sources: summary.bronze_sources_registered,
+        peak_rss_kb: rss1.or(rss0),
+        notes: vec![
+            if fanout {
+                format!(
+                    "FANOUT path: multi-value entity ({entities}) → WorkUnits + scoped_replace parts \
+                     (RBT_MEASURE_FANOUT=1, strategy=partition, workers=4)"
+                )
+            } else {
+                format!(
+                    "IN-filter baseline: multi-value entity scope ({entities} values) is one \
+                     filtered plan + one table write. Set RBT_MEASURE_FANOUT=1 for partition fan-out."
+                )
+            },
+            format!("rows_per_entity={rows_per} (RBT_MEASURE_MV_ROWS); entities via RBT_MEASURE_MV_ENTITIES"),
+            format!("models_executed={} (fan-out counts units)", summary.models_executed),
+        ],
+        ok: summary.total_rows_produced >= expected_rows.saturating_mul(9) / 10,
+        error: if summary.total_rows_produced >= expected_rows.saturating_mul(9) / 10 {
+            None
+        } else {
+            Some(format!(
+                "expected ~{expected_rows} rows, got {}",
+                summary.total_rows_produced
+            ))
+        },
+        mode_compare: None,
+        synthetic_rows: Some(expected_rows),
+        synthetic_parts: Some(entities),
+    })
 }
 
 /// Synthetic entity registry: first pass inserts N keys; second pass touch-only.

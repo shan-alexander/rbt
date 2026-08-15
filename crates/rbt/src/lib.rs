@@ -145,6 +145,9 @@ pub use core::{
     SUPPORTED_LOGICAL_DTYPES, align_batches_to_declared, declared_schema_for_frontmatter,
     empty_batch_for_frontmatter, ensure_declared_columns, merge_stream_and_declared,
     try_declared_schema, run_doctor, DoctorFinding, DoctorReport, DoctorSeverity, ErrorReport,
+    ConcurrencyConfig, ExecutionConfig, ExecutionStrategy, ExecutionPlan, ParallelContract,
+    PartRef, WorkUnit, classify_parallel_contract, enrich_plan_from_manifests,
+    expand_partition_bindings, plan_execution, scope_for_unit,
 };
 
 pub use engine::{
@@ -154,8 +157,9 @@ pub use engine::{
     TransformationEngine,
 };
 pub use engine::rust_model::{
-    batches_to_stream, empty_batch_for_schema, schema_from_fields, validate_batches_schema,
-    RustModel, RustModelContext, RustModelOutput, RustModelRegistry,
+    batches_to_stream, build_partition_input, empty_batch_for_schema, is_partition_not_implemented,
+    schema_from_fields, validate_batches_schema, PartitionInput, PartitionKey, RustModel,
+    RustModelContext, RustModelOutput, RustModelRegistry,
 };
 /// Re-export for Design B implementors: `#[async_trait] impl RustModel for …`.
 pub use async_trait::async_trait;
@@ -164,14 +168,19 @@ pub use engine::udf::{
 };
 
 pub use materializer::{
-    clear_incremental_parts, consolidate_parts_to_parquet, incremental_ref_path,
-    materialize_incremental_append_stream, materialize_keyed_upsert,
-    materialize_scoped_replace_stream, materialize_table_parts_only_stream, materialize_stream,
-    new_wap_run_id, parts_dir_for_parquet, resolve_part_keys, scope_part_id, sibling_iceberg_dir,
-    stamp_batch, upsert_batches, uses_parts_directory, wap_publish, write_iceberg_fs_table,
-    write_parquet_stream, IncrementalManifest, LineageStamp, MaterializeWriteOptions,
-    MultiFormatWriter, StreamWriteStats, UpsertConfig, UpsertResult, UpsertStats, WapAuditLog,
-    WapMaterializer, WapModelPaths, WapPhase, WapStatus, DEFAULT_UPSERT_MAX_ROWS,
+    alias_ref_path, clear_incremental_parts, consolidate_parts_to_parquet, incremental_ref_path,
+    looks_like_identity_sql, materialize_alias, materialize_incremental_append_stream,
+    materialize_keyed_upsert, materialize_scoped_replace_stream,
+    materialize_scoped_replace_stream_with, materialize_table_parts_only_stream, materialize_stream,
+    merge_manifest_upsert_part, new_wap_run_id, part_is_clean, parts_dir_for_parquet,
+    read_alias_sidecar, resolve_alias_upstream, resolve_part_keys, resolve_parts_layout,
+    scoped_part_rel_path, scope_part_id, sibling_iceberg_dir, stamp_batch, table_layout_root,
+    upsert_batches, upstream_lake_path, uses_parts_directory, wap_publish, write_iceberg_fs_table,
+    write_parquet_stream, AliasPublishMode, AliasSidecar, ColumnStats, IncrementalManifest,
+    LineageStamp, MaterializeWriteOptions, MultiFormatWriter, PartMeta, PartsLayout,
+    ScopedPartPublish, StreamWriteStats, UpsertConfig, UpsertResult,
+    UpsertStats, WapAuditLog, WapMaterializer, WapModelPaths, WapPhase, WapStatus,
+    DEFAULT_UPSERT_MAX_ROWS,
 };
 #[cfg(feature = "iceberg")]
 pub use materializer::{
@@ -181,9 +190,10 @@ pub use materializer::{
 pub use scan::parts::{is_parts_directory, list_part_files, PartsManifest};
 pub use measure::{
     default_report_path, list_scenarios, run_measure_scenario, write_measure_report, MeasureReport,
-    ModeCompare, SCENARIO_COMPLEX_BRONZE, SCENARIO_ENTITY_REGISTRY_UPSERT,
-    SCENARIO_INCREMENTAL_APPEND, SCENARIO_SMOKE_PIPELINE, SCENARIO_STREAM_VS_COLLECT,
-    SCENARIO_VALIDATE_DX, SCENARIO_WHALE_SYNTHETIC, DEFAULT_WHALE_PARTS, DEFAULT_WHALE_ROWS,
+    ModeCompare, SCENARIO_COMPLEX_BRONZE, SCENARIO_CONCURRENT_TIER_VS_SERIAL,
+    SCENARIO_ENTITY_REGISTRY_UPSERT, SCENARIO_INCREMENTAL_APPEND, SCENARIO_MULTI_VALUE_IN_VS_FANOUT,
+    SCENARIO_SMOKE_PIPELINE, SCENARIO_STREAM_VS_COLLECT, SCENARIO_VALIDATE_DX,
+    SCENARIO_WHALE_SYNTHETIC, DEFAULT_WHALE_PARTS, DEFAULT_WHALE_ROWS,
 };
 
 pub use json::{JShiftExtractor, JsonExtractSpec};

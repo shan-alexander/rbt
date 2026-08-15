@@ -7,8 +7,9 @@ pub mod udf;
 
 use crate::core::dag::{Materialization, ModelDag, ModelKind, ModelNode, OutputFormat};
 use crate::engine::rust_model::{
-    batches_to_stream, empty_batch_for_schema, validate_batches_schema, RustModel,
-    RustModelContext, RustModelOutput, RustModelRegistry,
+    batches_to_stream, build_partition_input, empty_batch_for_schema, is_partition_not_implemented,
+    validate_batches_schema, PartitionKey, RustModel, RustModelContext, RustModelOutput,
+    RustModelRegistry,
 };
 use crate::core::project::{
     MaterializeConfig, MaterializeMode, RbtProjectConfig, RefBackend,
@@ -17,14 +18,22 @@ use crate::core::receipt::{
     effective_contract_version, now_unix_ms, ModelRunResult, RunReceipt, RunStatus,
 };
 use crate::core::run_scope::RunScope;
-use crate::materializer::{
-    consolidate_parts_to_parquet, incremental_ref_path, load_parquet_batches,
-    materialize_incremental_append_stream, materialize_keyed_upsert,
-    materialize_scoped_replace_stream, materialize_table_parts_only_stream, resolve_part_keys,
-    scope_part_id, uses_parts_directory, materialize_stream, new_wap_run_id, sibling_iceberg_dir,
-    stamp_batch, wap_publish, write_empty_parquet, write_parquet_batches_atomic, LineageStamp,
-    MaterializeWriteOptions, MultiFormatWriter, StreamWriteStats, WapModelPaths,
+use crate::core::work_unit::{
+    enrich_plan_from_manifests, plan_execution, scope_for_unit, ExecutionPlan, WorkUnit,
 };
+use crate::core::project::ExecutionStrategy;
+use crate::materializer::{
+    alias_ref_path, consolidate_parts_to_parquet, incremental_ref_path, load_parquet_batches,
+    materialize_alias, materialize_incremental_append_stream, materialize_keyed_upsert,
+    materialize_scoped_replace_stream, materialize_scoped_replace_stream_with,
+    materialize_table_parts_only_stream, part_is_clean, parts_dir_for_parquet,
+    resolve_alias_upstream, resolve_part_keys, resolve_parts_layout, scope_part_id,
+    table_layout_root, upstream_lake_path, uses_parts_directory, materialize_stream, new_wap_run_id,
+    sibling_iceberg_dir, stamp_batch, wap_publish, write_empty_parquet, write_parquet_batches_atomic,
+    LineageStamp, MaterializeWriteOptions, MultiFormatWriter, ScopedPartPublish, StreamWriteStats,
+    WapModelPaths,
+};
+use crate::core::receipt::bronze_fingerprint;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use crate::engine::udf::register_builtin_udfs;
 use crate::testing::{assertions_from_model_tests, Assertion, RecordBatchValidator};
@@ -36,7 +45,7 @@ use datafusion::prelude::{CsvReadOptions, JsonReadOptions, ParquetReadOptions};
 use iceberg::Catalog;
 #[cfg(feature = "iceberg")]
 use iceberg_datafusion::IcebergCatalogProvider;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -231,6 +240,14 @@ impl TransformationEngine {
     }
 
     /// Drop all Design B models (tests / reconfiguration).
+    /// Snapshot registered Design B models for cloning onto private L1/L2 worker engines.
+    pub fn snapshot_rust_models(&self) -> Vec<Arc<dyn RustModel>> {
+        self.rust_models
+            .lock()
+            .map(|g| g.snapshot())
+            .unwrap_or_default()
+    }
+
     pub fn clear_rust_models(&self) {
         if let Ok(mut g) = self.rust_models.lock() {
             g.clear();
@@ -248,6 +265,13 @@ impl TransformationEngine {
     ///
     /// Supports table, keyed_upsert, scoped_replace, incremental_append, and table+parts
     /// (consolidate:never). `dest_path` is the published lake path; `write_path` may be a WAP stage.
+    ///
+    /// # Phase 2 partition path
+    ///
+    /// When `partition_bindings` is non-empty (WorkUnit slice), the engine:
+    /// 1. Builds [`crate::PartitionInput`] for upstream `ref()`s filtered to this partition
+    /// 2. Calls [`RustModel::execute_partition`] if the host overrode the default
+    /// 3. Falls back to [`RustModel::execute`] with the already-narrowed `scope` if not implemented
     async fn materialize_rust_model(
         &self,
         model: &ModelNode,
@@ -263,6 +287,8 @@ impl TransformationEngine {
         fp: &str,
         table_parts_only: bool,
         materialize: &MaterializeConfig,
+        dag: &ModelDag,
+        partition_bindings: &BTreeMap<String, String>,
     ) -> Result<(
         usize,
         Option<StreamWriteStats>,
@@ -279,10 +305,51 @@ impl TransformationEngine {
             contract_version: contract,
             bronze_fingerprint: Some(fp),
         };
-        let out = rust
-            .execute(&ctx)
-            .await
-            .with_context(|| format!("E_RBT_RUST_MODEL: execute '{}'", model.name))?;
+
+        // Phase 2: prefer execute_partition for partition WorkUnit slices.
+        let out = if !partition_bindings.is_empty() {
+            let part = PartitionKey::from_map(partition_bindings);
+            let host_contract = rust.parallel_contract();
+            let input = build_partition_input(&self.ctx, dag, model, &part)
+                .await
+                .with_context(|| {
+                    format!(
+                        "E_RBT_RUST_PARTITION: build input for '{}' part={part}",
+                        model.name
+                    )
+                })?;
+            tracing::info!(
+                model = %model.name,
+                part = %part,
+                contract = host_contract.as_str(),
+                upstream = ?input.upstream_models,
+                paths = input.paths.len(),
+                has_stream = input.stream.is_some(),
+                "Design B partition unit (Phase 2)"
+            );
+            match rust.execute_partition(&ctx, &part, input).await {
+                Ok(o) => o,
+                Err(e) if is_partition_not_implemented(&e) => {
+                    tracing::debug!(
+                        model = %model.name,
+                        "execute_partition not implemented; falling back to execute() with unit scope"
+                    );
+                    rust.execute(&ctx).await.with_context(|| {
+                        format!("E_RBT_RUST_MODEL: execute '{}' (partition fallback)", model.name)
+                    })?
+                }
+                Err(e) => {
+                    return Err(e).context(format!(
+                        "E_RBT_RUST_PARTITION: execute_partition failed for '{}' part={part}",
+                        model.name
+                    ));
+                }
+            }
+        } else {
+            rust.execute(&ctx)
+                .await
+                .with_context(|| format!("E_RBT_RUST_MODEL: execute '{}'", model.name))?
+        };
 
         // Normalize to either collected batches (upsert / small table) or a stream (parts/table stream).
         enum Out {
@@ -1013,6 +1080,22 @@ impl TransformationEngine {
         .context("frontmatter-driven bronze registration failed")?;
 
         let tiers = dag.execution_tiers()?;
+        let mut exec_plan = plan_execution(dag, scope, &config.execution.concurrency)
+            .context("E_RBT_WORK_UNIT: plan_execution failed")?;
+        if config.execution.concurrency.large_parts_first {
+            enrich_plan_from_manifests(&mut exec_plan, dag);
+        }
+        for n in &exec_plan.notes {
+            tracing::info!(target: "rbt::plan", "{n}");
+        }
+        tracing::info!(
+            strategy = ?exec_plan.strategy,
+            max_workers = exec_plan.max_workers,
+            units = exec_plan.units.len(),
+            partition_slices = exec_plan.partition_slice_count(),
+            "RBT-C execution plan"
+        );
+
         let mut models_executed = 0;
         let mut total_rows_produced = 0;
         let mut model_results: Vec<ModelRunResult> = Vec::new();
@@ -1041,16 +1124,235 @@ impl TransformationEngine {
             None
         };
 
+        // Spill root for concurrent workers (C1.11).
+        let spill_root = project_dir
+            .join(".rbt")
+            .join("spill")
+            .join(&run_id);
+        if exec_plan.concurrency_enabled && exec_plan.max_workers > 1 {
+            let _ = std::fs::create_dir_all(&spill_root);
+        }
+
         for (tier_idx, tier) in tiers.iter().enumerate() {
+            let l1_concurrent = exec_plan.concurrency_enabled
+                && exec_plan.max_workers > 1
+                && matches!(
+                    exec_plan.strategy,
+                    ExecutionStrategy::ModelTier | ExecutionStrategy::Auto
+                )
+                && tier.len() > 1
+                && exec_plan
+                    .units
+                    .iter()
+                    .filter(|u| tier.iter().any(|m| m.name == u.model))
+                    .all(|u| !u.is_partition_slice);
+
+            if l1_concurrent {
+                tracing::info!(
+                    "Executing DAG Tier {} with {} independent model(s) (concurrent, max_workers={})",
+                    tier_idx,
+                    tier.len(),
+                    exec_plan.max_workers
+                );
+                let (rows, results) = self
+                    .execute_tier_models_concurrent(
+                        dag,
+                        tier,
+                        project_dir,
+                        output_base,
+                        config,
+                        scope,
+                        &run_id,
+                        &contract,
+                        &fp,
+                        &exec_plan,
+                        &spill_root,
+                    )
+                    .await?;
+                models_executed += results.len();
+                total_rows_produced += rows;
+                model_results.extend(results);
+                // Register each model for ref on the coordinator session.
+                for model in tier {
+                    if let Some(ref op) = model.output_path {
+                        let dest = PathBuf::from(op);
+                        let ref_path = if uses_parts_directory(&model.materialization) {
+                            incremental_ref_path(&dest)
+                        } else {
+                            dest
+                        };
+                        if ref_path.exists() {
+                            let _ = register_model_for_ref(
+                                &self.ctx,
+                                &model.name,
+                                &model.output_format,
+                                &ref_path,
+                                materialize.choose_ref_backend(1),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                continue;
+            }
+
             tracing::info!(
-                "Executing DAG Tier {} with {} parallel models",
+                "Executing DAG Tier {} with {} independent model(s) ({})",
                 tier_idx,
-                tier.len()
+                tier.len(),
+                if exec_plan.concurrency_enabled && exec_plan.max_workers > 1 {
+                    "serial models; partition units may concurrent"
+                } else {
+                    "serial exec"
+                }
             );
 
             for model in tier {
-                tracing::info!("Executing model '{}'...", model.name);
+                let model_units: Vec<WorkUnit> = exec_plan
+                    .units
+                    .iter()
+                    .filter(|u| u.model == model.name)
+                    .cloned()
+                    .collect();
+                let model_units = if model_units.is_empty() {
+                    vec![WorkUnit {
+                        id: model.name.clone(),
+                        model: model.name.clone(),
+                        partition_bindings: Default::default(),
+                        deps: Vec::new(),
+                        estimated_bytes: None,
+                        estimated_rows: None,
+                        parallel_contract: crate::core::work_unit::ParallelContract::Unknown,
+                        is_partition_slice: false,
+                        skip_if_clean: false,
+                    }]
+                } else {
+                    model_units
+                };
+
+                let l2_concurrent = exec_plan.concurrency_enabled
+                    && exec_plan.max_workers > 1
+                    && matches!(
+                        exec_plan.strategy,
+                        ExecutionStrategy::Partition | ExecutionStrategy::Auto
+                    )
+                    && model_units.len() > 1
+                    && model_units.iter().all(|u| u.is_partition_slice);
+
+                if l2_concurrent {
+                    tracing::info!(
+                        model = %model.name,
+                        units = model_units.len(),
+                        max_workers = exec_plan.max_workers,
+                        "L2 concurrent partition units"
+                    );
+                    let (rows, mrr) = self
+                        .execute_partition_units_concurrent(
+                            dag,
+                            model,
+                            &model_units,
+                            project_dir,
+                            output_base,
+                            config,
+                            scope,
+                            &run_id,
+                            &contract,
+                            &fp,
+                            &exec_plan,
+                            &spill_root,
+                        )
+                        .await?;
+                    models_executed += 1;
+                    total_rows_produced += rows;
+                    // Register parts for ref
+                    if let Some(ref op) = model.output_path {
+                        let dest = PathBuf::from(op);
+                        let ref_path = incremental_ref_path(&dest);
+                        if ref_path.is_dir() {
+                            let _ = register_model_for_ref(
+                                &self.ctx,
+                                &model.name,
+                                &model.output_format,
+                                &ref_path,
+                                materialize.choose_ref_backend(rows.max(1)),
+                            )
+                            .await;
+                        }
+                    }
+                    model_results.push(mrr);
+                    continue;
+                }
+
+                for unit in &model_units {
+                let effective_scope = scope_for_unit(scope, unit);
+                let scope = &effective_scope; // shadow: rest of body uses unit scope
+                tracing::info!(
+                    "Executing model '{}'{}...",
+                    model.name,
+                    if unit.is_partition_slice {
+                        format!(" unit={}", unit.id)
+                    } else {
+                        String::new()
+                    }
+                );
                 let model_started = now_unix_ms();
+
+                // Dirty-part skip (C1.7 / Phase 3 hive-aware)
+                if unit.is_partition_slice && unit.skip_if_clean {
+                    if let Some(ref op) = model.output_path {
+                        let dest_path = PathBuf::from(op);
+                        let part_keys = resolve_part_keys(
+                            model.frontmatter.as_ref().and_then(|f| f.part_key.as_deref()),
+                            model
+                                .frontmatter
+                                .as_ref()
+                                .and_then(|f| f.partition_by.as_deref()),
+                            scope,
+                        );
+                        if let Ok(sid) =
+                            scope_part_id(&model.name, &contract, &part_keys, scope)
+                        {
+                            let layout = resolve_parts_layout(
+                                model
+                                    .frontmatter
+                                    .as_ref()
+                                    .and_then(|f| f.parts_layout.as_deref()),
+                                materialize.default_parts_layout.as_deref(),
+                            );
+                            let layout_root = table_layout_root(&dest_path, layout);
+                            let part_rel = crate::materializer::scoped_part_rel_path(
+                                layout,
+                                &sid,
+                                &unit.partition_bindings,
+                            );
+                            let unit_fp = bronze_fingerprint(dag, project_dir, config, scope)
+                                .unwrap_or_else(|_| fp.clone());
+                            if part_is_clean(&layout_root, &part_rel, &unit_fp) {
+                                tracing::info!(
+                                    model = %model.name,
+                                    part = %part_rel,
+                                    "dirty-part skip: source_fp match"
+                                );
+                                models_executed += 1;
+                                let elapsed_ms =
+                                    now_unix_ms().saturating_sub(model_started) as u64;
+                                model_results.push(
+                                    ModelRunResult::success(
+                                        format!("{}@{}", model.name, unit.id),
+                                        0,
+                                        Some(dest_path.display().to_string()),
+                                        None,
+                                        vec!["dirty_part_skip".into()],
+                                        Some(elapsed_ms),
+                                    )
+                                    .with_kind(model.kind.as_str())
+                                    .with_materialization(model.materialization.as_str()),
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
 
                 // Late-bind: if this model carries frontmatter not registered yet
                 register_bronze_for_model_scoped(
@@ -1113,6 +1415,8 @@ impl TransformationEngine {
                 // Parts strategies (incl. table + consolidate:never) skip WAP staging.
                 let table_parts_only = matches!(model.materialization, Materialization::Table)
                     && !materialize.consolidate.table_writes_monolith();
+                // Alias is zero-copy at dest; never stage via WAP (no rewrite).
+                let is_alias = model.materialization.is_alias();
                 let (write_path, wap_paths) = if let (Some(ref run_id), Some(ref wap_root)) =
                     (wap_run_id.as_ref(), wap_root.as_ref())
                 {
@@ -1121,6 +1425,7 @@ impl TransformationEngine {
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone
                     ) && !uses_parts_directory(&model.materialization)
                         && !table_parts_only
+                        && !is_alias
                     {
                         let paths = WapModelPaths::for_model_with_root(
                             wap_root,
@@ -1140,8 +1445,19 @@ impl TransformationEngine {
                 };
 
                 let mut upsert_for_model: Option<crate::materializer::UpsertStats> = None;
+                // Track alias parts for ref() registration.
+                let mut alias_parts = false;
+                let mut alias_register_path: Option<PathBuf> = None;
+
                 // Design B: host Rust model (skip SQL path).
                 let (row_count, write_stats) = if model.kind == ModelKind::Rust {
+                    if is_alias {
+                        bail!(
+                            "E_RBT_ALIAS: Rust model '{}' cannot use materialization=alias \
+                             (alias is SQL/file identity only; implement a no-op host model or use SQL)",
+                            model.name
+                        );
+                    }
                     let (rows, stats, upsert) = self
                         .materialize_rust_model(
                             model,
@@ -1157,6 +1473,8 @@ impl TransformationEngine {
                             &fp,
                             table_parts_only,
                             materialize,
+                            dag,
+                            &unit.partition_bindings,
                         )
                         .await?;
                     upsert_for_model = upsert;
@@ -1167,6 +1485,68 @@ impl TransformationEngine {
                     &model.output_format,
                     mode,
                 ) {
+                    // RBT-C Phase 0: identity / zero-copy (no SQL execute, no re-encode).
+                    (Materialization::ZeroCopyClone, _, _) => {
+                        if write_opts.lineage.is_some()
+                            || model
+                                .frontmatter
+                                .as_ref()
+                                .map(|f| f.wants_lineage_stamp())
+                                .unwrap_or(false)
+                        {
+                            bail!(
+                                "E_RBT_ALIAS: model '{}': lineage_stamp is incompatible with \
+                                 materialization alias (would require rewrite). Remove lineage_stamp \
+                                 or use materialization: table",
+                                model.name
+                            );
+                        }
+                        if !assertions.is_empty() {
+                            bail!(
+                                "E_RBT_ALIAS: model '{}': tests/assertions require a rewrite path; \
+                                 use materialization: table (or drop tests on pure identity marts)",
+                                model.name
+                            );
+                        }
+                        let upstream_name = resolve_alias_upstream(model)?;
+                        let upstream_node = dag
+                            .node_map
+                            .get(&upstream_name)
+                            .map(|&idx| &dag.graph[idx])
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "E_RBT_ALIAS: model '{}': alias_of/upstream '{}' is not in the DAG",
+                                    model.name,
+                                    upstream_name
+                                )
+                            })?;
+                        let upstream_dest = upstream_node
+                            .output_path
+                            .as_ref()
+                            .map(PathBuf::from)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "E_RBT_ALIAS: model '{}': upstream '{}' has no output_path",
+                                    model.name,
+                                    upstream_name
+                                )
+                            })?;
+                        let source = upstream_lake_path(&upstream_dest);
+                        alias_parts = source.is_dir();
+                        let stats = materialize_alias(&dest_path, &source, &upstream_name)
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_ALIAS: model '{}' alias of '{}' failed",
+                                    model.name, upstream_name
+                                )
+                            })?;
+                        alias_register_path = Some(alias_ref_path(
+                            &dest_path,
+                            &stats.path,
+                            alias_parts,
+                        ));
+                        (stats.rows, Some(stats))
+                    }
                     (
                         Materialization::IncrementalAppend,
                         OutputFormat::Parquet | OutputFormat::ZeroCopyClone,
@@ -1226,14 +1606,43 @@ impl TransformationEngine {
                                 model.name
                             )
                         })?;
+                        let unit_source_fp =
+                            bronze_fingerprint(dag, project_dir, config, scope).ok();
+                        let mut keys = BTreeMap::new();
+                        for k in &part_keys {
+                            if let Some(sv) = scope.vars.get(k) {
+                                if let Some(v) = sv.as_single() {
+                                    keys.insert(k.clone(), v.to_string());
+                                } else {
+                                    keys.insert(k.clone(), sv.canonical());
+                                }
+                            }
+                        }
                         let df = sql_for_model(&self.ctx, model).await?;
                         let stream = df.execute_stream().await?;
-                        let stats = materialize_scoped_replace_stream(
+                        let fm = model.frontmatter.as_ref();
+                        let layout = resolve_parts_layout(
+                            fm.and_then(|f| f.parts_layout.as_deref()),
+                            materialize.default_parts_layout.as_deref(),
+                        );
+                        let stats = materialize_scoped_replace_stream_with(
                             stream,
                             &dest_path,
                             &write_opts,
                             &assertions,
                             &sid,
+                            &ScopedPartPublish {
+                                keys,
+                                source_fp: unit_source_fp,
+                                layout,
+                                model: Some(model.name.clone()),
+                                grain: fm.and_then(|f| f.grain.clone()),
+                                partition_by: fm.and_then(|f| f.partition_by.clone()),
+                                part_key: fm.and_then(|f| f.part_key.clone()),
+                                sort_within_part: fm.and_then(|f| f.sort_within_part.clone()),
+                                parallel_safe: fm.and_then(|f| f.parallel_safe),
+                                collect_stats: true,
+                            },
                         )
                         .await
                         .with_context(|| {
@@ -1432,6 +1841,7 @@ impl TransformationEngine {
                 // Parts strategies re-register even when this scope wrote 0 rows so peer
                 // parts remain visible to later models in the same run.
                 let parts_strategy = (uses_parts_directory(&model.materialization)
+                    || alias_parts
                     || (matches!(model.materialization, Materialization::Table)
                         && !materialize.consolidate.table_writes_monolith()))
                     && matches!(
@@ -1440,6 +1850,7 @@ impl TransformationEngine {
                     );
                 if row_count > 0
                     || parts_strategy
+                    || is_alias
                     || matches!(
                         model.output_format,
                         OutputFormat::Parquet
@@ -1449,14 +1860,17 @@ impl TransformationEngine {
                     )
                 {
                     let backend = materialize.choose_ref_backend(row_count);
-                    if row_count > 0 || parts_strategy {
-                        let ref_path = if parts_strategy {
+                    if row_count > 0 || parts_strategy || is_alias {
+                        let ref_path = if let Some(p) = alias_register_path.clone() {
+                            p
+                        } else if parts_strategy {
                             incremental_ref_path(&dest_path)
                         } else {
                             dest_path.clone()
                         };
                         // Skip register if parts dir missing (never ran successfully)
-                        let should_register = !parts_strategy
+                        let should_register = is_alias
+                            || !parts_strategy
                             || ref_path.is_dir()
                             || row_count > 0;
                         if should_register {
@@ -1518,8 +1932,13 @@ impl TransformationEngine {
                         )
                     })
                     .unwrap_or((None, Vec::new()));
+                let result_name = if unit.is_partition_slice {
+                    format!("{}@{}", model.name, unit.id)
+                } else {
+                    model.name.clone()
+                };
                 let mut mrr = ModelRunResult::success(
-                    model.name.clone(),
+                    result_name,
                     row_count,
                     Some(dest_path.display().to_string()),
                     phase,
@@ -1536,7 +1955,8 @@ impl TransformationEngine {
                     );
                 }
                 model_results.push(mrr);
-            }
+                } // end for unit in model_units
+            } // end for model in tier
         }
 
         let finished = now_unix_ms();
@@ -2165,6 +2585,354 @@ async fn sql_for_model(
         })
 }
 
+impl TransformationEngine {
+    /// L1: concurrent independent models in a tier (private sessions).
+    async fn execute_tier_models_concurrent(
+        &self,
+        dag: &ModelDag,
+        tier: &[ModelNode],
+        project_dir: &Path,
+        output_base: &Path,
+        config: &RbtProjectConfig,
+        scope: &RunScope,
+        _run_id: &str,
+        _contract: &str,
+        _fp: &str,
+        exec_plan: &ExecutionPlan,
+        spill_root: &Path,
+    ) -> Result<(usize, Vec<ModelRunResult>)> {
+        use futures::stream::{self, StreamExt};
+        use crate::core::parser::DependencyRef;
+
+        let max_w = exec_plan.max_workers.max(1);
+        let lake_index = dag_model_output_index(dag);
+        // Private workers need host Design B models too (registry is per-engine).
+        let rust_models = self.snapshot_rust_models();
+        let results = stream::iter(tier.iter().cloned().enumerate())
+            .map(|(worker_i, model)| {
+                let project_dir = project_dir.to_path_buf();
+                let output_base = output_base.to_path_buf();
+                let config = config.clone();
+                let scope = scope.clone();
+                let spill = spill_root.join(format!("worker_{worker_i}"));
+                let lake_index = lake_index.clone();
+                let rust_models = rust_models.clone();
+                let model_deps: Vec<String> = model
+                    .dependencies
+                    .iter()
+                    .filter_map(|d| match d {
+                        DependencyRef::Model(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let mini = clone_single_model_dag_bronze_only(&model);
+                async move {
+                    let _ = std::fs::create_dir_all(&spill);
+                    let engine = TransformationEngine::new();
+                    for m in &rust_models {
+                        engine
+                            .register_rust_model(Arc::clone(m))
+                            .context("E_RBT_CONCURRENT: clone RustModel onto L1 worker")?;
+                    }
+                    let mut unit_scope = scope;
+                    unit_scope.write_receipt = false;
+                    unit_scope.skip_if_fingerprint_match = false;
+                    let mut cfg = config;
+                    cfg.execution.concurrency.enabled = false;
+                    cfg.execution.concurrency.max_workers = 1;
+                    cfg.execution.concurrency.strategy = ExecutionStrategy::Serial;
+
+                    for dep_name in &model_deps {
+                        if let Some((path, fmt, mat)) = lake_index.get(dep_name) {
+                            let ref_path = if uses_parts_directory(mat) {
+                                incremental_ref_path(path)
+                            } else {
+                                path.clone()
+                            };
+                            let _ = register_model_for_ref(
+                                &engine.ctx,
+                                dep_name,
+                                fmt,
+                                &ref_path,
+                                RefBackend::LakeFile,
+                            )
+                            .await;
+                        }
+                    }
+
+                    let summary = engine
+                        .execute_dag_with_scope(
+                            &mini,
+                            &project_dir,
+                            &output_base,
+                            &cfg,
+                            &unit_scope,
+                        )
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "E_RBT_CONCURRENT: L1 worker failed for model '{}'",
+                                model.name
+                            )
+                        })?;
+                    let rows = summary.total_rows_produced;
+                    let mrr = summary
+                        .model_results
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| {
+                            ModelRunResult::success(
+                                model.name.clone(),
+                                rows,
+                                model.output_path.clone(),
+                                None,
+                                vec!["l1_concurrent".into()],
+                                None,
+                            )
+                        });
+                    let _ = spill;
+                    Ok::<_, anyhow::Error>((rows, mrr))
+                }
+            })
+            .buffer_unordered(max_w)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut total = 0usize;
+        let mut out = Vec::new();
+        for r in results {
+            let (rows, mrr) = r?;
+            total += rows;
+            out.push(mrr);
+        }
+        Ok((total, out))
+    }
+
+    /// L2: concurrent partition WorkUnits for one scoped_replace model (private sessions).
+    ///
+    /// Each worker **must** call [`Self::materialize_rust_model`] (or the SQL unit path)
+    /// with the unit's `partition_bindings` — re-planning a mini-DAG as serial mega would
+    /// drop bindings and re-process the full upstream table per unit.
+    async fn execute_partition_units_concurrent(
+        &self,
+        dag: &ModelDag,
+        model: &ModelNode,
+        units: &[WorkUnit],
+        project_dir: &Path,
+        output_base: &Path,
+        config: &RbtProjectConfig,
+        scope: &RunScope,
+        run_id: &str,
+        contract: &str,
+        fp: &str,
+        exec_plan: &ExecutionPlan,
+        spill_root: &Path,
+    ) -> Result<(usize, ModelRunResult)> {
+        use crate::core::parser::DependencyRef;
+        use futures::stream::{self, StreamExt};
+
+        let max_w = exec_plan.max_workers.max(1);
+        let started = now_unix_ms();
+        let rust_models = self.snapshot_rust_models();
+        let dag_full_paths = dag_model_output_index(dag);
+
+        let results = stream::iter(units.iter().cloned().enumerate())
+            .map(|(worker_i, unit)| {
+                let project_dir = project_dir.to_path_buf();
+                let output_base = output_base.to_path_buf();
+                let config = config.clone();
+                let scope = scope.clone();
+                let model = model.clone();
+                let spill = spill_root.join(format!("worker_{worker_i}"));
+                let dag_full_paths = dag_full_paths.clone();
+                let rust_models = rust_models.clone();
+                let run_id = run_id.to_string();
+                let contract = contract.to_string();
+                let fp = fp.to_string();
+                async move {
+                    let _ = std::fs::create_dir_all(&spill);
+                    let engine = TransformationEngine::new();
+                    for m in &rust_models {
+                        engine
+                            .register_rust_model(Arc::clone(m))
+                            .context("E_RBT_CONCURRENT: clone RustModel onto L2 worker")?;
+                    }
+
+                    // Register upstream model deps from lake (stg already written by tier 0).
+                    for dep in &model.dependencies {
+                        if let DependencyRef::Model(dep_name) = dep {
+                            if let Some((path, fmt, mat)) = dag_full_paths.get(dep_name) {
+                                let ref_path = if uses_parts_directory(mat) {
+                                    incremental_ref_path(path)
+                                } else {
+                                    path.clone()
+                                };
+                                register_model_for_ref(
+                                    &engine.ctx,
+                                    dep_name,
+                                    fmt,
+                                    &ref_path,
+                                    RefBackend::LakeFile,
+                                )
+                                .await
+                                .with_context(|| {
+                                    format!(
+                                        "E_RBT_CONCURRENT: L2 register ref '{dep_name}' for unit {}",
+                                        unit.id
+                                    )
+                                })?;
+                            }
+                        }
+                    }
+
+                    // Mini DAG for partition-input lookup (same model node).
+                    let mini = clone_single_model_dag_bronze_only(&model);
+                    let unit_scope = scope_for_unit(&scope, &unit);
+                    let dest_path = model
+                        .output_path
+                        .as_ref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            output_base.join(format!("{}.parquet", model.name))
+                        });
+                    if let Some(parent) = dest_path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+
+                    let (assertions, fail_on_error) = model_assertions(&model, &config)?;
+                    let materialize = &config.materialize;
+                    let mut write_opts =
+                        MaterializeWriteOptions::from_config(materialize, fail_on_error);
+                    if model
+                        .frontmatter
+                        .as_ref()
+                        .map(|f| f.wants_lineage_stamp())
+                        .unwrap_or(false)
+                    {
+                        write_opts = write_opts.with_lineage(LineageStamp {
+                            run_id: run_id.clone(),
+                            contract_version: contract.clone(),
+                            model: model.name.clone(),
+                            bronze_fingerprint: Some(fp.clone()),
+                        });
+                    }
+
+                    let rows = if model.kind == ModelKind::Rust {
+                        let (rows, _stats, _upsert) = engine
+                            .materialize_rust_model(
+                                &model,
+                                &project_dir,
+                                &unit_scope,
+                                &dest_path,
+                                &dest_path,
+                                &write_opts,
+                                &assertions,
+                                fail_on_error,
+                                &run_id,
+                                &contract,
+                                &fp,
+                                false,
+                                materialize,
+                                &mini,
+                                &unit.partition_bindings,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_CONCURRENT: L2 unit '{}' materialize_rust failed",
+                                    unit.id
+                                )
+                            })?;
+                        rows
+                    } else {
+                        // SQL partition units: serial mini-DAG with unit scope (IN filter).
+                        let mut cfg = config.clone();
+                        cfg.execution.concurrency.enabled = false;
+                        cfg.execution.concurrency.max_workers = 1;
+                        cfg.execution.concurrency.strategy = ExecutionStrategy::Serial;
+                        let mut us = unit_scope;
+                        us.write_receipt = false;
+                        us.skip_if_fingerprint_match = false;
+                        let summary = engine
+                            .execute_dag_with_scope(
+                                &mini,
+                                &project_dir,
+                                &output_base,
+                                &cfg,
+                                &us,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "E_RBT_CONCURRENT: L2 unit '{}' SQL path failed",
+                                    unit.id
+                                )
+                            })?;
+                        summary.total_rows_produced
+                    };
+                    let _ = spill;
+                    Ok::<_, anyhow::Error>(rows)
+                }
+            })
+            .buffer_unordered(max_w)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut total = 0usize;
+        for r in results {
+            total += r?;
+        }
+        let elapsed = now_unix_ms().saturating_sub(started) as u64;
+        let mrr = ModelRunResult::success(
+            model.name.clone(),
+            total,
+            model.output_path.clone(),
+            None,
+            vec![
+                "l2_concurrent".into(),
+                format!("units={}", units.len()),
+            ],
+            Some(elapsed),
+        )
+        .with_kind(model.kind.as_str())
+        .with_materialization(model.materialization.as_str());
+        Ok((total, mrr))
+    }
+}
+
+/// Single-node DAG; model refs stripped so build_graph succeeds (register lake deps separately).
+fn clone_single_model_dag_bronze_only(model: &ModelNode) -> ModelDag {
+    use crate::core::parser::DependencyRef;
+    let mut d = ModelDag::new();
+    let mut m = model.clone();
+    m.dependencies
+        .retain(|dep| matches!(dep, DependencyRef::Source { .. }));
+    let idx = d.graph.add_node(m.clone());
+    d.node_map.insert(m.name.clone(), idx);
+    let _ = d.build_graph();
+    d
+}
+
+fn dag_model_output_index(
+    dag: &ModelDag,
+) -> BTreeMap<String, (PathBuf, OutputFormat, Materialization)> {
+    let mut m = BTreeMap::new();
+    for (name, &idx) in &dag.node_map {
+        let node = &dag.graph[idx];
+        if let Some(ref op) = node.output_path {
+            m.insert(
+                name.clone(),
+                (
+                    PathBuf::from(op),
+                    node.output_format.clone(),
+                    node.materialization.clone(),
+                ),
+            );
+        }
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2751,6 +3519,257 @@ SELECT ticker, price, volume FROM {{ source('bronze', 'raw_stock_trades') }}
         let mrr = &summary.model_results[0];
         assert_eq!(mrr.kind.as_deref(), Some("rust"));
         assert_eq!(mrr.materialization.as_deref(), Some("scoped_replace"));
+        Ok(())
+    }
+
+    /// RBT-C Phase 2: Design B execute_partition receives partition-local input.
+    #[tokio::test]
+    async fn design_b_execute_partition_is_called() -> Result<()> {
+        use crate::core::dag::{Materialization, ModelKind, ModelLayer};
+        use crate::core::frontmatter::StagingFrontmatter;
+        use crate::core::project::{ConcurrencyConfig, ExecutionStrategy};
+        use crate::core::run_scope::RunScope;
+        use crate::core::work_unit::ParallelContract;
+        use crate::engine::rust_model::{
+            PartitionInput, PartitionKey, RustModel, RustModelContext, RustModelOutput,
+        };
+        use crate::{DagBuilder, ModelSpec, RbtEngineBuilder, RbtProjectConfig};
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::record_batch::RecordBatch;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        static PARTITION_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        struct PerEntity;
+        #[async_trait::async_trait]
+        impl RustModel for PerEntity {
+            fn name(&self) -> &str {
+                "tf_per_entity"
+            }
+            fn output_schema(&self) -> arrow::datatypes::SchemaRef {
+                Arc::new(Schema::new(vec![
+                    Field::new("entity", DataType::Utf8, false),
+                    Field::new("n", DataType::Int64, false),
+                ]))
+            }
+            fn parallel_contract(&self) -> ParallelContract {
+                ParallelContract::PartitionLocal {
+                    keys: vec!["entity".into()],
+                }
+            }
+            async fn execute(&self, _ctx: &RustModelContext<'_>) -> Result<RustModelOutput> {
+                // Mega fallback should not be used when execute_partition works.
+                bail!("execute should not be called for partition slices in this test")
+            }
+            async fn execute_partition(
+                &self,
+                _ctx: &RustModelContext<'_>,
+                part: &PartitionKey,
+                _input: PartitionInput,
+            ) -> Result<RustModelOutput> {
+                PARTITION_CALLS.fetch_add(1, Ordering::SeqCst);
+                let ent = part.get("entity").unwrap_or("?").to_string();
+                let schema = self.output_schema();
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec![ent.as_str()])),
+                        Arc::new(Int64Array::from(vec![1i64])),
+                    ],
+                )?;
+                Ok(RustModelOutput::Batches(vec![batch]))
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let dest = temp.path().join("tf_per_entity.parquet");
+        let mut fm = StagingFrontmatter::default();
+        fm.partition_by = Some(vec!["entity".into()]);
+        fm.part_key = Some(vec!["entity".into()]);
+        fm.materialization = Some("scoped_replace".into());
+
+        let dag = DagBuilder::new()
+            .model(
+                ModelSpec::rust("tf_per_entity")
+                    .layer(ModelLayer::Transform)
+                    .materialization(Materialization::ScopedReplace)
+                    .frontmatter(fm)
+                    .output_path(dest.to_string_lossy()),
+            )
+            .build()?;
+        assert_eq!(dag.graph[dag.node_map["tf_per_entity"]].kind, ModelKind::Rust);
+
+        let engine = RbtEngineBuilder::new()
+            .with_rust_model(PerEntity)
+            .build()
+            .await?;
+        let mut cfg = RbtProjectConfig::default();
+        cfg.execution.concurrency = ConcurrencyConfig {
+            enabled: true,
+            max_workers: 1,
+            strategy: ExecutionStrategy::Partition,
+            multi_value_fanout_threshold: 2,
+            dirty_part_skip: false,
+            partition_keys: None,
+            large_parts_first: true,
+            max_inflight_bytes: None,
+        };
+        let scope = RunScope::new().with_var_multi("entity", ["a.com", "b.com", "c.com"])?;
+        PARTITION_CALLS.store(0, Ordering::SeqCst);
+        let summary = engine
+            .execute_dag_with_scope(&dag, temp.path(), temp.path(), &cfg, &scope)
+            .await?;
+        assert!(
+            PARTITION_CALLS.load(Ordering::SeqCst) >= 3,
+            "execute_partition should run per entity"
+        );
+        assert!(summary.models_executed >= 3);
+        assert!(crate::materializer::parts_dir_for_parquet(&dest).is_dir());
+        Ok(())
+    }
+
+    /// RBT-C Phase 1: multi-value fan-out → N scoped_replace parts (serial units).
+    #[tokio::test]
+    async fn partition_fanout_scoped_replace_serial() -> Result<()> {
+        use crate::core::frontmatter::StagingFrontmatter;
+        use crate::core::project::{ConcurrencyConfig, ExecutionStrategy};
+        use crate::core::run_scope::RunScope;
+        use std::io::Write;
+
+        let temp = tempfile::tempdir()?;
+        let bronze = temp.path().join("bronze");
+        for ent in ["a", "b", "c", "d"] {
+            let dir = bronze.join(format!("entity={ent}"));
+            std::fs::create_dir_all(&dir)?;
+            let mut f = std::fs::File::create(dir.join("data.jsonl"))?;
+            writeln!(f, r#"{{"entity":"{ent}","n":1}}"#)?;
+        }
+        let dest = temp.path().join("stg_e.parquet");
+        let mut fm = StagingFrontmatter::default();
+        fm.source_format = Some(crate::core::frontmatter::SourceFormat::Jsonl);
+        fm.scan_path = Some(bronze.to_string_lossy().into());
+        fm.partition_by = Some(vec!["entity".into()]);
+        fm.part_key = Some(vec!["entity".into()]);
+        fm.materialization = Some("scoped_replace".into());
+
+        let mut dag = ModelDag::new();
+        let sql = r#"SELECT * FROM {{ source('bronze', 'events') }}"#;
+        // inject frontmatter via raw
+        let raw = format!(
+            "---\nsource_format: jsonl\nscan_path: {}\npartition_by: [entity]\npart_key: [entity]\nmaterialization: scoped_replace\n---\n{sql}",
+            bronze.display()
+        );
+        dag.add_model_with_format(
+            "stg_e",
+            &raw,
+            Materialization::ScopedReplace,
+            OutputFormat::Parquet,
+            Some(dest.to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let mut cfg = RbtProjectConfig::default();
+        cfg.execution.concurrency = ConcurrencyConfig {
+            enabled: true,
+            max_workers: 1,
+            strategy: ExecutionStrategy::Partition,
+            multi_value_fanout_threshold: 4,
+            dirty_part_skip: true,
+            partition_keys: None,
+            large_parts_first: true,
+            max_inflight_bytes: None,
+        };
+        let scope = RunScope::new().with_var_multi("entity", ["a", "b", "c", "d"])?;
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag_with_scope(&dag, temp.path(), temp.path(), &cfg, &scope)
+            .await?;
+        assert!(summary.models_executed >= 4, "expected 4 partition units");
+        let parts = crate::materializer::parts_dir_for_parquet(&dest);
+        assert!(parts.is_dir());
+        let files: Vec<_> = std::fs::read_dir(&parts)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("part-") && n.ends_with(".parquet"))
+            .collect();
+        assert_eq!(files.len(), 4, "expected 4 part files, got {files:?}");
+        let man = crate::materializer::load_manifest(&parts)?;
+        assert_eq!(man.parts.len(), 4);
+        assert!(man.schema_version >= 1);
+        let _ = fm;
+        Ok(())
+    }
+
+    /// RBT-C Phase 0: materialization alias zero-copy; downstream ref() reads same bytes.
+    #[tokio::test]
+    async fn alias_zero_copy_identity_mart() -> Result<()> {
+        use crate::materializer::read_alias_sidecar;
+
+        let temp = tempfile::tempdir()?;
+        let up = temp.path().join("tf_up.parquet");
+        let mart = temp.path().join("obt_alias.parquet");
+
+        let mut dag = ModelDag::new();
+        dag.add_model_with_format(
+            "tf_up",
+            "SELECT 1 AS id, 'x' AS k",
+            Materialization::Table,
+            OutputFormat::Parquet,
+            Some(up.to_string_lossy().into()),
+            "",
+        )?;
+        dag.add_model_with_format(
+            "obt_alias",
+            r#"---
+materialization: alias
+alias_of: tf_up
+---
+SELECT * FROM {{ ref('tf_up') }}
+"#,
+            Materialization::Table, // overridden by frontmatter
+            OutputFormat::Parquet,
+            Some(mart.to_string_lossy().into()),
+            "",
+        )?;
+        dag.build_graph()?;
+
+        let engine = TransformationEngine::new();
+        let summary = engine
+            .execute_dag(&dag, temp.path(), temp.path())
+            .await?;
+        assert_eq!(summary.models_executed, 2);
+        assert!(up.is_file());
+        // Alias published: hardlink/symlink or pointer sidecar
+        let side = read_alias_sidecar(&mart);
+        assert!(
+            side.is_some(),
+            "expected _rbt_alias sidecar for obt_alias"
+        );
+        assert!(
+            mart.exists() || side.as_ref().map(|s| Path::new(&s.source_path).exists()).unwrap_or(false),
+            "alias dest or source must exist"
+        );
+        // Same content when link succeeded
+        if mart.is_file() {
+            let a = std::fs::read(&up)?;
+            let b = std::fs::read(&mart)?;
+            assert_eq!(a, b, "hardlink/symlink should share file bytes");
+            // Prefer hardlink: same inode when possible
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let ia = std::fs::metadata(&up)?.ino();
+                let ib = std::fs::metadata(&mart)?.ino();
+                // hardlink OR identical content via symlink target
+                assert!(
+                    ia == ib || mart.symlink_metadata()?.file_type().is_symlink(),
+                    "expected hardlink (same inode) or symlink"
+                );
+            }
+        }
         Ok(())
     }
 }

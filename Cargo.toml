@@ -2,11 +2,13 @@
 resolver = "2"
 members = [
     "crates/rbt",
+    # Ideal showcase host (Design B + finance-solution). Publish=false.
+    "examples/full_e2e_rbt_example",
 ]
-# Single package workspace.
+# Core product package + optional example host.
 
 [workspace.package]
-version = "0.10.1"
+version = "0.11.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["rbt contributors"]

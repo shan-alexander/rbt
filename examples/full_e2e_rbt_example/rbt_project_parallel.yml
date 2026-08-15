@@ -1,0 +1,51 @@
+# =============================================================================
+# Design C — RBT-C parallel partition workers → lake/parallel_models_output/
+# =============================================================================
+# Same pure-Rust models as Design B (src/models/silver|gold), but:
+#   - multi-value scope = all timeframe=1m hive symbols
+#   - tf_indicators_1m: scoped_replace + PartitionLocal WorkUnits
+#   - execution.concurrency: strategy=partition, max_workers=N
+#
+# Host:
+#   cargo run -p full-e2e-rbt-example -- -p examples/full_e2e_rbt_example design-c -j 8
+#   cargo run -p full-e2e-rbt-example -- -p examples/full_e2e_rbt_example bench -j 8
+# =============================================================================
+
+name: full_e2e_design_c_parallel
+version: "2.1.0"
+contract_version: "e2e-v2-design-c"
+
+models_dir: src/models/silver
+target_path: $lake/parallel_models_output/gold
+
+roots:
+  lake: lake
+
+materialize:
+  mode: stream
+  ref_strategy: parquet
+
+execution:
+  concurrency:
+    enabled: true
+    max_workers: 8
+    strategy: partition
+    multi_value_fanout_threshold: 2
+    dirty_part_skip: false
+    large_parts_first: true
+
+layers:
+  staging:
+    path: src/models/silver/staging
+    target_path: $lake/parallel_models_output/silver/stage
+    default_format: parquet
+
+  transforms:
+    path: src/models/silver/transforms
+    target_path: $lake/parallel_models_output/silver/tf
+    default_format: parquet
+
+  marts:
+    path: src/models/gold
+    target_path: $lake/parallel_models_output/gold
+    default_format: parquet

@@ -1,0 +1,16 @@
+# Runtime lake outputs & rbt control plane (sample bronze Arrow/JSONL stay tracked)
+lake/silver/
+lake/gold/
+lake/sql_models_output/
+lake/rust_models_output/
+lake/parallel_models_output/
+lake/design_d_models_output/
+lake/compare_*/
+# Generated Parquet bronze (produce with `land-parquet-bronze`)
+lake/bronze/lz_stock_bars_parquet/
+.rbt/
+.wap/
+target/
+*.rbt-partial
+
+lake/bronze/lz_stock_bars_jsonl/

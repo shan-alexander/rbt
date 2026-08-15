@@ -14,7 +14,7 @@ export RBT=./target/release/rbt
 | [a2_scoped_replace](a2_scoped_replace/) | **A2** replace one scope part; peers kept | `scripts/demo_scoped_replace.sh` |
 | [entity_registry](entity_registry/) | **A7** keyed_upsert playbook (insert/touch/update/keep) | `scripts/demo_upsert.sh` |
 | [complex_bronze_landing](complex_bronze_landing/) | Research mini-lake (multi-format bronze → star) | README + `scripts/fetch_bronze.py` |
-| [full_e2e_rbt_example](full_e2e_rbt_example/) | Large market OHLCV bronze (heavy) | README |
+| [full_e2e_rbt_example](full_e2e_rbt_example/) | **Ideal medallion showcase** — Arrow+JSONL → stg → TA (SQL or Design B + finance-solution) → OBT alias; RBT-C parallel | README + `cargo run -p full-e2e-rbt-example` |
 
 ## Feature smoke (A1 + A2 + A7)
 

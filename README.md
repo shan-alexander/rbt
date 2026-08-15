@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.10.1`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, scoped_replace, keyed_upsert, receipts/`--json`, fingerprints, consolidate, declared schema emit. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` nodes.
+> **Status:** **`0.11.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, RBT-C WorkUnits/`--jobs`, scoped_replace, keyed_upsert, alias materialize, bronze register reuse, receipts/`--json`, fingerprints, consolidate. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` (+ `execute_partition`).
 
 ## Why rbt
 
@@ -25,9 +25,9 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.10"
+rbt-datalake = "0.11"
 # embed-only (no Iceberg catalog / no CLI binary):
-# rbt-datalake = { version = "0.10", default-features = false, features = ["sql", "parquet"] }
+# rbt-datalake = { version = "0.11", default-features = false, features = ["sql", "parquet"] }
 ```
 
 ```rust
@@ -85,7 +85,7 @@ bash scripts/smoke.sh              # CI baseline (smoke_fixture)
 bash scripts/smoke_feat_a1_a7.sh   # multi-value + scoped_replace + keyed_upsert demos
 ```
 
-## Library embed (0.10 / L1 + Design B)
+## Library embed (0.11 / L1 + Design B + RBT-C)
 
 Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + workspace recipe + `catalog_prefix`).
 
@@ -120,14 +120,38 @@ Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + worksp
 # Scalar binds (hive equality filters for partition_by keys)
 rbt run -p proj --var report_date=2026-08-07 --var run_id=r1
 
-# Multi-value: one process, several partition values (IN filter)
+# Multi-value: one process, several partition values (IN filter — not WorkUnit fan-out yet)
 rbt run -p proj --var entity=a.com --var entity=b.com --var report_date=2026-08-07
 rbt run -p proj --var-file entity=entities.txt --var report_date=2026-08-07
 rbt run -p proj --var 'entity:=["a.com","b.com"]' --var report_date=2026-08-07
 ```
 
+**RBT-C concurrency (opt-in):** multi-value defaults to an IN filter; enable
+`execution.concurrency` or `rbt run --jobs N --execution-strategy partition` to fan out
+`scoped_replace` models into partition WorkUnits (serial or concurrent). See
+`rbt explain --plan` and `rbt work-units --json`.
+
+Part layout: `parts_layout: parts` (default) or `hive` (`model/symbol=AAPL/data.parquet`).
+Manifest v2 records grain, sort contract, per-part fps/stats; `rbt consolidate` still builds
+one file for humans/BI.
+
 Showcase: [examples/a1_multi_value_scope](examples/a1_multi_value_scope/). Details:
 [docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md](docs/COMPLEX_BRONZE_AND_RUN_SCOPE.md).
+
+### Alias / zero-copy identity (**RBT-C Phase 0**)
+
+Skip rewriting multi-GB pass-through marts:
+
+```yaml
+---
+materialization: alias   # also: zero_copy_ref, zero_copy_clone
+alias_of: tf_indicators_1m   # optional if exactly one {{ ref('…') }}
+---
+SELECT * FROM {{ ref('tf_indicators_1m') }}
+```
+
+Publishes a hardlink (preferred), symlink, or pointer sidecar — **no Parquet re-encode**.
+`rbt doctor` / `rbt explain` warn on `SELECT *` identity models still using `table`.
 
 ### Scoped part replace (**A2**)
 

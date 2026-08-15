@@ -1,0 +1,31 @@
+# Host binary for the ideal full_e2e showcase (Design B + finance-solution).
+# Pure SQL path still works via the root `rbt` CLI without this package.
+[package]
+name = "full-e2e-rbt-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+description = "Ideal rbt medallion demo: Arrow+JSONL bronze → silver OHLCV → Rust TA (finance-solution) → gold OBT"
+
+[[bin]]
+name = "full-e2e-rbt-example"
+path = "src/main.rs"
+
+[dependencies]
+# Same monomorphic Arrow/DF stack as the engine (re-export via rbt).
+rbt-datalake = { path = "../../crates/rbt", default-features = false, features = ["sql", "parquet"] }
+# Technical analysis kernels (SMA / EMA / RSI, …) — host owns domain math, not rbt.
+finance-solution = "0.5"
+tokio = { version = "1.38", features = ["full"] }
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_yaml = "0.9"
+
+[[bench]]
+name = "rbt_c_segments"
+harness = false

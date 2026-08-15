@@ -102,8 +102,18 @@ rbt-datalake = { version = "0.9", default-features = false, features = ["sql", "
 
 ### Design B sketch
 
+**Prefer `RustModelOutput::Stream`** for large outputs (memory-honest materialize). Use
+`Batches` / `df.collect()` only for small dimensions and tests.
+
+**Partition-local (RBT-C Phase 2 / B6):** implement `parallel_contract()` +
+`execute_partition()` so multi-value runs never build a mega batch. Pair with
+`materialization: scoped_replace` and `execution.concurrency` (see below).
+
 ```rust
-use rbt::{async_trait, ModelSpec, RbtEngineBuilder, RustModel, RustModelContext, RustModelOutput};
+use rbt::{
+    async_trait, ModelSpec, ParallelContract, PartitionInput, PartitionKey,
+    RbtEngineBuilder, RustModel, RustModelContext, RustModelOutput,
+};
 use rbt::arrow::datatypes::{DataType, Field, Schema};
 use std::sync::Arc;
 
@@ -114,14 +124,55 @@ impl RustModel for MyNode {
     fn output_schema(&self) -> arrow::datatypes::SchemaRef {
         Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]))
     }
+    fn parallel_contract(&self) -> ParallelContract {
+        ParallelContract::PartitionLocal { keys: vec!["symbol".into()] }
+    }
     async fn execute(&self, ctx: &RustModelContext<'_>) -> anyhow::Result<RustModelOutput> {
         let df = ctx.session.sql(r#"SELECT id FROM "stg_upstream""#).await?;
-        Ok(RustModelOutput::Batches(df.collect().await?))
+        Ok(RustModelOutput::Stream(df.execute_stream().await?))
+    }
+    async fn execute_partition(
+        &self,
+        _ctx: &RustModelContext<'_>,
+        part: &PartitionKey,
+        input: PartitionInput,
+    ) -> anyhow::Result<RustModelOutput> {
+        let _symbol = part.get("symbol");
+        if let Some(stream) = input.into_stream() {
+            return Ok(RustModelOutput::Stream(stream)); // map batches in real hosts
+        }
+        Ok(RustModelOutput::Batches(vec![]))
     }
 }
 // ModelSpec::rust("tf_my_node").refs(["stg_upstream"])
+//   .materialization(Materialization::ScopedReplace) // for part layout
 // RbtEngineBuilder::new().with_rust_model(MyNode).build().await?;
 ```
+
+### Multi-value scope & concurrency (RBT-C)
+
+Default: `RunScope::with_var_multi` is a **partition IN filter** (one plan).
+
+Opt-in fan-out + concurrency:
+
+```yaml
+execution:
+  concurrency:
+    enabled: true
+    max_workers: 8
+    strategy: partition   # serial | model_tier | partition | auto
+    multi_value_fanout_threshold: 4
+```
+
+```bash
+rbt run -p proj --jobs 8 --execution-strategy partition --var-file symbol=list.txt
+rbt explain -p proj --plan --jobs 8
+rbt work-units -p proj --json --suggest-commands
+```
+
+Workers use **private sessions**; manifests merge under lock. See
+[partition concurrent analysis](analysis/partition-concurrent-execution-user-feedback.md)
+and the [RBT-C plan](plans/partition-work-units-and-concurrent-scheduler.md).
 
 ## `catalog_prefix` for library DAGs (L1.10)
 

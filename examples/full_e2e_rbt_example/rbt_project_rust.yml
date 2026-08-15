@@ -1,0 +1,54 @@
+# =============================================================================
+# Design B — pure Rust models → lake/rust_models_output/
+# =============================================================================
+# No .sql under Design B. Models are host-registered RustModel impls:
+#   src/models/silver/staging/stg_ohlcv_1m.rs
+#   src/models/silver/transforms/tf_indicators_1m.rs  (+ ta_kernels.rs)
+#   src/models/gold/obt_stocks_1m.rs
+#
+# Host builds the DAG programmatically (models_dir unused for discovery).
+# This YAML still pins roots + layer target paths for receipts / doctor.
+#
+#   cargo run -p full-e2e-rbt-example -- -p examples/full_e2e_rbt_example design-b --force
+# =============================================================================
+
+name: full_e2e_design_b_rust
+version: "2.1.0"
+contract_version: "e2e-v2-design-b"
+
+# No SQL discovery for Design B — host wires ModelSpec::rust only.
+# Point at an empty-ish tree so accidental CLI walk finds nothing useful.
+models_dir: src/models/silver
+target_path: $lake/rust_models_output/gold
+
+roots:
+  lake: lake
+
+materialize:
+  mode: stream
+  ref_strategy: parquet
+
+execution:
+  concurrency:
+    enabled: false
+    max_workers: 1
+    strategy: serial
+    multi_value_fanout_threshold: 2
+    dirty_part_skip: true
+    large_parts_first: true
+
+layers:
+  staging:
+    path: src/models/silver/staging
+    target_path: $lake/rust_models_output/silver/stage
+    default_format: parquet
+
+  transforms:
+    path: src/models/silver/transforms
+    target_path: $lake/rust_models_output/silver/tf
+    default_format: parquet
+
+  marts:
+    path: src/models/gold
+    target_path: $lake/rust_models_output/gold
+    default_format: parquet

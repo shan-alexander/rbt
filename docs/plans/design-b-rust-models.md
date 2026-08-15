@@ -159,10 +159,17 @@ Optional: `RustModel::self_test()` hook for host unit tests — not required for
 | **B3** | Parts strategies for Rust (`scoped_replace`, `incremental_append`, table+parts) | **Done** |
 | **B4** | Receipt `kind` + `materialization` on `ModelRunResult` | **Done** |
 | **B5** | `RustModelOutput::Stream` + `batches_to_stream` | **Done** |
-| **B6** | File/project discovery (optional) | Planned — library first |
+| **B6** | `ParallelContract` + `execute_partition` + `PartitionInput` | **Done** (RBT-C Phase 2) |
+| **B7** | File/project discovery (optional) | Planned — library first |
 | **Later** | Optional `cdylib` load policy | Deferred |
 
-**Shipped surface:** `RustModel` + `#[async_trait]`, `RbtEngineBuilder::with_rust_model`, `ModelSpec::rust().refs()`, `E_RBT_RUST_*` codes.
+**Shipped surface:** `RustModel` + `#[async_trait]`, `RbtEngineBuilder::with_rust_model`,
+`ModelSpec::rust().refs()`, `parallel_contract` / `execute_partition`, `PartitionKey` /
+`PartitionInput`, `E_RBT_RUST_*` codes.
+
+**Memory honesty:** Prefer `RustModelOutput::Stream` for large outputs; `Batches` /
+`collect()` only for small dims. Prefer `execute_partition` for multi-symbol lakes so the
+engine never builds a mega batch. See [EMBEDDING.md](../EMBEDDING.md) Design B section.
 
 ---
 

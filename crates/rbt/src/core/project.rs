@@ -179,6 +179,10 @@ pub struct MaterializeConfig {
     /// Parts vs monolith publish policy (RBT-A5). Default `auto`.
     #[serde(default)]
     pub consolidate: ConsolidatePolicy,
+    /// RBT-C Phase 3: default physical layout for part strategies when model omits
+    /// `parts_layout`. `parts` (default) or `hive`.
+    #[serde(default)]
+    pub default_parts_layout: Option<String>,
 }
 
 fn default_memtable_max_rows() -> usize {
@@ -205,6 +209,7 @@ impl Default for MaterializeConfig {
             wap: false,
             wap_root: None,
             consolidate: ConsolidatePolicy::Auto,
+            default_parts_layout: None,
         }
     }
 }
@@ -333,12 +338,28 @@ pub struct ScanConfig {
     /// register via DataFusion listing — avoids holding every IPC partition in a MemTable.
     ///
     /// Default **true**. Set `false` only for tiny trees or debugging MemTable path.
+    ///
+    /// **Recommended bronze landing is Parquet** (hive or `.parts/`) — listing registration,
+    /// **no spill**. Arrow IPC remains fully supported via this spill path.
     #[serde(default = "default_spill_arrow_ipc")]
     pub spill_arrow_ipc: bool,
     /// Directory (project-relative or absolute / `$root`) for bronze spill files.
     /// Default: `.rbt/bronze_spill`.
+    ///
+    /// When [`Self::reuse_register`] is true, spill files are reused across runs when the
+    /// per-source bronze path fingerprint matches the sidecar (see bronze register cache).
     #[serde(default = "default_spill_dir")]
     pub spill_dir: String,
+    /// Reuse Arrow IPC (etc.) spill Parquet when bronze landings are unchanged.
+    ///
+    /// Default **true**. Independent of `RunScope::skip_if_fingerprint_match` (which skips
+    /// the **whole DAG**). With reuse on, a forced rematerialize of silver/gold still
+    /// avoids re-decoding unchanged bronze.
+    ///
+    /// CLI: `--force-bronze-register` sets this to **false** for one run.
+    /// Env: `RBT_BRONZE_REUSE_REGISTER=0|false|off` disables.
+    #[serde(default = "default_true_bool_scan")]
+    pub reuse_register: bool,
 }
 
 fn default_protobuf_max_payload_bytes() -> u64 {
@@ -353,13 +374,32 @@ fn default_spill_dir() -> String {
     ".rbt/bronze_spill".into()
 }
 
+fn default_true_bool_scan() -> bool {
+    true
+}
+
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
             protobuf_max_payload_bytes: DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
             spill_arrow_ipc: true,
             spill_dir: default_spill_dir(),
+            reuse_register: true,
         }
+    }
+}
+
+impl ScanConfig {
+    /// Apply env overrides for bronze register reuse.
+    pub fn with_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("RBT_BRONZE_REUSE_REGISTER") {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "0" | "false" | "no" | "off" => self.reuse_register = false,
+                "1" | "true" | "yes" | "on" => self.reuse_register = true,
+                _ => {}
+            }
+        }
+        self
     }
 }
 
@@ -406,6 +446,243 @@ pub struct LayerConfig {
     pub default_format: Option<String>,
 }
 
+/// How the engine schedules tiers and multi-value partitions (RBT-C).
+///
+/// Set via `execution.concurrency.strategy` in `rbt_project.yml` or CLI
+/// `--execution-strategy`. When concurrency is **disabled**, the effective
+/// strategy is always [`Serial`](Self::Serial) regardless of this field.
+///
+/// # Strategies
+///
+/// | Value | Fan-out multi-value → WorkUnits | Concurrent models in a tier (L1) | Concurrent partition units (L2) |
+/// |-------|----------------------------------|----------------------------------|----------------------------------|
+/// | `serial` | no | no | no |
+/// | `model_tier` | no | yes (if workers>1) | no |
+/// | `partition` | yes (when eligible) | no | yes (if workers>1) |
+/// | `auto` | yes (when eligible) | yes | yes |
+///
+/// # YAML
+///
+/// ```yaml
+/// execution:
+///   concurrency:
+///     enabled: true
+///     max_workers: 8
+///     strategy: auto
+/// ```
+///
+/// # CLI
+///
+/// ```bash
+/// rbt run -p proj --jobs 8 --execution-strategy partition
+/// ```
+///
+/// `--jobs N` with N>1 enables concurrency and promotes `serial` → `auto` if you
+/// did not set a strategy explicitly (see [`ConcurrencyConfig::apply_jobs`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStrategy {
+    /// Compat: one mega plan per model; no L1/L2 concurrency, no multi-value fan-out.
+    /// Default for 0.10.x behavior and for `enabled: false`.
+    #[default]
+    Serial,
+    /// Concurrent independent models within a topo tier (L1). Private sessions.
+    ModelTier,
+    /// Multi-value × partition_by → WorkUnits (L2); units may run concurrent when workers > 1.
+    Partition,
+    /// L2 fan-out when eligible; L1 concurrent when tier width > 1 and workers > 1.
+    Auto,
+}
+
+impl ExecutionStrategy {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "serial" | "none" | "off" => Ok(Self::Serial),
+            "model_tier" | "model_tiers" | "tier" | "tiers" => Ok(Self::ModelTier),
+            "partition" | "partitions" | "part" => Ok(Self::Partition),
+            "auto" | "default" => Ok(Self::Auto),
+            other => anyhow::bail!(
+                "E_RBT_CONCURRENT: unknown execution strategy '{other}' \
+                 (serial | model_tier | partition | auto)"
+            ),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Serial => "serial",
+            Self::ModelTier => "model_tier",
+            Self::Partition => "partition",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// Optional concurrency block under `execution.concurrency` (RBT-C).
+///
+/// # Defaults (safe / compatible)
+///
+/// | Field | Default | Meaning |
+/// |-------|---------|---------|
+/// | `enabled` | `false` | Serial mega path; multi-value = SQL `IN` filter |
+/// | `max_workers` | `1` | No parallel unit execution |
+/// | `strategy` | `serial` | See [`ExecutionStrategy`] |
+/// | `multi_value_fanout_threshold` | `4` | Min multi-value size before fan-out |
+/// | `dirty_part_skip` | `true` | Skip clean parts when `source_fp` matches |
+///
+/// # Full example
+///
+/// ```yaml
+/// execution:
+///   concurrency:
+///     enabled: true
+///     max_workers: 8
+///     strategy: partition
+///     multi_value_fanout_threshold: 4
+///     dirty_part_skip: true
+///     # partition_keys: [symbol]   # optional override; else model part_key/partition_by
+/// ```
+///
+/// # Isolation model (read this before enabling)
+///
+/// Concurrent workers use **private DataFusion `SessionContext`s**. Never assume a
+/// shared catalog across units. Part files for different `scope_id`s are disjoint;
+/// only `_rbt_manifest.json` is merged under a lockfile.
+///
+/// # Spill
+///
+/// Workers may use `{project}/.rbt/spill/{run_id}/worker_{i}/` for temp data.
+///
+/// # Library
+///
+/// ```rust,ignore
+/// let mut cfg = RbtProjectConfig::load(proj)?;
+/// cfg.execution.concurrency.apply_jobs(8);
+/// cfg.execution.concurrency.apply_strategy(ExecutionStrategy::Partition);
+/// engine.execute_dag_with_scope(&dag, proj, out, &cfg, &scope).await?;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConcurrencyConfig {
+    /// Master switch. Default **false** (0.10.x serial compat).
+    ///
+    /// When false, [`effective_strategy`](Self::effective_strategy) is always
+    /// [`ExecutionStrategy::Serial`] and multi-value is never expanded to WorkUnits.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Max in-flight workers (models or partition units). Default 1.
+    ///
+    /// CLI `--jobs N` sets this and enables concurrency when N > 1.
+    #[serde(default = "default_max_workers")]
+    pub max_workers: usize,
+    /// Scheduling strategy (see [`ExecutionStrategy`]).
+    #[serde(default)]
+    pub strategy: ExecutionStrategy,
+    /// When multi-value size ≥ this **and** the model is partition-local with
+    /// `scoped_replace`, expand into N WorkUnits instead of one IN-filter mega plan.
+    ///
+    /// Default `4` avoids tiny fan-outs (e.g. 2 entities) paying process overhead.
+    #[serde(default = "default_fanout_threshold")]
+    pub multi_value_fanout_threshold: usize,
+    /// Skip partition units whose part `source_fp` matches the current bronze
+    /// fingerprint for that scalar scope (dirty-part skip). Default true.
+    #[serde(default = "default_true_bool")]
+    pub dirty_part_skip: bool,
+    /// Optional override for which keys participate in fan-out (else model
+    /// `part_key` / `partition_by`). Reserved for advanced hosts; usually leave null.
+    #[serde(default)]
+    pub partition_keys: Option<Vec<String>>,
+    /// Phase 3: soft partition WorkUnits by estimated bytes descending (large first).
+    /// Default true when concurrency enabled.
+    #[serde(default = "default_true_bool")]
+    pub large_parts_first: bool,
+    /// Phase 3: soft advisory cap on sum of in-flight part bytes (scheduling note / future hard cap).
+    /// `null` = unlimited. Used for plan notes and ordering heuristics today.
+    #[serde(default)]
+    pub max_inflight_bytes: Option<u64>,
+}
+
+fn default_max_workers() -> usize {
+    1
+}
+fn default_fanout_threshold() -> usize {
+    4
+}
+fn default_true_bool() -> bool {
+    true
+}
+
+impl Default for ConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_workers: 1,
+            strategy: ExecutionStrategy::Serial,
+            multi_value_fanout_threshold: 4,
+            dirty_part_skip: true,
+            partition_keys: None,
+            large_parts_first: true,
+            max_inflight_bytes: None,
+        }
+    }
+}
+
+impl ConcurrencyConfig {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && self.max_workers >= 1
+    }
+
+    pub fn effective_max_workers(&self) -> usize {
+        self.max_workers.max(1)
+    }
+
+    pub fn effective_strategy(&self) -> ExecutionStrategy {
+        if !self.enabled {
+            return ExecutionStrategy::Serial;
+        }
+        self.strategy
+    }
+
+    /// Apply CLI `--jobs N` (enables concurrency; promotes serial → auto).
+    pub fn apply_jobs(&mut self, jobs: usize) {
+        let n = jobs.max(1);
+        self.enabled = n > 1 || self.enabled;
+        self.max_workers = n;
+        if n > 1 && matches!(self.strategy, ExecutionStrategy::Serial) {
+            self.strategy = ExecutionStrategy::Auto;
+        }
+        if n > 1 {
+            self.enabled = true;
+        }
+    }
+
+    /// Apply CLI `--execution-strategy`.
+    pub fn apply_strategy(&mut self, s: ExecutionStrategy) {
+        self.strategy = s;
+        if !matches!(s, ExecutionStrategy::Serial) {
+            self.enabled = true;
+        }
+    }
+}
+
+/// Top-level `execution:` block in `rbt_project.yml`.
+///
+/// Today only hosts concurrency/scheduling. Future fields (cost caps, spill roots)
+/// land here without changing the root schema again.
+///
+/// ```yaml
+/// execution:
+///   concurrency:
+///     enabled: true
+///     max_workers: 8
+///     strategy: auto
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionConfig {
+    /// WorkUnit / concurrent scheduler config (RBT-C). Default disabled.
+    #[serde(default)]
+    pub concurrency: ConcurrencyConfig,
+}
+
 /// Project-wide `rbt_project.yml` configuration schema.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RbtProjectConfig {
@@ -436,6 +713,9 @@ pub struct RbtProjectConfig {
     /// Bronze fingerprint mode for skip-if-match (RBT-A4).
     #[serde(default)]
     pub fingerprint: FingerprintConfig,
+    /// Execution / concurrency (RBT-C). Default serial.
+    #[serde(default)]
+    pub execution: ExecutionConfig,
 }
 
 impl Default for RbtProjectConfig {
@@ -480,6 +760,7 @@ impl Default for RbtProjectConfig {
             roots: HashMap::new(),
             contracts: super::contracts::ContractsConfig::default(),
             fingerprint: FingerprintConfig::default(),
+            execution: ExecutionConfig::default(),
         }
     }
 }
@@ -553,6 +834,7 @@ impl RbtProjectConfig {
                 config.layers.entry(key).or_insert(val);
             }
             config.fingerprint = config.fingerprint.with_env_overrides()?;
+            config.scan = config.scan.with_env_overrides();
             Ok(config)
         } else {
             match mode {
@@ -570,6 +852,7 @@ impl RbtProjectConfig {
                     }
                     let mut config = Self::default();
                     config.fingerprint = config.fingerprint.with_env_overrides()?;
+                    config.scan = config.scan.with_env_overrides();
                     Ok(config)
                 }
             }
@@ -1063,7 +1346,11 @@ target_path: lake/gold
         let repo = manifest.join("../..");
         for (rel, name, expect_root) in [
             ("examples/smoke_fixture", "smoke_fixture", "lake"),
-            ("examples/full_e2e_rbt_example", "market_bars", "lake"),
+            (
+                "examples/full_e2e_rbt_example",
+                "full_e2e_design_a_sql",
+                "lake",
+            ),
         ] {
             let dir = repo.join(rel);
             if !dir.join("rbt_project.yml").is_file() {
@@ -1084,12 +1371,14 @@ target_path: lake/gold
             );
             let silver = cfg.resolve_layer_target_dir(&dir, ModelLayer::Staging)?;
             let silver_s = silver.to_string_lossy();
+            // smoke: lake/silver/…; full_e2e Design A: lake/sql_models_output/silver/…
             assert!(
-                silver_s.contains("lake/silver") || silver_s.contains("lake\\silver"),
+                silver_s.contains("silver") || silver_s.contains("Silver"),
                 "staging target for {rel}: {silver_s}"
             );
-            // DAG builds for smoke always; e2e only if models present
-            if dir.join("models").is_dir() {
+            // DAG builds when models_dir exists (smoke: models/; e2e: src/models/sql_models_approach)
+            let models = dir.join(&cfg.models_dir);
+            if models.is_dir() {
                 let dag = cfg.build_dag(&dir, None)?;
                 assert!(
                     dag.graph.node_count() >= 3,

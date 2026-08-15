@@ -13,6 +13,7 @@ pub mod receipt;
 pub mod run_scope;
 pub mod schema_emit;
 pub mod select;
+pub mod work_unit;
 
 pub use contracts::{
     contract_diff_to_bronze_diagnostics, run_contract_diff, strip_contract_prefix, ContractsConfig,
@@ -41,10 +42,15 @@ pub use paths::{
     validate_glob_patterns,
 };
 pub use project::{
-    ConsolidatePolicy, FingerprintAlgo, FingerprintConfig, FingerprintMode, IcebergConfig,
-    IcebergWriteMode, MaterializeConfig, MaterializeMode, ProjectLoadMode, RbtProjectConfig,
-    RefBackend, RefStrategy, ScanConfig, DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS,
-    DEFAULT_MEMTABLE_MAX_ROWS, DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+    ConcurrencyConfig, ConsolidatePolicy, ExecutionConfig, ExecutionStrategy, FingerprintAlgo,
+    FingerprintConfig, FingerprintMode, IcebergConfig, IcebergWriteMode, MaterializeConfig,
+    MaterializeMode, ProjectLoadMode, RbtProjectConfig, RefBackend, RefStrategy, ScanConfig,
+    DEFAULT_MAX_ROW_GROUP_BYTES, DEFAULT_MAX_ROW_GROUP_ROWS, DEFAULT_MEMTABLE_MAX_ROWS,
+    DEFAULT_PROTOBUF_MAX_PAYLOAD_BYTES,
+};
+pub use work_unit::{
+    classify_parallel_contract, enrich_plan_from_manifests, expand_partition_bindings,
+    plan_execution, scope_for_unit, ExecutionPlan, ParallelContract, PartRef, WorkUnit,
 };
 pub use receipt::{
     apply_scope_to_frontmatter, bronze_fingerprint, effective_contract_version,

@@ -1,60 +1,57 @@
 # =============================================================================
-# full_e2e_rbt_example — bronze → silver → gold (full Parquet rewrite DAG)
+# Design A — pure SQL models → lake/sql_models_output/
 # =============================================================================
-# Compatible with rbt-datalake 0.3.7+.
+# Models live under src/models/sql_models_approach/ (host crate tree).
 #
-# Intentional sample policy: FULL PARQUET REWRITE each `rbt run`.
-# That is a first-class DAG option for small/medium projects that want:
-#   - dbt-shaped models, refs, tests, frontmatter
-#   - medallion cleansing without Iceberg/catalog ops
+# Design B (pure Rust, no .sql):
+#   src/models/silver/**/*.rs + src/models/gold/**/*.rs
+#   config: rbt_project_rust.yml
+#   outputs: lake/rust_models_output/
 #
-# Keys below are the runtime surface loaded by rbt today. Extra keys are ignored;
-# prefer only documented fields so this file stays a faithful template.
+# Shared bronze: lake/bronze/
 #
-# Optional blocks (defaults are fine for this example):
-#   materialize:   ref() backend after materialize — see docs/REF_STRATEGY.md
-#   scan:          bronze limits (e.g. protobuf payload cap)
-#   roots:         named path prefixes for multi-root / absolute lakes
-#                  (see docs/MULTI_ROOT_AND_PATH_GLOB.md)
+# CLI
+#   rbt run -p examples/full_e2e_rbt_example --select stg_ohlcv_1m,tf_indicators_1m,obt_stocks_1m
+#
+# Host (full universe + force + wall clock)
+#   cargo run -p full-e2e-rbt-example -- -p examples/full_e2e_rbt_example both
 # =============================================================================
 
-name: market_bars
-version: "1.2.0"
+name: full_e2e_design_a_sql
+version: "2.1.0"
+contract_version: "e2e-v2-design-a"
 
-models_dir: models
-target_path: $lake/gold
+models_dir: src/models/sql_models_approach
+target_path: $lake/sql_models_output/gold
 
-# Named roots: templates expand before absolute/relative resolve.
-# Here `lake` is project-relative (joins to the example project dir).
-# For multi-env lakes, point roots at absolute paths instead, e.g.:
-#   nonprod_lake: /mnt/datalake/acme/nonprod/lake_us/lake
 roots:
   lake: lake
 
-# Default ref strategy is parquet (lake re-read). Uncomment to opt into MemTable
-# for small models only (row count < memtable_max_rows):
-# materialize:
-#   ref_strategy: parquet          # default — omit entire block for same effect
-#   # ref_strategy: memtable
-#   # memtable_max_rows: 50000
+materialize:
+  mode: stream
+  ref_strategy: parquet
 
-# Optional bronze scan limits (protobuf opaque payloads default to 1 GiB):
-# scan:
-#   protobuf_max_payload_bytes: 1073741824
+execution:
+  concurrency:
+    enabled: false
+    max_workers: 1
+    strategy: serial
+    multi_value_fanout_threshold: 2
+    dirty_part_skip: true
+    large_parts_first: true
 
 layers:
   staging:
-    path: models/staging
-    target_path: $lake/silver/stage
+    path: src/models/sql_models_approach/silver/staging
+    target_path: $lake/sql_models_output/silver/stage
     default_format: parquet
 
-  # Gold transforms (ref stg_* silver endpoints only)
   transforms:
-    path: models/transforms
-    target_path: $lake/gold/tf
+    path: src/models/sql_models_approach/silver/transforms
+    target_path: $lake/sql_models_output/silver/tf
     default_format: parquet
 
   marts:
-    path: models/marts
-    target_path: $lake/gold
+    path: src/models/sql_models_approach/gold
+    target_path: $lake/sql_models_output/gold
     default_format: parquet

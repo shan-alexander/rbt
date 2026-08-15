@@ -13,8 +13,10 @@ and work queues — not ship history (that is root **`CHANGELOG.md`** → hub `c
 | Plan | Intent |
 |------|--------|
 | [[Dual-track maturity roadmap]] | Open-core primitives (T1) + host-integrated confidence (T2); P5a→P9 after 0.5.0 |
+| [[Partition work units and concurrent scheduler]] | **RBT-C** — layout contract, WorkUnits, opt-in concurrency, alias, Design B partition API (next principal arc after 0.10.1) |
+| [[Design B — First-class Rust models]] | B1–B5 shipped; B6 partition API lives under RBT-C Phase 2 |
 
-Supporting analysis: [[Bronze-to-silver maturity gap matrix]]. Goal: [[Complex bronze landing zones]].
+Supporting analysis: [[Bronze-to-silver maturity gap matrix]] · [[Partition-aware concurrent execution — user feedback vs rbt 0.10.x]]. Goal: [[Complex bronze landing zones]] · [[Team-scale lake positioning]].
 
 **All of this is optional.** If you only use concepts/ADRs, rustbrain still works.
 

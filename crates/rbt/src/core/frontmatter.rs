@@ -406,9 +406,34 @@ pub struct StagingFrontmatter {
     #[serde(default)]
     pub phase: Option<String>,
     /// Materialization hint: `table` | `view` | `incremental_append` | `scoped_replace` |
-    /// `keyed_upsert`.
+    /// `keyed_upsert` | `alias` (zero-copy / identity).
     #[serde(default)]
     pub materialization: Option<String>,
+    /// Upstream model name for `materialization: alias` (RBT-C Phase 0).
+    ///
+    /// When omitted, rbt uses the single `{{ ref('…') }}` dependency if the model has exactly one.
+    #[serde(default, alias = "alias_ref", alias = "zero_copy_of")]
+    pub alias_of: Option<String>,
+    /// RBT-C: declare partition-parallel safety for the scheduler.
+    ///
+    /// - `true` → eligible for multi-value fan-out when keys are present  
+    /// - `false` → force mega / serial plan (global grain)  
+    /// - omit → heuristic (`scoped_replace` + keys → local; global windows → global)
+    #[serde(default)]
+    pub parallel_safe: Option<bool>,
+    /// RBT-C Phase 3: physical part layout for `scoped_replace` / parts strategies.
+    ///
+    /// - `parts` (default) — `model.parts/part-{scope_id}.parquet`
+    /// - `hive` — `model/symbol=AAPL/data.parquet` (hive-style dirs; good for external tools)
+    ///
+    /// YAML: `parts_layout: hive` (aliases: `layout` is **not** used — reserved elsewhere).
+    #[serde(default)]
+    pub parts_layout: Option<String>,
+    /// RBT-C Phase 3: columns that are sorted within each part (contract; verified lightly on write).
+    ///
+    /// Example: `sort_within_part: [timestamp_ns]` for OHLCV bars per symbol.
+    #[serde(default)]
+    pub sort_within_part: Option<Vec<String>>,
     /// Post-materialization assertions.
     #[serde(default)]
     pub tests: Option<ModelTests>,

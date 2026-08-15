@@ -90,11 +90,23 @@ Analysis backbone: [[Bronze-to-silver maturity gap matrix]].
 - [ ] `object_store` bronze + lake write when committed product path
 - [ ] REST / Lakekeeper (or one real remote catalog) after local proof stays green — G7
 - [ ] Document **partitioned fan-out**: many rbt workers, Iceberg multi-writer, host orchestrator — petabyte *lake size*, single-node job slices
+- [ ] **RBT-C external work-unit protocol** (JSON units + merge) — first-class host fan-out; see [[Partition work units and concurrent scheduler]]
+
+### P8b — Partition work units & concurrent scheduler (RBT-C) — *next principal arc*
+
+> Promoted from user feedback (2026-08) + analysis [[Partition-aware concurrent execution — user feedback vs rbt 0.10.x]].  
+> **Does not** require remote object_store first: FS parts + optional in-process workers.
+
+- [x] Phase 0: honest tier logs, multi-value=filter docs, **alias/zero-copy**, measure baselines (Unreleased / toward 0.11)
+- [x] Phase 1: WorkUnit planner, external protocol, concurrent scoped_replace, per-part fp, L1/L2 concurrency (Unreleased)
+- [x] Phase 2: Design B `ParallelContract` + `execute_partition` (B6) (Unreleased)
+- [x] Phase 3: manifest v2, optional hive write layout, bytes-aware heuristics (Unreleased)
 
 ### P9 — Polyglot
 
+- [x] Design B Rust models MVP (B1–B5 in **0.10.0**) — [[Polyglot UDFs and Rust models]] / [[ADR-003 Polyglot DAG]]
 - [ ] Project UDF packs (Design A beyond builtins)
-- [ ] Design B Rust models MVP — [[Polyglot UDFs and Rust models]] / [[ADR-003 Polyglot DAG]]
+- [ ] Design B B6 partition API — under RBT-C Phase 2
 
 ### Parallel easy win
 

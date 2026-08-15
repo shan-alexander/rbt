@@ -1,9 +1,10 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use rbt::{
-    consolidate_parts_to_parquet, model_has_test_contract, parts_dir_for_parquet, run_contract_diff,
-    run_doctor, BronzeCheckMode, DoctorSeverity, MaterializeWriteOptions, OutputFormat,
-    RbtProjectConfig, RunScope, SelectMode, TransformationEngine,
+    consolidate_parts_to_parquet, enrich_plan_from_manifests, model_has_test_contract,
+    parts_dir_for_parquet, plan_execution, run_contract_diff, run_doctor, BronzeCheckMode,
+    DoctorSeverity, ExecutionStrategy, MaterializeWriteOptions, OutputFormat, RbtProjectConfig,
+    RunScope, SelectMode, TransformationEngine,
 };
 
 use std::path::PathBuf;
@@ -45,6 +46,13 @@ struct RunScopeArgs {
     /// Also: env `RBT_FINGERPRINT_MODE`. Project default in `fingerprint.mode` yml.
     #[arg(long, value_name = "MODE")]
     fingerprint_mode: Option<String>,
+    /// Force re-decode / re-spill of bronze landings (disable register reuse cache).
+    ///
+    /// Independent of `--skip-if-match` (which skips the whole DAG). Default is to **reuse**
+    /// Arrow IPC spill Parquet when the bronze path fingerprint is unchanged
+    /// (`scan.reuse_register: true`).
+    #[arg(long, default_value_t = false)]
+    force_bronze_register: bool,
 }
 
 impl RunScopeArgs {
@@ -67,6 +75,9 @@ impl RunScopeArgs {
     ) -> Result<()> {
         if let Some(ref m) = self.fingerprint_mode {
             config.fingerprint.mode = rbt::FingerprintMode::parse(m)?;
+        }
+        if self.force_bronze_register {
+            config.scan.reuse_register = false;
         }
         Ok(())
     }
@@ -177,8 +188,34 @@ enum Commands {
         /// Includes models[] (phase/tags/elapsed_ms). Full on-disk receipt still written when enabled.
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Max concurrent workers (RBT-C). Enables concurrency; `1` keeps serial. Overrides
+        /// `execution.concurrency.max_workers`.
+        #[arg(short = 'j', long = "jobs", value_name = "N")]
+        jobs: Option<usize>,
+        /// Execution strategy: serial | model_tier | partition | auto (RBT-C).
+        #[arg(long = "execution-strategy", value_name = "STRATEGY")]
+        execution_strategy: Option<String>,
         #[command(flatten)]
         scope: RunScopeArgs,
+    },
+    /// Export WorkUnit plan JSON (external host fan-out protocol, RBT-C Phase 1).
+    WorkUnits {
+        #[arg(short, long, default_value = ".")]
+        project_dir: PathBuf,
+        #[arg(short = 's', long)]
+        select: Option<String>,
+        /// Emit JSON (default true).
+        #[arg(long, default_value_t = true)]
+        json: bool,
+        /// Suggest CLI commands per unit for host orchestration.
+        #[arg(long, default_value_t = false)]
+        suggest_commands: bool,
+        #[command(flatten)]
+        scope: RunScopeArgs,
+        #[arg(short = 'j', long = "jobs", value_name = "N")]
+        jobs: Option<usize>,
+        #[arg(long = "execution-strategy", value_name = "STRATEGY")]
+        execution_strategy: Option<String>,
     },
     /// Run frontmatter tests for selected models (executes subgraph then asserts)
     Test {
@@ -224,11 +261,20 @@ enum Commands {
     Explain {
         #[arg(short, long, default_value = ".")]
         project_dir: PathBuf,
-        /// Model name (required)
-        #[arg(short = 's', long)]
+        /// Model name (required unless `--plan` for full DAG work-unit plan)
+        #[arg(short = 's', long, default_value = "")]
         select: String,
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Print RBT-C WorkUnit execution plan for the DAG (optional model filter via -s)
+        #[arg(long, default_value_t = false)]
+        plan: bool,
+        #[command(flatten)]
+        scope: RunScopeArgs,
+        #[arg(short = 'j', long = "jobs", value_name = "N")]
+        jobs: Option<usize>,
+        #[arg(long = "execution-strategy", value_name = "STRATEGY")]
+        execution_strategy: Option<String>,
     },
     /// Preview model rows: materialize ancestors, run target SQL with LIMIT (no target write)
     Preview {
@@ -250,8 +296,8 @@ enum Commands {
     Measure {
         #[arg(short, long, default_value = ".")]
         project_dir: PathBuf,
-        /// Scenario: smoke_pipeline | validate_dx | incremental_append |
-        /// stream_vs_collect | whale_synthetic | complex_bronze
+        /// Scenario name (see `rbt measure --help` / list_scenarios). Includes RBT-C Phase 0
+        /// baselines: concurrent_tier_vs_serial, multi_value_in_vs_fanout.
         #[arg(long, default_value = "smoke_pipeline")]
         scenario: String,
         #[arg(short, long, default_value = "./target/output")]
@@ -333,6 +379,21 @@ async fn main() -> Result<()> {
     result
 }
 
+fn apply_concurrency_cli(
+    config: &mut RbtProjectConfig,
+    jobs: Option<usize>,
+    strategy: Option<&str>,
+) -> Result<()> {
+    if let Some(s) = strategy {
+        let st = ExecutionStrategy::parse(s)?;
+        config.execution.concurrency.apply_strategy(st);
+    }
+    if let Some(j) = jobs {
+        config.execution.concurrency.apply_jobs(j);
+    }
+    Ok(())
+}
+
 async fn run_cli(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Compile {
@@ -392,6 +453,8 @@ async fn run_cli(cli: Cli) -> Result<()> {
             format,
             bronze_check,
             json,
+            jobs,
+            execution_strategy,
             scope,
         } => {
             let run_scope = scope.to_scope()?;
@@ -406,6 +469,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
 
             let mut config = RbtProjectConfig::load_for_cli(&project_dir)?;
             scope.apply_fingerprint_override(&mut config)?;
+            apply_concurrency_cli(&mut config, jobs, execution_strategy.as_deref())?;
             let full = config.build_dag(&project_dir, Some(format.into()))?;
             let dag = full
                 .apply_select(select.as_deref(), SelectMode::Execute)
@@ -729,14 +793,130 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::WorkUnits {
+            project_dir,
+            select,
+            json,
+            suggest_commands,
+            scope,
+            jobs,
+            execution_strategy,
+        } => {
+            let run_scope = scope.to_scope()?;
+            let mut config = RbtProjectConfig::load_for_cli(&project_dir)?;
+            apply_concurrency_cli(&mut config, jobs, execution_strategy.as_deref())?;
+            // work-units export implies planning with concurrency enabled when strategy/jobs set
+            if !config.execution.concurrency.enabled {
+                // still allow plan preview of serial path
+            }
+            let full = config.build_dag(&project_dir, None)?;
+            let dag = full
+                .apply_select(select.as_deref(), SelectMode::Exact)
+                .context("invalid --select")?;
+            let mut plan = plan_execution(&dag, &run_scope, &config.execution.concurrency)?;
+            if config.execution.concurrency.large_parts_first {
+                enrich_plan_from_manifests(&mut plan, &dag);
+            }
+            if json {
+                let mut body = serde_json::to_value(&plan)?;
+                if suggest_commands {
+                    let cmds: Vec<String> = plan
+                        .units
+                        .iter()
+                        .filter(|u| u.is_partition_slice)
+                        .map(|u| {
+                            let mut parts = vec![
+                                format!("rbt run -p {}", project_dir.display()),
+                                format!("--select {}", u.model),
+                            ];
+                            for (k, v) in &u.partition_bindings {
+                                parts.push(format!("--var {k}={v}"));
+                            }
+                            parts.join(" ")
+                        })
+                        .collect();
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert("suggested_commands".into(), serde_json::json!(cmds));
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&body)?);
+            } else {
+                println!(
+                    "[rbt] work-units strategy={} workers={} units={} slices={}",
+                    plan.strategy.as_str(),
+                    plan.max_workers,
+                    plan.units.len(),
+                    plan.partition_slice_count()
+                );
+                for u in &plan.units {
+                    println!(
+                        "  {} model={} slice={} bindings={:?}",
+                        u.id, u.model, u.is_partition_slice, u.partition_bindings
+                    );
+                }
+                for n in &plan.notes {
+                    println!("  note: {n}");
+                }
+            }
+        }
         Commands::Explain {
             project_dir,
             select,
             json,
+            plan: show_plan,
+            scope,
+            jobs,
+            execution_strategy,
         } => {
-            let config = RbtProjectConfig::load_for_cli(&project_dir)?;
+            let mut config = RbtProjectConfig::load_for_cli(&project_dir)?;
+            apply_concurrency_cli(&mut config, jobs, execution_strategy.as_deref())?;
             let full = config.build_dag(&project_dir, None)?;
+            if show_plan {
+                let run_scope = scope.to_scope()?;
+                let dag = if select.trim().is_empty() {
+                    full
+                } else {
+                    full.apply_select(Some(select.trim()), SelectMode::Exact)?
+                };
+                let mut plan = plan_execution(&dag, &run_scope, &config.execution.concurrency)?;
+                if config.execution.concurrency.large_parts_first {
+                    enrich_plan_from_manifests(&mut plan, &dag);
+                }
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    println!(
+                        "[rbt] explain --plan strategy={} workers={} units={} partition_slices={}",
+                        plan.strategy.as_str(),
+                        plan.max_workers,
+                        plan.units.len(),
+                        plan.partition_slice_count()
+                    );
+                    for (ti, tier) in plan.tiers.iter().enumerate() {
+                        println!("  Tier {ti}: {tier:?}");
+                    }
+                    for u in &plan.units {
+                        println!(
+                            "  unit {} model={} slice={} contract={} bindings={:?} est_bytes={:?} est_rows={:?}",
+                            u.id,
+                            u.model,
+                            u.is_partition_slice,
+                            u.parallel_contract.as_str(),
+                            u.partition_bindings,
+                            u.estimated_bytes,
+                            u.estimated_rows
+                        );
+                    }
+                    for n in &plan.notes {
+                        println!("  note: {n}");
+                    }
+                }
+                return Ok(());
+            }
             let name = select.trim();
+            if name.is_empty() {
+                bail!("E_RBT_EXPLAIN: -s/--select MODEL required (or use --plan)");
+            }
             let node = full
                 .topological_sequence()?
                 .into_iter()
@@ -755,16 +935,54 @@ async fn run_cli(cli: Cli) -> Result<()> {
                 })
                 .collect();
             let fm = node.frontmatter.as_ref();
+            let identity_hint = rbt::looks_like_identity_sql(&node.raw_sql)
+                .or_else(|| rbt::looks_like_identity_sql(&node.compiled_sql));
+            let alias_candidate = identity_hint.is_some()
+                && !node.materialization.is_alias()
+                && matches!(
+                    node.materialization,
+                    rbt::Materialization::Table | rbt::Materialization::View
+                );
+            let notes: Vec<String> = {
+                let mut n = Vec::new();
+                if node.materialization.is_alias() {
+                    n.push(
+                        "materialization=alias: zero-copy publish (no SQL rewrite of upstream bytes)"
+                            .into(),
+                    );
+                }
+                if alias_candidate {
+                    if let Some(from) = &identity_hint {
+                        n.push(format!(
+                            "W_RBT_ALIAS_CANDIDATE: SQL looks like SELECT * identity of '{from}'; \
+                             consider materialization: alias to avoid rewrite"
+                        ));
+                    }
+                }
+                n.push(
+                    "multi-value --var scope is a partition IN filter (not WorkUnit fan-out; RBT-C Phase 1)"
+                        .into(),
+                );
+                n.push(
+                    "DAG tiers list independent models; execute is serial until execution.concurrency (RBT-C)"
+                        .into(),
+                );
+                n
+            };
             if json {
                 let body = serde_json::json!({
                     "name": node.name,
                     "layer": format!("{:?}", node.layer),
-                    "materialization": format!("{:?}", node.materialization),
+                    "materialization": node.materialization.as_str(),
                     "output_format": format!("{:?}", node.output_format),
                     "output_path": node.output_path,
                     "dependencies": deps,
                     "description": node.description,
                     "compiled_sql": node.compiled_sql,
+                    "alias_of": fm.and_then(|f| f.alias_of.clone()),
+                    "identity_sql": identity_hint,
+                    "alias_candidate": alias_candidate,
+                    "notes": notes,
                     "bronze": fm.map(|f| serde_json::json!({
                         "scan_path": f.scan_path,
                         "source_format": f.source_format.as_ref().map(|s| s.as_str()),
@@ -777,10 +995,17 @@ async fn run_cli(cli: Cli) -> Result<()> {
             } else {
                 println!("[rbt] explain model '{}'", node.name);
                 println!("  layer:           {:?}", node.layer);
-                println!("  materialization: {:?}", node.materialization);
+                println!(
+                    "  materialization: {} ({:?})",
+                    node.materialization.as_str(),
+                    node.materialization
+                );
                 println!("  output_format:   {:?}", node.output_format);
                 if let Some(p) = &node.output_path {
                     println!("  output_path:     {p}");
+                }
+                if let Some(a) = fm.and_then(|f| f.alias_of.as_ref()) {
+                    println!("  alias_of:        {a}");
                 }
                 println!("  dependencies:    {deps:?}");
                 if let Some(f) = fm {
@@ -793,6 +1018,9 @@ async fn run_cli(cli: Cli) -> Result<()> {
                     if let Some(g) = &f.path_glob {
                         println!("  bronze.path_glob: {g:?}");
                     }
+                }
+                for note in &notes {
+                    println!("  note: {note}");
                 }
                 println!("--- compiled SQL ---");
                 println!("{}", node.compiled_sql);
