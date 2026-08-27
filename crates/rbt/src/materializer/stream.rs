@@ -46,6 +46,8 @@ pub struct MaterializeWriteOptions {
     /// Declared frontmatter schema to merge into the writer (RBT-A6).
     /// Missing declared columns are added as nulls; zero-row writes keep full schema.
     pub declared_schema: Option<SchemaRef>,
+    /// Optional surrogate-key stamp from frontmatter grain (ADR-009 / RBT-A16).
+    pub surrogate_key: Option<crate::engine::surrogate_key::SurrogateKeyConfig>,
 }
 
 impl Default for MaterializeWriteOptions {
@@ -58,6 +60,7 @@ impl Default for MaterializeWriteOptions {
             iceberg_namespace: "rbt".into(),
             lineage: None,
             declared_schema: None,
+            surrogate_key: None,
         }
     }
 }
@@ -72,6 +75,7 @@ impl MaterializeWriteOptions {
             iceberg_namespace: cfg.iceberg.namespace.clone(),
             lineage: None,
             declared_schema: None,
+            surrogate_key: None,
         }
     }
 
@@ -82,6 +86,14 @@ impl MaterializeWriteOptions {
 
     pub fn with_declared_schema(mut self, schema: SchemaRef) -> Self {
         self.declared_schema = Some(schema);
+        self
+    }
+
+    pub fn with_surrogate_key(
+        mut self,
+        cfg: crate::engine::surrogate_key::SurrogateKeyConfig,
+    ) -> Self {
+        self.surrogate_key = Some(cfg);
         self
     }
 }
@@ -283,10 +295,15 @@ pub async fn write_parquet_stream(
     } else {
         base_schema.clone()
     };
-    let schema: SchemaRef = if let Some(ref lin) = opts.lineage {
-        stamped_schema(with_declared.as_ref(), lin)
+    let with_sk: SchemaRef = if let Some(ref sk) = opts.surrogate_key {
+        crate::engine::surrogate_key::sk_stamped_schema(with_declared.as_ref(), sk)
     } else {
         with_declared
+    };
+    let schema: SchemaRef = if let Some(ref lin) = opts.lineage {
+        stamped_schema(with_sk.as_ref(), lin)
+    } else {
+        with_sk
     };
     let partial = partial_path_for(destination_path);
     remove_if_exists(&partial);
@@ -324,6 +341,11 @@ pub async fn write_parquet_stream(
             if let Some(ref d) = opts.declared_schema {
                 batch = ensure_declared_columns(&batch, d.as_ref())?;
             }
+            if let Some(ref sk) = opts.surrogate_key {
+                // Hash or MIISK stamp; Unknown row deferred to once after stream
+                // (ensure_unknown_member needs full view — stamp SK only here).
+                batch = crate::engine::surrogate_key::stamp_batch_sk(&batch, sk)?;
+            }
             if let Some(ref lin) = opts.lineage {
                 batch = stamp_batch(&batch, lin)?;
             }
@@ -350,6 +372,27 @@ pub async fn write_parquet_stream(
                 })?;
             }
             // batch dropped here
+        }
+        // ADR-009: optional Unknown member row (all-zero SK) once per file.
+        // For streaming we always append when requested (cannot cheaply scan prior batches).
+        // keyed_upsert uses ensure_unknown_member (dedupe). Table full-refresh: append once.
+        if let Some(ref sk) = opts.surrogate_key {
+            if sk.unknown_member {
+                let unk = crate::engine::surrogate_key::unknown_member_batch(sk, schema.as_ref())?;
+                let unk = if let Some(ref lin) = opts.lineage {
+                    stamp_batch(&unk, lin)?
+                } else {
+                    unk
+                };
+                writer.write(&unk).with_context(|| {
+                    format!(
+                        "E_RBT_SK: write unknown_member row to {}",
+                        partial.display()
+                    )
+                })?;
+                rows += 1;
+                batches += 1;
+            }
         }
         Ok::<(), anyhow::Error>(())
     }

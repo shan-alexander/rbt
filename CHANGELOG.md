@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-27
+
+First-class **surrogate keys** (RBT-A16 / ADR-009): hash SKs + durable MIISK, SQL helpers,
+frontmatter stamp, and keyed_upsert integration.
+
+### Added (RBT-A16 / ADR-009 — surrogate keys + MIISK)
+
+- **SQL UDFs:** `sk(col, …)` (default blake3_128 binary), `surrogate_key(algo, col, …)`,
+  `sk_unknown()` / `surrogate_key_unknown(algo?)`; aliases `rbt_sk`, `rbt_surrogate_key`,
+  `rbt_sk_unknown`.
+- **Algos:** `balanced` (blake3_128, default), `fast64` (xxh3_64 → Int64), `safe256`
+  (blake3_256), `compat_md5`, **`integer` / MIISK** (durable NK→SK registry → Int64).
+- **MIISK registry:** `{project}/.rbt/sk_registry/{model}.parquet`; SK `0` reserved Unknown;
+  materialize-stamp only (not a pure SQL UDF).
+- **Bare `sk()` / `surrogate_key('algo')`:** compile-time expansion from frontmatter `grain`.
+- **Frontmatter stamp:** `surrogate_key:`, optional `surrogate_key_algo`,
+  `surrogate_key_encoding`, `unknown_member: true` (all-zero Unknown row).
+- **keyed_upsert × SK:** stamp after merge; compare default excludes `*_sk` / `_rbt_*`;
+  receipts include `rows_kept`.
+- **Bench:** `cargo bench -p rbt-datalake --bench surrogate_key`.
+- **Docs:** `docs/adr/ADR_009_SURROGATE_KEYS.md`.
+
 ## [0.11.0] — 2026-08-15
 
 RBT-C concurrent partition execution, Design B partition API, alias materialize,

@@ -232,11 +232,25 @@ impl ModelSpec {
             }
         }
 
-        let compiled_sql = match self.compiled_sql_override {
-            Some(c) => c,
-            None => SqlModelParser::compile_sql(&pure_sql, &self.catalog_prefix)
-                .with_context(|| format!("E_RBT_DAG_BUILDER: compile SQL for model '{name}'"))?,
+        let (mut compiled_sql, skip_sk_expand) = match self.compiled_sql_override {
+            Some(c) => (c, true), // tests / fully expanded SQL
+            None => (
+                SqlModelParser::compile_sql(&pure_sql, &self.catalog_prefix).with_context(|| {
+                    format!("E_RBT_DAG_BUILDER: compile SQL for model '{name}'")
+                })?,
+                false,
+            ),
         };
+        // ADR-009: expand bare sk() / surrogate_key('algo') from frontmatter grain.
+        if !skip_sk_expand {
+            let grain = frontmatter
+                .as_ref()
+                .and_then(|f| f.grain.as_ref())
+                .map(|g| g.as_slice())
+                .unwrap_or(&[]);
+            compiled_sql = crate::engine::surrogate_key::expand_sk_shorthands(&compiled_sql, grain)
+                .with_context(|| format!("E_RBT_DAG_BUILDER: SK expand for model '{name}'"))?;
+        }
 
         Ok(ModelNode {
             name,

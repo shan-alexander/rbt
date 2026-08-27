@@ -1,8 +1,8 @@
 //! # rbt
 //!
 //! **Data-engineering workflow engine** for medallion lakes: bronze files → silver/gold
-//! Parquet via SQL DAGs (DataFusion), with run scope, receipts, optional Iceberg-FS, and
-//! first-class **Rust model nodes** (Design B).
+//! Parquet via SQL DAGs (DataFusion), with run scope, receipts, optional Iceberg-FS,
+//! first-class **Rust model nodes** (Design B), and **surrogate keys** (hash + MIISK).
 //!
 //! Crate on crates.io: **`rbt-datalake`**. Import path and CLI binary: **`rbt`**.
 //!
@@ -17,7 +17,7 @@
 //! **Library**
 //! ```toml
 //! [dependencies]
-//! rbt-datalake = "0.10"
+//! rbt-datalake = "0.12"
 //! ```
 //!
 //! ## Quick start (library)
@@ -67,12 +67,19 @@
 //! ## Embed profile
 //!
 //! ```toml
-//! rbt-datalake = { version = "0.10", default-features = false, features = ["sql", "parquet"] }
+//! rbt-datalake = { version = "0.12", default-features = false, features = ["sql", "parquet"] }
 //! # optional: "iceberg", "jshift", "cli"
 //! ```
 //!
 //! Stack crates are re-exported as [`arrow`], [`parquet`], [`datafusion`] (and
 //! `iceberg` when enabled) so hosts share one monomorphic ABI.
+//!
+//! ## Surrogate keys (RBT-A16 / ADR-009)
+//!
+//! Built-in SQL: [`sk`](crate::engine::udf) / `surrogate_key(algo, …)` / `sk_unknown()`.
+//! Frontmatter: `surrogate_key:` + optional `surrogate_key_algo` (`balanced` default,
+//! `integer` for durable MIISK). Upsert matches on natural grain — never on SK.
+//! See [`SurrogateKeyConfig`], [`SkAlgo`], [`apply_surrogate_key`].
 //!
 //! ## Host UDFs (L1.5 / Design A)
 //!
@@ -165,6 +172,14 @@ pub use engine::rust_model::{
 pub use async_trait::async_trait;
 pub use engine::udf::{
     register_builtin_udfs, register_scalar_udf, register_udf_pack, UdfPack, BUILTIN_UDF_NAMES,
+};
+pub use engine::surrogate_key::{
+    apply_surrogate_key, expand_sk_shorthands, hash_batch_columns, hash_grain_fields,
+    stamp_batch_sk, unknown_array, unknown_digest, SkAlgo, SkEncoding, SurrogateKeyConfig,
+    SK_DOMAIN_PREFIX, SK_NULL_TOKEN,
+};
+pub use engine::sk_registry::{
+    assign_miisk_column, default_registry_path, grain_key, SkRegistry, MIISK_FIRST_SK,
 };
 
 pub use materializer::{

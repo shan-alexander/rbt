@@ -94,6 +94,9 @@ pub struct ModelRunResult {
     pub rows_updated: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_touched: Option<usize>,
+    /// Existing keys not in the incoming candidate batch (kept as-is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_kept: Option<usize>,
     /// Materialization strategy name (`table`, `scoped_replace`, …) when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialization: Option<String>,
@@ -125,6 +128,7 @@ impl ModelRunResult {
             rows_inserted: None,
             rows_updated: None,
             rows_touched: None,
+            rows_kept: None,
             materialization: None,
         }
     }
@@ -139,10 +143,17 @@ impl ModelRunResult {
         self
     }
 
-    pub fn with_upsert_stats(mut self, inserted: usize, updated: usize, touched: usize) -> Self {
+    pub fn with_upsert_stats(
+        mut self,
+        inserted: usize,
+        updated: usize,
+        touched: usize,
+        kept: usize,
+    ) -> Self {
         self.rows_inserted = Some(inserted);
         self.rows_updated = Some(updated);
         self.rows_touched = Some(touched);
+        self.rows_kept = Some(kept);
         self
     }
 }

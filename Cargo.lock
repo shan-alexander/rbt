@@ -912,6 +912,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -924,6 +925,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -3397,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "rbt-datalake"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3412,6 +3414,7 @@ dependencies = [
  "iceberg",
  "iceberg-datafusion",
  "jshift",
+ "md-5",
  "minijinja",
  "parquet",
  "petgraph 0.6.5",
@@ -3428,6 +3431,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4789,6 +4793,12 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "yoke"

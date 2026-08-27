@@ -8,7 +8,7 @@ members = [
 # Core product package + optional example host.
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["rbt contributors"]
@@ -45,3 +45,5 @@ futures = "0.3"
 tempfile = "3"
 blake3 = "1.5"
 sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+md-5 = "0.10"

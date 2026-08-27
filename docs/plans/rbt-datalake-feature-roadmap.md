@@ -529,20 +529,23 @@ inputs are exactly the grain-defining natural keys. Today rbt has optional `grai
 3. Collision policy is a non-issue for natural-key equality.  
 4. Kimball separates **identity** (NK / grain) from **surrogate** (SK for FKs).
 
-**Do generate optional surrogate SK** as `hash(grain values)` (blake3/fnv documented) when
-`surrogate_key: entity_sk` (or auto `*_sk`) is requested — for fact FK joins, not for
-upsert matching.
+**Do generate optional surrogate SK** (see **ADR-009**: default `balanced`/blake3_128;
+opt-in `fast64`, `safe256`, `compat_md5`, or durable **`integer`/MIISK** registry) when
+`surrogate_key: entity_sk` is requested — for fact FK joins, not for upsert matching.
+SQL: `sk(...)` / `surrogate_key(algo, …)` (hash algos); bare `sk()` expands from `grain`.
+MIISK is frontmatter stamp only (`surrogate_key_algo: integer`).
 
 ### Microtasks
 
 | ID | Task | Detail |
 |----|------|--------|
 | **RBT-A16.1** | Default unique_key ← grain | **Done** in A7 polish for `keyed_upsert`. |
-| **RBT-A16.2** | Validate grain ⊆ SQL schema | Compile/run check. |
-| **RBT-A16.3** | `surrogate_key:` frontmatter | Name of SK column to emit. |
-| **RBT-A16.4** | Deterministic SK function | `rbt_grain_sk(cols…)` UDF or materialize stamp; document algo + version prefix. |
-| **RBT-A16.5** | Unknown member | Optional SK=-1 / special row for dims (star rules). |
-| **RBT-A16.6** | Docs | Star-schema concept cross-link; never “unique_key is a random hash.” |
+| **RBT-A16.2** | Validate grain ⊆ SQL schema | Compile/run check (partial; stamp errors if grain cols missing). |
+| **RBT-A16.3** | `surrogate_key:` frontmatter | **Done** — stamps SK from grain (ADR-009). |
+| **RBT-A16.4** | Deterministic SK function | **Done** — `sk()` / `surrogate_key(algo, …)` + bare `sk()` grain expand; algos `balanced`/`fast64`/`safe256`/`compat_md5`/`integer` (MIISK registry). |
+| **RBT-A16.5** | Unknown member | **Done** — all-zeros sentinel + `sk_unknown()` + optional `unknown_member: true` row. |
+| **RBT-A16.6** | Docs | ADR-009 + star-schema cross-link; never “unique_key is a random hash.” |
+| **RBT-A16.7** | MIISK product | **Done** — durable `.rbt/sk_registry/{model}.parquet`; keyed_upsert stamps SK after merge. |
 
 ### Acceptance
 

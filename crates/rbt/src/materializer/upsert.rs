@@ -123,6 +123,9 @@ impl UpsertConfig {
     }
 
     /// Resolve compare columns against a schema (default = all non-key non-touch fields).
+    ///
+    /// Default excludes lineage `_rbt_*` columns and common SK suffixes (`*_sk`) so
+    /// surrogate-key stamps do not force updates (ADR-009 / RBT-A7 polish).
     pub fn resolve_compare_columns(&self, schema: &Schema) -> Result<Vec<String>> {
         if let Some(ref explicit) = self.compare_columns {
             for c in explicit {
@@ -140,7 +143,20 @@ impl UpsertConfig {
             .fields()
             .iter()
             .map(|f| f.name().clone())
-            .filter(|n| !key.contains(n.as_str()) && !touch.contains(n.as_str()))
+            .filter(|n| {
+                if key.contains(n.as_str()) || touch.contains(n.as_str()) {
+                    return false;
+                }
+                // Lineage stamps
+                if n.starts_with("_rbt_") {
+                    return false;
+                }
+                // Conventional SK column names (entity_sk, symbol_sk, …)
+                if n.ends_with("_sk") || n == "sk" {
+                    return false;
+                }
+                true
+            })
             .collect())
     }
 
@@ -759,11 +775,24 @@ pub fn materialize_keyed_upsert(
     };
 
     let result = upsert_batches(&existing_batch, &incoming_batch, cfg)?;
-    let out_batches = vec![result.batch];
+    // ADR-009 / A16: stamp SK (+ optional Unknown) after merge — hash or MIISK registry.
+    let mut out_batch = result.batch;
+    if let Some(ref sk) = opts.surrogate_key {
+        out_batch = crate::engine::surrogate_key::apply_surrogate_key(&out_batch, sk)
+            .with_context(|| {
+                format!(
+                    "E_RBT_SK: keyed_upsert stamp '{}' failed",
+                    sk.column
+                )
+            })?;
+    }
+    let mut stats = result.stats;
+    stats.total_rows = out_batch.num_rows();
+    let out_batches = vec![out_batch];
 
     let validation = if assertions.is_empty() {
         ValidationResult {
-            total_rows: result.stats.total_rows,
+            total_rows: stats.total_rows,
             passed_assertions: 0,
             failed_assertions: 0,
             errors: Vec::new(),
@@ -789,7 +818,7 @@ pub fn materialize_keyed_upsert(
             bytes_written: bytes,
             validation,
         },
-        result.stats,
+        stats,
     ))
 }
 
@@ -798,6 +827,7 @@ mod tests {
     use super::*;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use crate::engine::surrogate_key::{SkAlgo, SkEncoding, SurrogateKeyConfig};
 
     fn batch_entities(rows: &[(&str, &str, &str)]) -> RecordBatch {
         // entity_id, attr, last_seen
@@ -999,5 +1029,102 @@ mod tests {
         };
         let r = upsert_batches(&existing, &incoming, &cfg).unwrap();
         assert_eq!(r.stats.rows_touched, 1);
+    }
+
+    #[test]
+    fn keyed_upsert_stamps_miisk_and_reuses_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dim.parquet");
+        let reg = dir.path().join("sk_registry").join("dim.parquet");
+        let incoming = batch_entities(&[("a", "x", "d1"), ("b", "y", "d1")]);
+        let sk = SurrogateKeyConfig {
+            column: "entity_sk".into(),
+            algo: SkAlgo::Integer,
+            encoding: SkEncoding::Binary,
+            grain_cols: vec!["entity_id".into()],
+            unknown_member: false,
+            registry_path: Some(reg.clone()),
+        };
+        let opts = MaterializeWriteOptions::default().with_surrogate_key(sk.clone());
+        let (_stats, u1) =
+            materialize_keyed_upsert(&dest, &[incoming], &cfg(), &opts, &[]).unwrap();
+        assert_eq!(u1.rows_inserted, 2);
+        let loaded = load_parquet_batches(&dest).unwrap();
+        let batch = &loaded[0];
+        let sk_idx = batch.schema().index_of("entity_sk").unwrap();
+        let sks = batch
+            .column(sk_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert!(sks.values().contains(&1));
+        assert!(sks.values().contains(&2));
+        assert!(!sks.values().contains(&0));
+
+        // Second run: update a, insert c — a/b keep SKs from registry
+        let incoming2 = batch_entities(&[("a", "x2", "d2"), ("c", "z", "d2")]);
+        let (_s2, u2) =
+            materialize_keyed_upsert(&dest, &[incoming2], &cfg(), &opts, &[]).unwrap();
+        assert_eq!(u2.rows_inserted, 1);
+        assert_eq!(u2.rows_updated, 1);
+        assert_eq!(u2.rows_kept, 1); // b kept
+        let loaded2 = load_parquet_batches(&dest).unwrap();
+        let b2 = &loaded2[0];
+        let sk_idx = b2.schema().index_of("entity_sk").unwrap();
+        let sks2 = b2
+            .column(sk_idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let e_idx = b2.schema().index_of("entity_id").unwrap();
+        let ents = b2
+            .column(e_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let mut map = std::collections::HashMap::new();
+        for i in 0..b2.num_rows() {
+            if ents.is_null(i) {
+                continue;
+            }
+            map.insert(ents.value(i).to_string(), sks2.value(i));
+        }
+        assert_eq!(map.get("a"), Some(&1));
+        assert_eq!(map.get("b"), Some(&2));
+        assert_eq!(map.get("c"), Some(&3));
+        assert!(reg.is_file());
+
+        // Unknown member: ensure single zero SK row when requested
+        let mut sk_unk = sk.clone();
+        sk_unk.unknown_member = true;
+        let opts_unk = MaterializeWriteOptions::default().with_surrogate_key(sk_unk);
+        let incoming3 = batch_entities(&[("a", "x2", "d3")]);
+        let _ = materialize_keyed_upsert(&dest, &[incoming3], &cfg(), &opts_unk, &[]).unwrap();
+        let loaded3 = load_parquet_batches(&dest).unwrap();
+        let b3 = &loaded3[0];
+        let sks3 = b3
+            .column(b3.schema().index_of("entity_sk").unwrap())
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let zeros = sks3.values().iter().filter(|&&v| v == 0).count();
+        assert_eq!(zeros, 1);
+    }
+
+    #[test]
+    fn default_compare_excludes_sk_suffix() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity_id", DataType::Utf8, true),
+            Field::new("attr", DataType::Utf8, true),
+            Field::new("entity_sk", DataType::Int64, true),
+            Field::new("_rbt_run_id", DataType::Utf8, true),
+        ]));
+        let cfg = UpsertConfig {
+            unique_key: vec!["entity_id".into()],
+            touch_columns: vec![],
+            compare_columns: None,
+        };
+        let cols = cfg.resolve_compare_columns(&schema).unwrap();
+        assert_eq!(cols, vec!["attr".to_string()]);
     }
 }

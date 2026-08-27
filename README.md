@@ -2,7 +2,7 @@
 
 **Medallion SQL DAGs** for filesystem / object-storage lakes: bronze files → silver → gold, with dbt-shaped models, frontmatter contracts, and in-process DataFusion execution.
 
-> **Status:** **`0.11.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, RBT-C WorkUnits/`--jobs`, scoped_replace, keyed_upsert, alias materialize, bronze register reuse, receipts/`--json`, fingerprints, consolidate. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` (+ `execute_partition`).
+> **Status:** **`0.12.0`.** One package: **library + CLI binary `rbt`** (`rbt-datalake` on crates.io). Medallion **SQL + Rust** DAGs: bronze → silver/gold Parquet (DataFusion), multi-value run scope, RBT-C WorkUnits/`--jobs`, scoped_replace, keyed_upsert, **surrogate keys** (hash + MIISK), alias materialize, bronze register reuse, receipts/`--json`, fingerprints, consolidate. **Embeddable** via feature flags, `DagBuilder`, lake `ops`, host UDFs, bronze adapters, and **Design B** `RustModel` (+ `execute_partition`).
 
 ## Why rbt
 
@@ -25,14 +25,15 @@ rbt --help
 
 ```toml
 [dependencies]
-rbt-datalake = "0.11"
+rbt-datalake = "0.12"
 # embed-only (no Iceberg catalog / no CLI binary):
-# rbt-datalake = { version = "0.11", default-features = false, features = ["sql", "parquet"] }
+# rbt-datalake = { version = "0.12", default-features = false, features = ["sql", "parquet"] }
 ```
 
 ```rust
 use rbt::{DagBuilder, ModelSpec, RbtProjectConfig, RustModel}; // lib name is still `rbt`
 // also: rbt::arrow / rbt::datafusion, ops::plan_skip, BronzeAdapter, UdfPack, …
+// SK: sk() / surrogate_key() builtins; SurrogateKeyConfig / SkAlgo for stamps
 // ModelSpec defaults to empty catalog_prefix (ref('x') → bare table x)
 ```
 
@@ -85,7 +86,7 @@ bash scripts/smoke.sh              # CI baseline (smoke_fixture)
 bash scripts/smoke_feat_a1_a7.sh   # multi-value + scoped_replace + keyed_upsert demos
 ```
 
-## Library embed (0.11 / L1 + Design B + RBT-C)
+## Library embed (0.12 / L1 + Design B + RBT-C + SK)
 
 Full guide: **[docs/EMBEDDING.md](docs/EMBEDDING.md)** (single-ABI rule + workspace recipe + `catalog_prefix`).
 
@@ -240,6 +241,61 @@ rbt measure -p examples/entity_registry --scenario entity_registry_upsert
 
 Pattern: **stg event log → tf latest candidates → dim keyed_upsert**.  
 Peers absent from candidates are **kept** (unlike full `table` refresh).
+
+### Surrogate keys (**A16** / [ADR-009](docs/adr/ADR_009_SURROGATE_KEYS.md))
+
+Stable FK-facing keys from natural **grain**. Upsert still matches on NK — never on SK.
+
+```yaml
+grain: [entity_id]
+surrogate_key: entity_sk
+# optional:
+surrogate_key_algo: balanced   # default blake3_128 binary
+# surrogate_key_algo: integer  # durable MIISK Int64 (.rbt/sk_registry/)
+# surrogate_key_algo: fast64   # xxh3→Int64 when distinct N is bounded
+unknown_member: true           # all-zero Unknown row (SK = 0)
+```
+
+```sql
+-- Explicit columns, or bare sk() when grain: is set (compile expands grain cols)
+SELECT entity_id, sk() AS entity_sk, status
+FROM {{ ref('tf_entity_latest') }}
+
+-- Fact FK fallback
+SELECT f.*, COALESCE(d.entity_sk, sk_unknown()) AS entity_sk
+FROM {{ ref('stg_events') }} f
+LEFT JOIN {{ ref('dim_entity') }} d USING (entity_id)
+```
+
+| Algo | Output | When |
+|------|--------|------|
+| `balanced` (default) | `FixedSizeBinary(16)` | Safe default, no registry |
+| `integer` / MIISK | `Int64` | Fastest joins; durable registry |
+| `fast64` | `Int64` | Hash Int64; keep distinct N ≲ ~1e7 |
+| `safe256` / `compat_md5` | binary 32 / 16 | Paranoia / dbt parity |
+
+```bash
+# Criterion: generation + fact⋈dim join cost
+RBT_SK_BENCH_QUICK=1 cargo bench -p rbt-datalake --bench surrogate_key
+```
+
+**Indicative quick-bench medians** (100k hash rows; join dim 10k × fact 200k):
+
+| Generation | ~median |
+|------------|--------:|
+| `fast64` (xxh3 → Int64) | ~11.5 ms |
+| `blake3_128` binary | ~20.6 ms |
+| `blake3_128` hex | ~27.8 ms |
+| MIISK registry assign (product path; bench also has dense seq baseline) | see criterion HTML |
+
+| Join on SK | ~median |
+|------------|--------:|
+| MIISK / sequential Int64 | ~2.4 ms |
+| `fast64` Int64 | ~4.2 ms |
+| blake3 binary16 | ~5.6 ms |
+| blake3 hex Utf8 | ~8.3 ms |
+
+Prefer **binary** over hex; use **`integer`** when join width matters and you accept a project-local registry under `.rbt/sk_registry/`.
 
 ### Contracts registry (optional enums)
 

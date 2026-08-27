@@ -65,6 +65,8 @@ futures = { workspace = true }
 tempfile = { workspace = true }
 blake3 = { workspace = true }
 sha2 = { workspace = true }
+xxhash-rust = { workspace = true }
+md-5 = { workspace = true }
 
 # cli (optional)
 clap = { workspace = true, optional = true }
@@ -75,7 +77,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 
 [[bench]]
 name = "pipeline"
@@ -87,4 +89,8 @@ harness = false
 
 [[bench]]
 name = "design_b_sql_vs_rust"
+harness = false
+
+[[bench]]
+name = "surrogate_key"
 harness = false

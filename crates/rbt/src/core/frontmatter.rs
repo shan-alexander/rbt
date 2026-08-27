@@ -386,8 +386,22 @@ pub struct StagingFrontmatter {
     /// Logical grain of the model (e.g. `[symbol, timestamp_ns]`).
     #[serde(default)]
     pub grain: Option<Vec<String>>,
+    /// Optional surrogate-key column to stamp at materialize (ADR-009 / RBT-A16).
+    /// Requires [`Self::grain`]. Upsert still matches on grain / unique_key, not SK.
+    #[serde(default)]
+    pub surrogate_key: Option<String>,
+    /// Algo for [`Self::surrogate_key`] / bare `sk()` expansion default context.
+    /// Default: `balanced` (blake3_128). See ADR-009.
+    #[serde(default)]
+    pub surrogate_key_algo: Option<String>,
+    /// `binary` (default) or `hex` for digest algos (ignored for `fast64`).
+    #[serde(default)]
+    pub surrogate_key_encoding: Option<String>,
+    /// When true, append one all-zero Unknown member row on full-refresh table materialize.
+    #[serde(default)]
+    pub unknown_member: Option<bool>,
     /// Primary uniqueness contract (usually same as grain for staging facts).
-    /// Required (non-empty) for `materialization: keyed_upsert` (RBT-A7).
+    /// For `keyed_upsert`, defaults to `grain` when omitted (RBT-A7).
     #[serde(default)]
     pub unique_key: Option<Vec<String>>,
     /// Columns updated on touch-only upserts when compare attrs are unchanged (RBT-A7).

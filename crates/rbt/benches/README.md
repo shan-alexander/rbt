@@ -18,6 +18,10 @@ cargo bench -p rbt-datalake --bench pipeline -- compile
 cargo bench -p rbt-datalake --bench downstream_ref -- decision
 cargo bench -p rbt-datalake --bench downstream_ref -- query/count_star
 RBT_BENCH_FULL=0 cargo bench -p rbt-datalake --bench pipeline   # skip 9-model e2e
+
+# Surrogate keys (ADR-009): generation + join cost
+cargo bench -p rbt-datalake --bench surrogate_key
+RBT_SK_BENCH_QUICK=1 cargo bench -p rbt-datalake --bench surrogate_key
 ```
 
 HTML reports: `target/criterion/report/index.html`.
@@ -30,8 +34,35 @@ HTML reports: `target/criterion/report/index.html`.
 | `pipeline` e2e / bronze | `examples/full_e2e_rbt_example/lake/bronze` |
 | `downstream_ref` synthetic | generated Arrow → temp Parquet |
 | `downstream_ref` e2e_lake | first available e2e silver/gold Parquet |
+| `surrogate_key` | synthetic grain rows; MemTable fact⋈dim joins |
 
 E2e groups **skip** if bronze/outputs are absent.
+
+## Baseline — surrogate keys (`surrogate_key`, 2026-08-27, `RBT_SK_BENCH_QUICK=1`)
+
+Machine: same class as other benches. Quick sizes: gen 100k rows; join dim 10k × fact 200k.
+
+### Generation (median)
+
+| Variant | 100k rows |
+|---------|----------:|
+| `fast64` (xxh3 → Int64) | **~11.5 ms** |
+| `blake3_128` binary | **~20.6 ms** |
+| `blake3_128` hex | **~27.8 ms** |
+| `blake3_256` binary | **~20.4 ms** |
+| `md5_128` binary | **~27.3 ms** |
+| MIISK sequential assign (bench baseline; product uses durable registry) | **~20 µs** |
+
+### Join `fact ⋈ dim` on SK (median)
+
+| SK type | ~median |
+|---------|--------:|
+| MIISK Int64 | **~2.4 ms** |
+| fast64 Int64 | **~4.2 ms** |
+| blake3_128 binary16 | **~5.6 ms** |
+| blake3_128 hex Utf8 | **~8.3 ms** |
+
+Takeaway: prefer **binary** over hex; `fast64` wins when N is bounded; default `balanced` binary is close on joins and far safer at scale. Full sizes: omit `RBT_SK_BENCH_QUICK`.
 
 ## Baseline — pipeline (2026-07-31)
 

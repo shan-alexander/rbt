@@ -2,7 +2,9 @@
 
 pub mod bronze;
 pub mod rust_model;
+pub mod sk_registry;
 pub mod stages;
+pub mod surrogate_key;
 pub mod udf;
 
 use crate::core::dag::{Materialization, ModelDag, ModelKind, ModelNode, OutputFormat};
@@ -26,7 +28,7 @@ use crate::materializer::{
     alias_ref_path, consolidate_parts_to_parquet, incremental_ref_path, load_parquet_batches,
     materialize_alias, materialize_incremental_append_stream, materialize_keyed_upsert,
     materialize_scoped_replace_stream, materialize_scoped_replace_stream_with,
-    materialize_table_parts_only_stream, part_is_clean, parts_dir_for_parquet,
+    materialize_table_parts_only_stream, part_is_clean,
     resolve_alias_upstream, resolve_part_keys, resolve_parts_layout, scope_part_id,
     table_layout_root, upstream_lake_path, uses_parts_directory, materialize_stream, new_wap_run_id,
     sibling_iceberg_dir, stamp_batch, wap_publish, write_empty_parquet, write_parquet_batches_atomic,
@@ -439,7 +441,18 @@ impl TransformationEngine {
             }
             Materialization::Table => {
                 match prepared {
-                    Out::Batches(batches) => {
+                    Out::Batches(mut batches) => {
+                        if let Some(ref sk) = write_opts.surrogate_key {
+                            for b in &mut batches {
+                                *b = crate::engine::surrogate_key::apply_surrogate_key(b, sk)
+                                    .with_context(|| {
+                                        format!(
+                                            "E_RBT_SK: Rust model '{}' SK stamp failed",
+                                            model.name
+                                        )
+                                    })?;
+                            }
+                        }
                         let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
                         if rows == 0 {
                             write_empty_parquet(declared, write_path, write_opts).with_context(
@@ -1408,6 +1421,15 @@ impl TransformationEngine {
                     {
                         write_opts = write_opts.with_declared_schema(schema);
                     }
+                    // ADR-009 / RBT-A16: optional SK stamp from grain (hash or MIISK registry)
+                    if let Some(sk) = crate::engine::surrogate_key::SurrogateKeyConfig::from_frontmatter(fm)
+                        .with_context(|| {
+                            format!("E_RBT_SK: model '{}' surrogate_key config", model.name)
+                        })?
+                    {
+                        let sk = sk.with_registry_for_model(project_dir, &model.name);
+                        write_opts = write_opts.with_surrogate_key(sk);
+                    }
                 }
                 let mode = materialize.effective_mode();
 
@@ -1952,6 +1974,7 @@ impl TransformationEngine {
                         u.rows_inserted,
                         u.rows_updated,
                         u.rows_touched,
+                        u.rows_kept,
                     );
                 }
                 model_results.push(mrr);
@@ -2815,6 +2838,14 @@ impl TransformationEngine {
                             model: model.name.clone(),
                             bronze_fingerprint: Some(fp.clone()),
                         });
+                    }
+                    if let Some(fm) = model.frontmatter.as_ref() {
+                        if let Some(sk) =
+                            crate::engine::surrogate_key::SurrogateKeyConfig::from_frontmatter(fm)?
+                        {
+                            write_opts = write_opts
+                                .with_surrogate_key(sk.with_registry_for_model(&project_dir, &model.name));
+                        }
                     }
 
                     let rows = if model.kind == ModelKind::Rust {

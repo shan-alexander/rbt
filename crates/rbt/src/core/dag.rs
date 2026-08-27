@@ -257,7 +257,15 @@ impl ModelDag {
         let (frontmatter, pure_sql) = SqlModelParser::parse_frontmatter(raw_sql)
             .map_err(|e| anyhow::anyhow!("model '{}': {}", name, e))?;
         let dependencies = SqlModelParser::extract_dependencies(&pure_sql)?;
-        let compiled_sql = SqlModelParser::compile_sql(&pure_sql, catalog_prefix)?;
+        let mut compiled_sql = SqlModelParser::compile_sql(&pure_sql, catalog_prefix)?;
+        // ADR-009: expand bare sk() / surrogate_key('algo') from frontmatter grain.
+        let grain = frontmatter
+            .as_ref()
+            .and_then(|f| f.grain.as_ref())
+            .map(|g| g.as_slice())
+            .unwrap_or(&[]);
+        compiled_sql = crate::engine::surrogate_key::expand_sk_shorthands(&compiled_sql, grain)
+            .map_err(|e| anyhow::anyhow!("model '{}': {}", name, e))?;
         let layer = ModelLayer::from_name(&name);
         let description = frontmatter.as_ref().and_then(|f| f.description.clone());
         // Frontmatter materialization overrides the positional default when set.

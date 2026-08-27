@@ -52,7 +52,7 @@ Layers: **sources → stage (`stg_*`) → transforms (`tf_*`) → dimensions (`d
 - Keep **facts thin**: assemble dimension foreign keys + measures, apply fact-grain measures, and carry through flags already computed upstream.
 - Keep **dimensions descriptive**: surrogate key, natural key, and attributes only.
 - Resolve a fact's FK to a dimension by joining the dimension on its natural key and selecting the dimension's surrogate key (with an Unknown-member fallback). Surrogate-key assembly is legitimately the fact's job.
-- Every dimension must contain an Unknown member (typically surrogate key -1). Fact FK resolution must never emit NULL surrogate keys — always fall back to the Unknown member.
+- Every dimension must contain an Unknown member. Classic Kimball integer SKs often use **-1**; **rbt hash SKs** (ADR-009) use the **all-zeros** sentinel (`0` / zero digest / `sk_unknown()`). Fact FK resolution must never emit NULL surrogate keys — always fall back to the Unknown member (`COALESCE(dim.sk, sk_unknown())`).
 
 **Never**
 - Put a deduplication window, multi-source identity collapse, or heavy cleansing on a fact. That is transform work.
